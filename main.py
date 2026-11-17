@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
@@ -177,15 +178,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text(f"မှားယွင်းမှု ဖြစ်ပေါ်သွားပါသည်: {str(e)}")
 
 
-def main():
-    # Render အတွက် Background မှာ Health Check Server ကို ဖွင့်ထားခြင်း
-    threading.Thread(target=run_health_server, daemon=True).start()
-
+# --- Async Main Function for Proper Event Loop handling ---
+async def main_async():
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
     print("🤖 All-in-One Telegram AI Agent စတင် အလုပ်လုပ်နေပါပြီ...")
-    application.run_polling()
+
+    # Initialize and start polling cleanly with async/await
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+
+    # Keep the application running until stopped
+    stop_event = asyncio.Event()
+    await stop_event.wait()
+
+
+def main():
+    # Background မှာ Render အတွက် Health Check Server ကို ဖွင့်ထားခြင်း
+    threading.Thread(target=run_health_server, daemon=True).start()
+
+    # Event Loop Error မတက်အောင် asyncio.run ဖြင့် သေချာ စတင်ခြင်း
+    try:
+        asyncio.run(main_async())
+    except (KeyboardInterrupt, SystemExit):
+        pass
 
 
 if __name__ == "__main__":
