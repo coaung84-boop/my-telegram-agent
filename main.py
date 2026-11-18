@@ -1,12 +1,12 @@
 import os
 import logging
-import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from google import genai
 from google.genai import types
+from groq import Groq
 from database import supabase
 from dotenv import load_dotenv
 
@@ -14,7 +14,10 @@ load_dotenv()
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
+# AI Clients Initialization
 gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("MY_TELEGRAM_USER_ID", "0"))
 
@@ -24,7 +27,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Telegram AI Agent is running!")
+        self.wfile.write(b"Telegram AI Agent with Groq+Qwen & Gemini Fallback is running!")
 
 
 def run_health_server():
@@ -32,6 +35,59 @@ def run_health_server():
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
+
+# --- 3-Tier AI Fallback Helper (Groq Llama 8B -> Groq Llama 3.3 -> Gemini) ---
+def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
+    # 1st Attempt: Groq (Llama 3.1 8B Instant) - အမြန်ဆုံးနှင့် 503 Error အကင်းဆုံး
+    try:
+        completion = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "သင်သည် မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေဆိုပေးသော AI Assistant ဖြစ်သည်။"},
+                {"role": "user", "content": prompt_text}
+            ],
+            temperature=0.1,
+        )
+        if completion and completion.choices[0].message.content:
+            return completion.choices[0].message.content
+    except Exception as e:
+        print(f"Groq Llama 8B failed: {e}. Trying Llama 3.3...")
+
+    # 2nd Attempt: Groq (Llama 3.3 - 70b)
+    try:
+        completion = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": "သင်သည် မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေဆိုပေးသော AI Assistant ဖြစ်သည်။"},
+                {"role": "user", "content": prompt_text}
+            ],
+            temperature=0.1,
+        )
+        if completion and completion.choices[0].message.content:
+            return completion.choices[0].message.content
+    except Exception as e:
+        print(f"Groq Llama 70b failed: {e}. Switching to Gemini Fallback...")
+
+    # 3rd Attempt: Gemini Flash (Last Resort)
+    try:
+        if image_bytes:
+            contents = [
+                types.Part.from_bytes(data=bytes(image_bytes), mime_type=mime_type or 'image/jpeg'),
+                prompt_text
+            ]
+        else:
+            contents = prompt_text
+
+        response = gemini_client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=contents
+        )
+        if response and response.text:
+            return response.text
+    except Exception as e:
+        print(f"Gemini also failed: {e}")
+
+    return "ဆာဗာများ အလွန်အမင်း တင်ကျပ်နေပါသဖြင့် ခဏနေမှ ထပ်မံ ကြိုးစားပေးပါခင်ဗျာ။"
 
 # --- 1. Supabase Tools (Functions) for Personal Tasks ---
 def add_task(title: str) -> dict:
@@ -75,12 +131,8 @@ def get_group_report() -> str:
     {raw_text}
     """
 
-    response = gemini_client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=prompt
-    )
+    report_text = call_ai_with_3tier_fallback(prompt)
 
-    report_text = response.text
     supabase.table("daily_reports").insert({"report_content": report_text}).execute()
 
     for l in logs:
@@ -109,27 +161,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif message.photo:
             photo_file = await message.photo[-1].get_file()
             photo_bytes = await photo_file.download_as_bytearray()
-            img_res = gemini_client.models.generate_content(
-                model='gemini-3.8-flash',
-                contents=[
-                    types.Part.from_bytes(data=bytes(photo_bytes), mime_type='image/jpeg'),
-                    "ဒီပုံထဲမှာ ပါဝင်တဲ့ အဓိက အချက်အလက်များ၊ စာသားများ သို့မဟုတ် လုပ်ငန်းဆိုင်ရာ အခြေအနေများကို အတိုချုံး ဖော်ပြပေးပါ။"
-                ]
-            )
-            content_summary = f"[ပုံပါဖိုင်] {img_res.text}"
+            img_prompt = "ဒီပုံထဲမှာ ပါဝင်တဲ့ အဓိက အချက်အလက်များ၊ စာသားများ သို့မဟုတ် လုပ်ငန်းဆိုင်ရာ အခြေအနေများကို အတိုချုံး ဖော်ပြပေးပါ။"
+            img_summary = call_ai_with_3tier_fallback(img_prompt, image_bytes=photo_bytes, mime_type='image/jpeg')
+            content_summary = f"[ပုံပါဖိုင်] {img_summary}"
 
         elif message.document:
             doc_file = await message.document.get_file()
             doc_bytes = await doc_file.download_as_bytearray()
-            doc_res = gemini_client.models.generate_content(
-                model='gemini-3.8-flash',
-                contents=[
-                    types.Part.from_bytes(data=bytes(doc_bytes),
-                                          mime_type=message.document.mime_type or 'application/pdf'),
-                    "ဒီဖိုင်ထဲပါတဲ့ အဓိက အကြောင်းအရာနဲ့ အရေးကြီးတဲ့ အချက်တွေကို အနှစ်ချုပ်ပေးပါ။"
-                ]
-            )
-            content_summary = f"[စာရွက်စာတမ်း: {message.document.file_name}] {doc_res.text}"
+            doc_prompt = "ဒီဖိုင်ထဲပါတဲ့ အဓိက အကြောင်းအရာနဲ့ အရေးကြီးတဲ့ အချက်တွေကို အနှစ်ချုပ်ပေးပါ။"
+            doc_summary = call_ai_with_3tier_fallback(doc_prompt, image_bytes=doc_bytes,
+                                                      mime_type=message.document.mime_type or 'application/pdf')
+            content_summary = f"[စာရွက်စာတမ်း: {message.document.file_name}] {doc_summary}"
 
         if content_summary:
             supabase.table("raw_logs").insert({
@@ -153,57 +195,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
 
         try:
-            agent_tools = [add_task, list_tasks, update_task_status, get_group_report]
-            system_instruction = """
-            သင်သည် ကိုယ်ပိုင် အလုပ်အမှုဆောင်နှင့် လုပ်ငန်းသုံး Group Report များကို စီမံပေးသော AI Agent ဖြစ်သည်။
-            - Personal Task များနှင့် ပတ်သက်လျှင် add_task, list_tasks, update_task_status များကို သုံးပါ။
-            - Group Report တောင်းပါက get_group_report tool ကို ခေါ်သုံးပါ။
-            - အဖြေများကို မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေကြားပါ။
-            """
+            if "report" in user_message.lower() or "အနှစ်ချုပ်" in user_message:
+                reply_text = get_group_report()
+            elif "task" in user_message.lower() or "လုပ်စရာ" in user_message or "ထည့်" in user_message:
+                add_task(user_message)
+                reply_text = f"Task အသစ် ထည့်သွင်းပြီးပါပြီ: {user_message}"
+            elif "စာရင်း" in user_message or "list" in user_message.lower():
+                tasks = list_tasks()
+                reply_text = "လက်ရှိ Task များ:\n" + "\n".join(
+                    [f"- ID {t['id']}: {t['title']} ({t['status']})" for t in tasks]) if tasks else "Task မရှိသေးပါ။"
+            else:
+                system_prompt = "သင်သည် ကိုယ်ပိုင် အလုပ်အမှုဆောင် AI Assistant ဖြစ်သည်။ မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေကြားပါ။\nသုံးစွဲသူ၏ မေးခွန်း: "
+                reply_text = call_ai_with_3tier_fallback(system_prompt + user_message)
 
-            response = gemini_client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=user_message,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    tools=agent_tools,
-                    temperature=0.1,
-                ),
-            )
-
-            reply_text = response.text if response.text else "လုပ်ဆောင်မှု ပြီးစီးပါပြီ။"
             await message.reply_text(reply_text)
 
         except Exception as e:
             await message.reply_text(f"မှားယွင်းမှု ဖြစ်ပေါ်သွားပါသည်: {str(e)}")
 
 
-# --- Async Main Function for Proper Event Loop handling ---
-async def main_async():
+def main():
+    threading.Thread(target=run_health_server, daemon=True).start()
+
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-    print("🤖 All-in-One Telegram AI Agent စတင် အလုပ်လုပ်နေပါပြီ...")
-
-    # Initialize and start polling cleanly with async/await
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-
-    # Keep the application running until stopped
-    stop_event = asyncio.Event()
-    await stop_event.wait()
-
-
-def main():
-    # Background မှာ Render အတွက် Health Check Server ကို ဖွင့်ထားခြင်း
-    threading.Thread(target=run_health_server, daemon=True).start()
-
-    # Event Loop Error မတက်အောင် asyncio.run ဖြင့် သေချာ စတင်ခြင်း
-    try:
-        asyncio.run(main_async())
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    print("🤖 Groq + Qwen & Gemini Fallback Telegram Bot စတင် အလုပ်လုပ်နေပါပြီ...")
+    application.run_polling()
 
 
 if __name__ == "__main__":
