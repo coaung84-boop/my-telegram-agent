@@ -39,9 +39,11 @@ def run_health_server():
     server.serve_forever()
 
 
-# --- 3-Tier AI Fallback Helper (Gemini 3.8 -> Groq -> OpenRouter) ---
+# --- 3-Tier AI Fallback Helper (Gemini 3.5 -> Groq -> OpenRouter Free) ---
 def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
-    # 1st Attempt: Gemini 3.8 Flash
+    errors = []
+
+    # 1st Attempt: Gemini 3.5 Flash
     try:
         if image_bytes:
             contents = [
@@ -52,21 +54,20 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
             contents = prompt_text
 
         response = gemini_client.models.generate_content(
-            model="gemini-3.8-flash",
+            model="gemini-3.5-flash",
             contents=contents
         )
         if response and response.text:
             return response.text
     except Exception as e:
-        print(f"Gemini 3.8 failed: {e}. Trying Groq secondary model...")
+        errors.append(f"1. Gemini Error: {str(e)}")
 
-    # 2nd Attempt: Groq (Llama 3.1 8B Instant)
+    # 2nd Attempt: Groq (Llama 3.3 70B)
     try:
         completion = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system",
-                 "content": "သင်သည် မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေဆိုပေးသော AI Assistant ဖြစ်သည်။"},
+                {"role": "system", "content": "သင်သည် မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေဆိုပေးသော AI Assistant ဖြစ်သည်။"},
                 {"role": "user", "content": prompt_text}
             ],
             temperature=0.1,
@@ -74,31 +75,32 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
         if completion and completion.choices[0].message.content:
             return completion.choices[0].message.content
     except Exception as e:
-        print(f"Groq failed: {e}. Switching to OpenRouter backup...")
+        errors.append(f"2. Groq Error: {str(e)}")
 
-    # 3rd Attempt: OpenRouter (Backup)
+    # 3rd Attempt: OpenRouter (Free Model)
     try:
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
             "Content-Type": "application/json",
         }
         data = {
-            "model": "deepseek/deepseek-chat",  # လိုအပ်ပါက OpenRouter ၏ အခြား Model သို့ ပြောင်းနိုင်သည်
+            "model": "meta-llama/llama-3.3-70b-instruct:free",
             "messages": [
-                {"role": "system",
-                 "content": "သင်သည် မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေဆိုပေးသော AI Assistant ဖြစ်သည်။"},
+                {"role": "system", "content": "သင်သည် မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေဆိုပေးသော AI Assistant ဖြစ်သည်။"},
                 {"role": "user", "content": prompt_text}
             ]
         }
-        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data,
-                                 timeout=15)
+        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=15)
         res_json = response.json()
         if "choices" in res_json and len(res_json["choices"]) > 0:
             return res_json["choices"][0]["message"]["content"]
+        else:
+            errors.append(f"3. OpenRouter Response: {res_json}")
     except Exception as e:
-        print(f"OpenRouter also failed: {e}")
+        errors.append(f"3. OpenRouter Error: {str(e)}")
 
-    return "ဆာဗာများ အလွန်အမင်း တင်ကျပ်နေပါသဖြင့် ခဏနေမှ ထပ်မံ ကြိုးစားပေးပါခင်ဗျာ。"
+    # ၃ ခုစလုံး Fail ဖြစ်ခဲ့ရင် ဘာကြောင့် Fail ဖြစ်လဲဆိုတဲ့ Error အစစ်ကို ပြန်ပို့ပေးမည်
+    return "API ၃ ခုစလုံး အလုပ်မလုပ်ပါ:\n\n" + "\n\n".join(errors)
 
 
 # --- 1. Supabase Tools (Functions) for Personal Tasks ---
