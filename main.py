@@ -2,6 +2,7 @@ import os
 import logging
 import threading
 import asyncio
+import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
@@ -18,6 +19,7 @@ logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s
 # AI Clients Initialization
 gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("MY_TELEGRAM_USER_ID", "0"))
@@ -28,7 +30,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Telegram AI Agent with Groq & Gemini Fallback is running!")
+        self.wfile.write(b"Telegram AI Agent with Gemini -> Groq -> OpenRouter Fallback is running!")
 
 
 def run_health_server():
@@ -37,9 +39,28 @@ def run_health_server():
     server.serve_forever()
 
 
-# --- 3-Tier AI Fallback Helper (Groq Llama 8B -> Groq Llama 3.3 -> Gemini) ---
+# --- 3-Tier AI Fallback Helper (Gemini 3.8 -> Groq -> OpenRouter) ---
 def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
-    # 1st Attempt: Groq (Llama 3.1 8B Instant) - အမြန်ဆုံးနှင့် 503 Error အကင်းဆုံး
+    # 1st Attempt: Gemini 3.8 Flash
+    try:
+        if image_bytes:
+            contents = [
+                types.Part.from_bytes(data=bytes(image_bytes), mime_type=mime_type or 'image/jpeg'),
+                prompt_text
+            ]
+        else:
+            contents = prompt_text
+
+        response = gemini_client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=contents
+        )
+        if response and response.text:
+            return response.text
+    except Exception as e:
+        print(f"Gemini 3.8 failed: {e}. Trying Groq secondary model...")
+
+    # 2nd Attempt: Groq (Llama 3.1 8B Instant)
     try:
         completion = groq_client.chat.completions.create(
             model="llama-3.1-8b-instant",
@@ -53,44 +74,31 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
         if completion and completion.choices[0].message.content:
             return completion.choices[0].message.content
     except Exception as e:
-        print(f"Groq Llama 8B failed: {e}. Trying Llama 3.3...")
+        print(f"Groq failed: {e}. Switching to OpenRouter backup...")
 
-    # 2nd Attempt: Groq (Llama 3.3 - 70b)
+    # 3rd Attempt: OpenRouter (Backup)
     try:
-        completion = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        data = {
+            "model": "deepseek/deepseek-chat",  # လိုအပ်ပါက OpenRouter ၏ အခြား Model သို့ ပြောင်းနိုင်သည်
+            "messages": [
                 {"role": "system",
                  "content": "သင်သည် မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေဆိုပေးသော AI Assistant ဖြစ်သည်။"},
                 {"role": "user", "content": prompt_text}
-            ],
-            temperature=0.1,
-        )
-        if completion and completion.choices[0].message.content:
-            return completion.choices[0].message.content
-    except Exception as e:
-        print(f"Groq Llama 70b failed: {e}. Switching to Gemini Fallback...")
-
-    # 3rd Attempt: Gemini Flash (Last Resort)
-    try:
-        if image_bytes:
-            contents = [
-                types.Part.from_bytes(data=bytes(image_bytes), mime_type=mime_type or 'image/jpeg'),
-                prompt_text
             ]
-        else:
-            contents = prompt_text
-
-        response = gemini_client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=contents
-        )
-        if response and response.text:
-            return response.text
+        }
+        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data,
+                                 timeout=15)
+        res_json = response.json()
+        if "choices" in res_json and len(res_json["choices"]) > 0:
+            return res_json["choices"][0]["message"]["content"]
     except Exception as e:
-        print(f"Gemini also failed: {e}")
+        print(f"OpenRouter also failed: {e}")
 
-    return "ဆာဗာများ အလွန်အမင်း တင်ကျပ်နေပါသဖြင့် ခဏနေမှ ထပ်မံ ကြိုးစားပေးပါခင်ဗျာ။"
+    return "ဆာဗာများ အလွန်အမင်း တင်ကျပ်နေပါသဖြင့် ခဏနေမှ ထပ်မံ ကြိုးစားပေးပါခင်ဗျာ。"
 
 
 # --- 1. Supabase Tools (Functions) for Personal Tasks ---
@@ -219,13 +227,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def main_async():
-    # Render အတွက် Background မှာ Health Check Server ကို ဖွင့်ထားခြင်း
     threading.Thread(target=run_health_server, daemon=True).start()
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-    print("🤖 Groq Llama & Gemini Fallback Telegram Bot စတင် အလုပ်လုပ်နေပါပြီ...")
+    print("🤖 Gemini -> Groq -> OpenRouter Telegram Bot စတင် အလုပ်လုပ်နေပါပြီ...")
 
     await application.initialize()
     await application.start()
