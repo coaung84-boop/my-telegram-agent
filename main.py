@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
@@ -27,7 +28,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Telegram AI Agent with Groq+Qwen & Gemini Fallback is running!")
+        self.wfile.write(b"Telegram AI Agent with Groq & Gemini Fallback is running!")
 
 
 def run_health_server():
@@ -43,7 +44,8 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
         completion = groq_client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content": "သင်သည် မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေဆိုပေးသော AI Assistant ဖြစ်သည်။"},
+                {"role": "system",
+                 "content": "သင်သည် မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေဆိုပေးသော AI Assistant ဖြစ်သည်။"},
                 {"role": "user", "content": prompt_text}
             ],
             temperature=0.1,
@@ -58,7 +60,8 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
         completion = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content": "သင်သည် မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေဆိုပေးသော AI Assistant ဖြစ်သည်။"},
+                {"role": "system",
+                 "content": "သင်သည် မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေဆိုပေးသော AI Assistant ဖြစ်သည်။"},
                 {"role": "user", "content": prompt_text}
             ],
             temperature=0.1,
@@ -88,6 +91,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
         print(f"Gemini also failed: {e}")
 
     return "ဆာဗာများ အလွန်အမင်း တင်ကျပ်နေပါသဖြင့် ခဏနေမှ ထပ်မံ ကြိုးစားပေးပါခင်ဗျာ။"
+
 
 # --- 1. Supabase Tools (Functions) for Personal Tasks ---
 def add_task(title: str) -> dict:
@@ -214,14 +218,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text(f"မှားယွင်းမှု ဖြစ်ပေါ်သွားပါသည်: {str(e)}")
 
 
-def main():
+async def main_async():
+    # Render အတွက် Background မှာ Health Check Server ကို ဖွင့်ထားခြင်း
     threading.Thread(target=run_health_server, daemon=True).start()
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-    print("🤖 Groq + Qwen & Gemini Fallback Telegram Bot စတင် အလုပ်လုပ်နေပါပြီ...")
-    application.run_polling()
+    print("🤖 Groq Llama & Gemini Fallback Telegram Bot စတင် အလုပ်လုပ်နေပါပြီ...")
+
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+
+    stop_signal = asyncio.Event()
+    await stop_signal.wait()
+
+
+def main():
+    try:
+        asyncio.run(main_async())
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
