@@ -5,6 +5,7 @@ import asyncio
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from datetime import datetime, timedelta, timezone, time as dt_time
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -85,7 +86,7 @@ def extract_search_terms(query_text: str) -> list:
 
     compact = re.sub(r"\s+", "", query_text)
     if len(compact) >= 4:
-        for i in range(0, min(len(compact), 40), 4):
+        for i in range(0, min(len(compact), 32), 4):
             chunk = compact[i:i + 5]
             if len(chunk) >= 3:
                 terms.append(chunk)
@@ -94,10 +95,10 @@ def extract_search_terms(query_text: str) -> list:
     for t in terms:
         if t not in unique_terms:
             unique_terms.append(t)
-    return unique_terms[:8]
+    return unique_terms[:6]
 
 
-def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 10, search_limit: int = 8) -> str:
+def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 6, search_limit: int = 4) -> str:
     try:
         recent_res = (
             supabase.table("chat_messages")
@@ -131,7 +132,7 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 1
 
         sections = []
         if matched_rows:
-            matched_text = "\n".join([f"[{m['role']}]: {m['content']}" for m in matched_rows[-12:]])
+            matched_text = "\n".join([f"[{m['role']}]: {m['content']}" for m in matched_rows[-8:]])
             sections.append(f"--- Relevant Past History ---\n{matched_text}")
 
         if recent_rows:
@@ -169,8 +170,8 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
             contents=contents,
             config=config
         )
-        if response and response.text:
-            return response.text
+        if response and response.text and response.text.strip():
+            return response.text.strip()
     except Exception as e:
         errors.append(f"1. Gemini Error: {str(e)}")
 
@@ -184,12 +185,14 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
             ],
             temperature=0.1,
         )
-        if completion and completion.choices[0].message.content:
-            return completion.choices[0].message.content
+        if completion and completion.choices and completion.choices[0].message.content:
+            txt = completion.choices[0].message.content.strip()
+            if txt:
+                return txt
     except Exception as e:
         errors.append(f"2. Groq Error: {str(e)}")
 
-    # 3rd Attempt: OpenRouter Auto-Free Router
+    # 3rd Attempt: OpenRouter Auto-Free Router (fast 8s timeout)
     try:
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -202,21 +205,22 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
                 {"role": "user", "content": prompt_text}
             ]
         }
-        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=20)
+        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=8)
         res_json = response.json()
         if "choices" in res_json and len(res_json["choices"]) > 0:
-            return res_json["choices"][0]["message"]["content"]
+            txt = (res_json["choices"][0]["message"].get("content") or "").strip()
+            if txt:
+                return txt
         else:
             errors.append(f"3. OpenRouter Response: {res_json}")
     except Exception as e:
         errors.append(f"3. OpenRouter Error: {str(e)}")
 
-    return "API ၃ ခုစလုံး အလုပ်မလုပ်ပါ:\n\n" + "\n\n".join(errors)
+    return "လောလောဆယ် AI ဝန်ဆောင်မှုများ နှေးကွေးနေပါသည်။ ခဏနေမှ ထပ်မံမေးမြန်းကြည့်ပါရှင်။"
 
 
-# --- Universal Web Search Helpers (Tavily General Search + Google News RSS) ---
-def fetch_tavily_general(search_query: str, max_results: int = 6) -> str:
-    """သတင်းအသစ်၊ အားကစားပွဲရလဒ်ဟောင်း/အသစ်၊ ဈေးနှုန်းနှင့် ဗဟုသုတ အစုံအလင်ကို Tavily မှ ရှာဖွေပေးသည်။"""
+# --- Fast & Comprehensive Web Search Helpers (Tavily + Google News RSS in Parallel) ---
+def _tavily_worker(search_query: str, max_results: int = 5) -> str:
     if not TAVILY_API_KEY:
         return ""
     try:
@@ -225,36 +229,37 @@ def fetch_tavily_general(search_query: str, max_results: int = 6) -> str:
             json={
                 "api_key": TAVILY_API_KEY,
                 "query": search_query,
-                "search_depth": "advanced",
+                "search_depth": "basic",
                 "topic": "general",
                 "max_results": max_results,
                 "include_answer": True,
             },
-            timeout=25,
+            timeout=6,
         )
+        if resp.status_code != 200:
+            return ""
         data = resp.json()
         lines = []
         if data.get("answer"):
-            lines.append(f"[Direct Answer]: {data['answer']}")
+            lines.append(f"[Tavily Answer]: {data['answer']}")
         for r in data.get("results", []):
             title = r.get("title", "")
-            content = r.get("content", "")
-            url = r.get("url", "")
-            lines.append(f"- {title}: {content} ({url})")
+            content = (r.get("content", "") or "")[:320]
+            lines.append(f"- {title}: {content}")
         return "\n".join(lines)
     except Exception as e:
-        print(f"Tavily search error: {e}")
+        print(f"Tavily fast search error: {e}")
         return ""
 
 
-def fetch_google_news_rss(queries: list, per_query: int = 6) -> str:
+def _rss_worker(queries: list, per_query: int = 4) -> str:
     collected_items = []
     seen_titles = set()
     for q in queries:
         try:
             encoded_q = urllib.parse.quote(q)
             url = f"https://news.google.com/rss/search?q={encoded_q}&hl=en-US&gl=MM&ceid=MM:en"
-            resp = requests.get(url, timeout=15)
+            resp = requests.get(url, timeout=6)
             resp.raise_for_status()
             root = ET.fromstring(resp.content)
             for item in root.findall(".//channel/item")[:per_query]:
@@ -266,11 +271,34 @@ def fetch_google_news_rss(queries: list, per_query: int = 6) -> str:
                     seen_titles.add(title)
                     collected_items.append(f"- {title} ({published})")
         except Exception as e:
-            print(f"RSS fetch error for '{q}': {e}")
-    return "\n".join(collected_items[:15])
+            print(f"RSS fast error for '{q}': {e}")
+    return "\n".join(collected_items[:10])
 
 
-# --- Real-Time Weather Helper (Open-Meteo with Tavily/Gemini Fallback) ---
+def fetch_combined_web_context(tavily_query: str, rss_queries: list = None, max_results: int = 5) -> str:
+    """Tavily နှင့် Google News RSS ကို ThreadPool ဖြင့် တစ်ပြိုင်နက်တည်း (မြန်မြန်) ရှာဖွေသည်။"""
+    results_map = {"tavily": "", "rss": ""}
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {executor.submit(_tavily_worker, tavily_query, max_results): "tavily"}
+        if rss_queries:
+            futures[executor.submit(_rss_worker, rss_queries, 4)] = "rss"
+
+        for fut in as_completed(futures, timeout=7):
+            key = futures[fut]
+            try:
+                results_map[key] = fut.result() or ""
+            except Exception:
+                pass
+
+    parts = []
+    if results_map["tavily"]:
+        parts.append(f"--- Web Search (Tavily) ---\n{results_map['tavily']}")
+    if results_map["rss"]:
+        parts.append(f"--- News Headlines (RSS) ---\n{results_map['rss']}")
+    return "\n\n".join(parts)
+
+
+# --- Real-Time Weather Helper (Open-Meteo with Fast Web Fallback) ---
 MYANMAR_CITIES = {
     "yangon": ("ရန်ကုန် (Yangon)", 16.8661, 96.1951),
     "ရန်ကုန်": ("ရန်ကုန် (Yangon)", 16.8661, 96.1951),
@@ -315,6 +343,9 @@ def get_realtime_weather(query_text: str) -> str:
             city_en = info[0].split("(")[-1].replace(")", "").strip()
             break
 
+    now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
+    today_date = datetime.now(MM_TZ).strftime("%Y-%m-%d")
+
     try:
         url = (
             f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
@@ -322,7 +353,7 @@ def get_realtime_weather(query_text: str) -> str:
             f"&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max"
             f"&timezone=Asia%2FYangon&forecast_days=2"
         )
-        resp = requests.get(url, timeout=8)
+        resp = requests.get(url, timeout=5)
         resp.raise_for_status()
         data = resp.json()
 
@@ -339,7 +370,6 @@ def get_realtime_weather(query_text: str) -> str:
         min_t = daily.get("temperature_2m_min", ["-"])[0]
         rain_prob = daily.get("precipitation_probability_max", ["-"])[0]
 
-        now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
         return (
             f"🌤️ {city_label} ရာသီဥတု ({now_str})\n\n"
             f"• လက်ရှိအခြေအနေ: {condition}\n"
@@ -348,10 +378,11 @@ def get_realtime_weather(query_text: str) -> str:
             f"• စိုထိုင်းဆ: {humidity}% | လေတိုက်နှုန်း: {wind} km/h"
         )
     except Exception:
-        # Open-Meteo 429 Error တက်ပါက Tavily Search ဖြင့် ရာသီဥတု ရှာပေးမည်
-        now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d")
-        web_weather = fetch_tavily_general(f"{city_en} Myanmar weather forecast today {now_str}", max_results=4)
-        prompt = f"ယနေ့ ({now_str}) {city_label} ရာသီဥတု အခြေအနေကို အောက်ပါ အချက်အလက်များမှ ထုတ်နုတ်ပြီး မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်း ဖြေပေးပါ:\n{web_weather}"
+        web_weather = fetch_combined_web_context(f"{city_en} Myanmar weather forecast {today_date}", max_results=4)
+        prompt = (
+            f"ယနေ့ ({today_date}) {city_label} ရာသီဥတု အခြေအနေကို အောက်ပါ ရှာဖွေတွေ့ရှိချက်များမှ ထုတ်နုတ်ပြီး "
+            f"မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်း ဖြေပေးပါ။ (အချက်အလက် မရှိပါက မသိကြောင်း ရိုးသားစွာ ဖြေပါ။)\n\n{web_weather}"
+        )
         return call_ai_with_3tier_fallback(prompt, use_google_search=True)
 
 
@@ -360,29 +391,30 @@ def get_myanmar_news_summary() -> str:
     now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
     today_date = datetime.now(MM_TZ).strftime("%Y-%m-%d")
 
-    tavily_text = fetch_tavily_general(f"Myanmar latest news today {today_date} Yangon gold USD exchange rate", max_results=6)
-    rss_text = fetch_google_news_rss(["Myanmar news", "မြန်မာ သတင်း", "Yangon news"], per_query=5)
-    combined_data = f"{tavily_text}\n\n{rss_text}".strip()
+    web_context = fetch_combined_web_context(
+        tavily_query=f"Myanmar latest news {today_date} Yangon gold exchange rate",
+        rss_queries=["Myanmar news", "မြန်မာ သတင်း", "Yangon news"],
+        max_results=5,
+    )
 
     prompt = f"""
     လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)
-    Google Search နှင့် အောက်ပါ ရှာဖွေရရှိထားသော အချက်အလက်များကို ပေါင်းစပ်၍ ယနေ့ မြန်မာပြည်နှင့် ပတ်သက်သည့်
+    Google Search နှင့် အောက်ပါ Web Search / RSS အချက်အလက်များကို ပေါင်းစပ်၍ ယနေ့ မြန်မာပြည်နှင့် ပတ်သက်သည့်
     နောက်ဆုံးရ အရေးကြီး သတင်းအစုံအလင် (ပြည်တွင်းသတင်း၊ စီးပွားရေး၊ ရွှေဈေး/ငွေလဲနှုန်း နှင့် ထူးခြားဖြစ်စဉ်များ) ကို
     မြန်မာဘာသာဖြင့် ရှင်းလင်းပြတ်သားသော Bullet point များဖြင့် အနှစ်ချုပ် တင်ပြပေးပါ။
 
-    ရှာဖွေရရှိထားသော အချက်အလက်များ:
-    {combined_data}
+    {web_context}
     """
     summary = call_ai_with_3tier_fallback(prompt, use_google_search=True)
     return f"📰 Myanmar News Summary ({now_str})\n\n{summary}"
 
 
-# --- Universal Smart Answer & Web Search (Handles ANY question: Sports, History, Prices, Tech, General) ---
+# --- Fast & Comprehensive Universal Search + AI Answer ---
 def answer_with_universal_search(user_id: int, user_message: str) -> str:
     now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
-    memory_context = recall_relevant_history(user_id, user_message)
+    today_date = datetime.now(MM_TZ).strftime("%Y-%m-%d")
+    memory_context = recall_relevant_history(user_id, user_message, recent_limit=5, search_limit=3)
 
-    # ရိုးရိုး နှုတ်ဆက်စကား တိုတိုလေး မဟုတ်ရင် အင်တာနက်ပေါ်ကနေ အလိုအလျောက် ရှာဖွေပေးမည်
     greetings = ["မင်္ဂလာပါ", "hi", "hello", "hey", "မာယာ", "ကျေးဇူး", "thanks", "thank you", "ok", "ဟုတ်"]
     is_simple_greeting = user_message.lower().strip() in greetings
 
@@ -390,26 +422,31 @@ def answer_with_universal_search(user_id: int, user_message: str) -> str:
     if not is_simple_greeting:
         clean_q = re.sub(r"[?？!]", "", user_message).strip()
         extra = ""
+        rss_qs = None
         if "ရွှေ" in clean_q:
-            extra = f" Myanmar gold price {datetime.now(MM_TZ).strftime('%Y-%m-%d')}"
+            extra = f" Myanmar gold price {today_date}"
+            rss_qs = ["Myanmar gold price", "ရွှေဈေး"]
         elif "ဒေါ်လာ" in clean_q or "ငွေလဲ" in clean_q:
-            extra = f" Myanmar USD exchange rate MMK {datetime.now(MM_TZ).strftime('%Y-%m-%d')}"
+            extra = f" Myanmar USD exchange rate MMK {today_date}"
+            rss_qs = ["Myanmar exchange rate USD MMK", "ဒေါ်လာဈေး"]
+        elif "premier league" in clean_q.lower() or "ပွဲစဉ်" in clean_q or "chelsea" in clean_q.lower() or "man u" in clean_q.lower() or "manchester" in clean_q.lower():
+            extra = f" Premier League fixtures results {today_date}"
+            rss_qs = ["Premier League fixtures results"]
 
-        web_context = fetch_tavily_general(f"{clean_q}{extra}", max_results=6)
+        web_context = fetch_combined_web_context(f"{clean_q}{extra}", rss_queries=rss_qs, max_results=5)
 
     system_prompt = (
         f"သင်သည် မာယာ (Maya) အမည်ရှိ ကိုယ်ပိုင် အလုပ်အမှုဆောင် AI Assistant ဖြစ်သည်။\n"
         f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n"
-        f"ညွှန်ကြားချက်များ:\n"
-        f"1. ပေးထားသော Web Search ရလဒ်များ၊ Google Search Tool နှင့် အတိတ်မှတ်တမ်းများကို အသုံးပြု၍ မေးခွန်းအားလုံး (လက်ရှိသတင်း၊ အားကစားပွဲစဉ်/ရလဒ် အဟောင်းအသစ်၊ ဈေးနှုန်း၊ နည်းပညာ၊ ဗဟုသုတ) ကို တိကျမှန်ကန်စွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ။\n"
-        f"2. ပွဲစဉ်များ၊ ရလဒ်များ သို့မဟုတ် သတင်းများ ဖြေကြားရာတွင် ရက်စွဲနှင့် အချက်အလက် အတိအကျကို ရှင်းလင်းစွာ ဖော်ပြပါ။\n"
-        f"3. အချက်အလက် လုံးဝ ရှာမတွေ့ပါက မမှန်မကန် မဖြေဘဲ မတွေ့ရှိကြောင်း ရိုးသားစွာ ဖြေပါ။\n"
-        f"4. Task မှတ်လိုပါက /addtask ဖြင့် မှတ်နိုင်သည်။\n"
+        f"စည်းမျဉ်းများ:\n"
+        f"1. Web Search ရလဒ်များနှင့် Google Search Tool ကို အသုံးပြု၍ သတင်းအစုံ၊ အားကစားပွဲစဉ်/ရလဒ် အဟောင်းအသစ်၊ ဈေးနှုန်း၊ နည်းပညာနှင့် ဗဟုသုတ မေးခွန်းများကို တိကျပြည့်စုံစွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ။\n"
+        f"2. Web Search ရလဒ် ပါရှိပါက အတိတ် Chat History ထဲက ဈေးနှုန်း/ရာသီဥတု/ပွဲစဉ် အချက်အလက်ဟောင်းများကို မကိုးကားဘဲ လက်ရှိ Web Search ရလဒ်ကိုသာ ဦးစားပေး ဖြေပါ။\n"
+        f"3. အချက်အလက် အတိအကျ ရှာမတွေ့ပါက မမှန်မကန် မဖြေဘဲ မတွေ့ရှိကြောင်း ရိုးသားစွာ ရှင်းပြပါ။ Task မှတ်လိုပါက /addtask ဖြင့် မှတ်နိုင်သည်။\n"
     )
 
     full_prompt = (
         f"{system_prompt}\n"
-        f"--- Web Search Results ---\n{web_context or 'None'}\n\n"
+        f"{web_context or '--- Web Search Results ---\nNone'}\n\n"
         f"{memory_context}\n\n"
         f"လက်ရှိ မေးခွန်း/စကား: {user_message}"
     )
@@ -782,8 +819,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif msg_lower in ["tasks", "task list", "task စာရင်း", "လုပ်စရာစာရင်း"]:
                 reply_text = get_formatted_tasks()
             else:
-                # ကျန်သည့် မေးခွန်းအားလုံး (အားကစား၊ ပွဲရလဒ်၊ သတင်း၊ ဈေးနှုန်း၊ ဗဟုသုတ) အတွက် Universal Web Search + AI သုံးမည်
                 reply_text = await asyncio.to_thread(answer_with_universal_search, message.from_user.id, user_message)
+
+            if not reply_text or not str(reply_text).strip():
+                reply_text = "လောလောဆယ် အချက်အလက် ပြန်ထုတ်ရာတွင် အခက်အခဲ ရှိနေပါသည်။ နောက်တစ်ကြိမ် ထပ်မံမေးကြည့်ပေးပါရှင်။"
 
             save_chat_message(message.from_user.id, "assistant", reply_text)
 
@@ -830,7 +869,7 @@ async def main_async():
         BotCommand("addtask", "Add a new task"),
     ])
 
-    print("🤖 Universal AI Agent (Maya) started...")
+    print("🤖 Fast & Universal AI Agent (Maya) started...")
 
     await application.start()
     await application.updater.start_polling()
