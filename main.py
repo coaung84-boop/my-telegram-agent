@@ -3,8 +3,10 @@ import logging
 import threading
 import asyncio
 import re
+import urllib.parse
 import requests
-from datetime import datetime, timedelta, timezone
+import feedparser
+from datetime import datetime, timedelta, timezone, time as dt_time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -43,7 +45,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Telegram AI Agent is running!")
+        self.wfile.write(b"Telegram AI Agent with Scheduler & News Summary is running!")
 
 
 def run_health_server():
@@ -204,6 +206,61 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
     return "API ၃ ခုစလုံး အလုပ်မလုပ်ပါ:\n\n" + "\n\n".join(errors)
 
 
+# --- Myanmar News Fetcher & Summarizer (via Google News RSS) ---
+def get_myanmar_news_summary() -> str:
+    """Google News RSS မှ မြန်မာပြည် လတ်တလော သတင်းခေါင်းစဉ်များကို ဆွဲယူပြီး အနှစ်ချုပ်ပေးသည်။"""
+    queries = ["Myanmar news", "မြန်မာ သတင်း", "Yangon news"]
+    collected_items = []
+    seen_titles = set()
+
+    for q in queries:
+        try:
+            encoded_q = urllib.parse.quote(q)
+            url = f"https://news.google.com/rss/search?q={encoded_q}&hl=en-US&gl=MM&ceid=MM:en"
+            resp = requests.get(url, timeout=15)
+            feed = feedparser.parse(resp.text)
+            for entry in feed.entries[:8]:
+                title = (entry.get("title") or "").strip()
+                published = (entry.get("published") or "").strip()
+                if title and title not in seen_titles:
+                    seen_titles.add(title)
+                    collected_items.append(f"- {title} ({published})")
+        except Exception as e:
+            print(f"News fetch error for '{q}': {e}")
+
+    if not collected_items:
+        return "လတ်တလော အွန်လိုင်းသတင်းများကို ဆွဲယူ၍ မရသေးပါ။ နောက်မှ ထပ်မံကြိုးစားကြည့်ပါ။"
+
+    news_raw = "\n".join(collected_items[:20])
+    now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
+
+    prompt = f"""
+    အောက်ပါတို့မှာ အွန်လိုင်းသတင်းများမှ ရရှိထားသော မြန်မာပြည်နှင့် သက်ဆိုင်သည့် လတ်တလော သတင်းခေါင်းစဉ်များ ဖြစ်သည်။ ({now_str})
+    ထပ်နေသော သတင်းများကို ပေါင်းစပ်ပြီး အရေးပါပြီး စိတ်ဝင်စားဖွယ် အကောင်းဆုံး သတင်းအချက်အလက်များကို
+    မြန်မာဘာသာဖြင့် ရှင်းလင်းပြတ်သားသော Bullet point များဖြင့် အနှစ်ချုပ် တင်ပြပေးပါ။
+    (အချက်အလက် မှန်ကန်မှုကိုသာ အခြေခံပြီး ထပ်မံမချဲ့ကားပါနှင့်။)
+
+    သတင်းစာရင်း:
+    {news_raw}
+    """
+
+    summary = call_ai_with_3tier_fallback(prompt)
+    return f"📰 Myanmar News Summary ({now_str})\n\n{summary}"
+
+
+# --- Scheduled Daily 9:00 AM MMT Job ---
+async def scheduled_morning_news_job(context: ContextTypes.DEFAULT_TYPE):
+    """နေ့စဉ် မနက် ၉:၀၀ နာရီ (မြန်မာစံတော်ချိန်) တွင် ADMIN_USER_ID ထံ သတင်းအချုပ် ပို့ပေးသည်။"""
+    if not ADMIN_USER_ID:
+        return
+    try:
+        news_text = await asyncio.to_thread(get_myanmar_news_summary)
+        save_chat_message(ADMIN_USER_ID, "assistant", news_text)
+        await context.bot.send_message(chat_id=ADMIN_USER_ID, text=news_text)
+    except Exception as e:
+        print(f"Error sending scheduled morning news: {e}")
+
+
 # --- 1. Personal Tasks Helpers ---
 def add_task(title: str) -> dict:
     supabase.table("tasks").insert({"title": title, "status": "pending"}).execute()
@@ -346,6 +403,7 @@ def build_main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("Select Group", callback_data="cmd_list_groups"),
         ],
         [
+            InlineKeyboardButton("News Summary", callback_data="cmd_news_summary"),
             InlineKeyboardButton("Tasks List", callback_data="cmd_list_tasks"),
         ],
     ]
@@ -386,13 +444,23 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("Unauthorized.")
         return
 
-    cmd = message.text.split()[0].lower()
+    parts = message.text.split(maxsplit=1)
+    cmd = parts[0].lower()
+    arg = parts[1].strip() if len(parts) > 1 else ""
 
     if cmd in ["/start", "/menu"]:
         await message.reply_text(
             "Quick Menu:",
             reply_markup=build_main_menu_keyboard()
         )
+        return
+
+    if cmd == "/addtask":
+        if not arg:
+            await message.reply_text("Usage: /addtask <task description>")
+            return
+        add_task(arg)
+        await message.reply_text(f"Task added: {arg}")
         return
 
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
@@ -409,6 +477,9 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif cmd == "/groups":
         text, markup = build_groups_keyboard()
         await message.reply_text(text, reply_markup=markup)
+    elif cmd == "/news":
+        reply_text = await asyncio.to_thread(get_myanmar_news_summary)
+        await message.reply_text(reply_text)
     elif cmd == "/tasks":
         await message.reply_text(get_formatted_tasks())
 
@@ -448,10 +519,11 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
         reply_text = get_group_report("today summary", day_mode="today")
     elif data == "cmd_yesterday_summary":
         reply_text = get_group_report("yesterday summary", day_mode="yesterday")
+    elif data == "cmd_news_summary":
+        reply_text = await asyncio.to_thread(get_myanmar_news_summary)
     elif data == "cmd_list_tasks":
         reply_text = get_formatted_tasks()
     elif data.startswith("grp_day_"):
-        # Format: grp_day_<idx>_<today|yesterday>
         parts = data.split("_")
         idx = int(parts[2])
         day_mode = parts[3]
@@ -523,26 +595,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             save_chat_message(message.from_user.id, "user", user_message)
 
-            msg_lower = user_message.lower()
-            if msg_lower.strip() in ["menu", "help"]:
+            msg_lower = user_message.lower().strip()
+            is_question = msg_lower.endswith("?") or any(q in msg_lower for q in ["လား", "လဲ", "ရလား", "နိုင်မလား"])
+
+            if msg_lower in ["menu", "help"]:
                 await message.reply_text(
                     "Quick Menu:",
                     reply_markup=build_main_menu_keyboard()
                 )
                 return
-            elif any(k in msg_lower for k in ["report", "summary", "အနှစ်ချုပ်", "အကျဉ်းချုပ်"]):
+            elif not is_question and any(k in msg_lower for k in ["report", "summary", "အနှစ်ချုပ်", "အကျဉ်းချုပ်"]) and "သတင်း" not in msg_lower and "news" not in msg_lower:
                 reply_text = get_group_report(user_message)
-            elif any(k in msg_lower for k in ["task", "လုပ်စရာ", "ထည့်"]):
-                add_task(user_message)
-                reply_text = f"Task added: {user_message}"
-            elif any(k in msg_lower for k in ["စာရင်း", "list"]):
+            elif not is_question and (msg_lower.startswith("task:") or msg_lower.startswith("လုပ်စရာ:") or "task မှတ်ထား" in msg_lower or "task ထည့်" in msg_lower):
+                clean_task = re.sub(r"^(task:|လုပ်စရာ:)\s*", "", user_message, flags=re.IGNORECASE).strip()
+                add_task(clean_task)
+                reply_text = f"Task added: {clean_task}"
+            elif msg_lower in ["tasks", "task list", "task စာရင်း", "လုပ်စရာစာရင်း"]:
                 reply_text = get_formatted_tasks()
+            elif not is_question and ("သတင်း" in msg_lower or "news" in msg_lower) and ("အချုပ်" in msg_lower or "summary" in msg_lower or "ရှာ" in msg_lower or "တင်" in msg_lower):
+                reply_text = await asyncio.to_thread(get_myanmar_news_summary)
             else:
                 memory_context = recall_relevant_history(message.from_user.id, user_message)
                 system_prompt = (
-                    "သင်သည် ကိုယ်ပိုင် အလုပ်အမှုဆောင် AI Assistant ဖြစ်သည်။ "
-                    "ပေးထားသော အတိတ်မှတ်တမ်းများနှင့် လတ်တလော ပြောဆိုမှုများကို ကိုးကားပြီး "
-                    "မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေကြားပါ။\n"
+                    "သင်သည် မာယာ (Maya) အမည်ရှိ ကိုယ်ပိုင် အလုပ်အမှုဆောင် AI Assistant ဖြစ်သည်။ "
+                    "ပေးထားသော အတိတ်မှတ်တမ်းများနှင့် လတ်တလော ပြောဆိုမှုများကို ကိုးကားပြီး မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်း ဖြေကြားပါ။ "
+                    "အရေးကြီးချက် - နေ့စဉ် မနက် ၉:၀၀ နာရီ (မြန်မာစံတော်ချိန်) တွင် အွန်လိုင်းမြန်မာသတင်း အနှစ်ချုပ်ကို "
+                    "အလိုအလျောက် ပို့ပေးမည့် Scheduler စနစ် ပါဝင်ပြီး ဖြစ်သော်လည်း သီးခြားစိတ်ကြိုက် အချိန်အလိုက် ခိုင်းစေချက်များ သို့မဟုတ် "
+                    "Facebook Private Account များကို တိုက်ရိုက် ဝင်ကြည့်ခြင်းများကို မလုပ်ဆောင်နိုင်ပါ။ "
+                    "မလုပ်နိုင်သေးသည့် အရာများကို မမှန်မကန် ကတိမပေးဘဲ ရိုးသားစွာ ရှင်းပြပါ။ "
+                    "Task မှတ်လိုပါက /addtask ဖြင့် မှတ်နိုင်ကြောင်း အကြံပြုပါ။\n"
                 )
                 full_prompt = (
                     f"{system_prompt}\n"
@@ -564,9 +645,23 @@ async def main_async():
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    application.add_handler(CommandHandler(["start", "menu", "summary", "today", "yesterday", "groups", "tasks"], handle_command))
+    # Slash Commands
+    application.add_handler(
+        CommandHandler(["start", "menu", "summary", "today", "yesterday", "groups", "news", "tasks", "addtask"], handle_command)
+    )
+    # Inline Button Clicks
     application.add_handler(CallbackQueryHandler(handle_button_callback))
+    # Normal Messages
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+
+    # နေ့စဉ် မနက် ၉:၀၀ နာရီ (UTC+6:30) တွင် သတင်းအချုပ် အလိုအလျောက် ပို့ပေးမည့် Scheduler
+    if application.job_queue:
+        morning_9_mmt = dt_time(hour=9, minute=0, second=0, tzinfo=MM_TZ)
+        application.job_queue.run_daily(
+            scheduled_morning_news_job,
+            time=morning_9_mmt,
+            name="daily_9am_myanmar_news"
+        )
 
     await application.initialize()
 
@@ -577,10 +672,12 @@ async def main_async():
         BotCommand("today", "Today group summary"),
         BotCommand("yesterday", "Yesterday group summary"),
         BotCommand("groups", "Select group report"),
+        BotCommand("news", "Latest Myanmar news summary"),
         BotCommand("tasks", "View current tasks"),
+        BotCommand("addtask", "Add a new task"),
     ])
 
-    print("🤖 AI Agent started...")
+    print("🤖 AI Agent with Scheduler, News & Memory started...")
 
     await application.start()
     await application.updater.start_polling()
