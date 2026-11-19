@@ -33,17 +33,17 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("MY_TELEGRAM_USER_ID", "0"))
 
-# မြန်မာစံတော်ချိန် (UTC+6:30) နှင့် ရက် ၃၀ သိမ်းဆည်းမှု သတ်မှတ်ခြင်း
+# Myanmar Standard Time (UTC+6:30) and 30-Day Retention
 MM_TZ = timezone(timedelta(hours=6, minutes=30))
 RETENTION_DAYS = 30
 
 
-# --- Render Web Service အတွက် Dummy Health Check Server ---
+# --- Dummy Health Check Server for Render ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Telegram AI Agent with Quick Menu, Memory & 3-Tier Fallback is running!")
+        self.wfile.write(b"Telegram AI Agent is running!")
 
 
 def run_health_server():
@@ -52,7 +52,7 @@ def run_health_server():
     server.serve_forever()
 
 
-# --- Database Auto-Cleanup (ရက် ၃၀ ကျော်သော raw_logs များကို အော်တိုဖျက်ခြင်း) ---
+# --- Auto-Cleanup Old Raw Logs (Older than 30 days) ---
 def cleanup_old_raw_logs():
     try:
         cutoff_dt = datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)
@@ -129,11 +129,11 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 1
         sections = []
         if matched_rows:
             matched_text = "\n".join([f"[{m['role']}]: {m['content']}" for m in matched_rows[-15:]])
-            sections.append(f"--- သက်ဆိုင်ရာ အတိတ်မှတ်တမ်းဟောင်းများ ---\n{matched_text}")
+            sections.append(f"--- Relevant Past History ---\n{matched_text}")
 
         if recent_rows:
             recent_text = "\n".join([f"[{r['role']}]: {r['content']}" for r in recent_rows])
-            sections.append(f"--- လတ်တလော ပြောဆိုမှုများ ---\n{recent_text}")
+            sections.append(f"--- Recent Conversation ---\n{recent_text}")
 
         return "\n\n".join(sections)
     except Exception as e:
@@ -141,7 +141,7 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 1
         return ""
 
 
-# --- 3-Tier AI Fallback Helper ---
+# --- 3-Tier AI Fallback Helper (Gemini 3.5 Flash-Lite -> Groq -> OpenRouter) ---
 def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
     errors = []
 
@@ -207,7 +207,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
 # --- 1. Personal Tasks Helpers ---
 def add_task(title: str) -> dict:
     supabase.table("tasks").insert({"title": title, "status": "pending"}).execute()
-    return {"status": "success", "message": f"Task အသစ် ထည့်သွင်းပြီးပါပြီ: {title}"}
+    return {"status": "success", "message": f"Task added: {title}"}
 
 
 def list_tasks() -> list:
@@ -218,13 +218,12 @@ def list_tasks() -> list:
 def get_formatted_tasks() -> str:
     tasks = list_tasks()
     if not tasks:
-        return "လက်ရှိ Task စာရင်း မရှိသေးပါ။"
-    return "📋 လက်ရှိ Task များ:\n" + "\n".join([f"- ID {t['id']}: {t['title']} ({t['status']})" for t in tasks])
+        return "No tasks found."
+    return "Current Tasks:\n" + "\n".join([f"- ID {t['id']}: {t['title']} ({t['status']})" for t in tasks])
 
 
 # --- 2. Group Summary & Report Tools ---
 def get_available_groups() -> list:
-    """ရက် ၃၀ အတွင်း raw_logs ထဲတွင် ရှိနေသော Group နာမည်များကို စာရင်းထုတ်ပေးသည်။"""
     cleanup_old_raw_logs()
     thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
     res = supabase.table("raw_logs").select("group_name").gte("created_at", thirty_days_ago_iso).execute()
@@ -232,39 +231,48 @@ def get_available_groups() -> list:
     return groups
 
 
+def get_date_bounds(day_mode: str):
+    """day_mode: 'today' or 'yesterday'"""
+    now_mm = datetime.now(MM_TZ)
+    if day_mode == "yesterday":
+        target_date = (now_mm - timedelta(days=1)).date()
+        label = f"Yesterday ({target_date})"
+    else:
+        target_date = now_mm.date()
+        label = f"Today ({target_date})"
+
+    start_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=MM_TZ)
+    end_dt = start_dt + timedelta(days=1)
+    return start_dt.isoformat(), end_dt.isoformat(), label
+
+
 def parse_date_range_from_text(text: str):
     text_lower = text.lower()
-    now_mm = datetime.now(MM_TZ)
-
-    target_date = None
-    label = None
-
+    if "မနေ့" in text_lower or "yesterday" in text_lower:
+        return get_date_bounds("yesterday")
     if "ဒီနေ့" in text_lower or "today" in text_lower:
-        target_date = now_mm.date()
-        label = f"ဒီနေ့ ({target_date})"
-    elif "မနေ့" in text_lower or "yesterday" in text_lower:
-        target_date = (now_mm - timedelta(days=1)).date()
-        label = f"မနေ့က ({target_date})"
-    else:
-        match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text_lower)
-        if match:
-            try:
-                target_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
-                label = f"{target_date}"
-            except ValueError:
-                pass
+        return get_date_bounds("today")
 
-    if target_date:
-        start_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=MM_TZ)
-        end_dt = start_dt + timedelta(days=1)
-        return start_dt.isoformat(), end_dt.isoformat(), label
+    match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text_lower)
+    if match:
+        try:
+            target_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
+            start_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=MM_TZ)
+            end_dt = start_dt + timedelta(days=1)
+            return start_dt.isoformat(), end_dt.isoformat(), f"{target_date}"
+        except ValueError:
+            pass
 
     return None, None, None
 
 
-def get_group_report(user_query: str, exact_group_name: str = None) -> str:
+def get_group_report(user_query: str = "", exact_group_name: str = None, day_mode: str = None) -> str:
     cleanup_old_raw_logs()
-    start_iso, end_iso, date_label = parse_date_range_from_text(user_query)
+
+    if day_mode in ["today", "yesterday"]:
+        start_iso, end_iso, date_label = get_date_bounds(day_mode)
+    else:
+        start_iso, end_iso, date_label = parse_date_range_from_text(user_query)
 
     thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
     query = supabase.table("raw_logs").select("*").gte("created_at", thirty_days_ago_iso).order("id")
@@ -291,16 +299,16 @@ def get_group_report(user_query: str, exact_group_name: str = None) -> str:
                 break
 
     if not logs:
-        scope_desc = f" ({matched_group_name})" if matched_group_name else ""
+        scope_desc = f" [{matched_group_name}]" if matched_group_name else ""
         if date_label:
-            return f"{date_label}{scope_desc} အတွက် သိမ်းဆည်းထားသော Group မက်ဆေ့ခ်ျ မှတ်တမ်း မရှိပါ။"
-        return f"လက်ရှိ{scope_desc} တွင် မဖတ်ရသေးသော မက်ဆေ့ခ်ျအသစ် မရှိသေးပါ။"
+            return f"No logs found for {date_label}{scope_desc}."
+        return f"No unread messages found{scope_desc}."
 
     raw_text = "\n".join(
         [f"[{l['group_name']} | {l['sender_name']} | {str(l.get('created_at', ''))[:16]}]: {l['content_summary']}" for l in logs]
     )
 
-    header_info = f"Group: {matched_group_name or 'All Groups'} | ကာလ: {date_label or 'မဖတ်ရသေးသော စာများ (သို့) ရွေးချယ်ထားသော Group'}"
+    header_info = f"Group: {matched_group_name or 'All Groups'} | Period: {date_label or 'Unread'}"
 
     prompt = f"""
     အောက်ပါတို့မှာ Telegram Group များမှ ရရှိထားသော မက်ဆေ့ခ်ျများနှင့် ပုံ/ဖိုင် အနှစ်ချုပ်များ ဖြစ်သည်။
@@ -323,22 +331,22 @@ def get_group_report(user_query: str, exact_group_name: str = None) -> str:
         for l in logs:
             supabase.table("raw_logs").update({"is_read": True}).eq("id", l["id"]).execute()
 
-    return f"📊 {header_info}\n\n{report_text}"
+    return f"{header_info}\n\n{report_text}"
 
 
-# --- 3. Quick Menu & Command Handlers ---
+# --- 3. Quick Menu & Command Handlers (English Labels) ---
 def build_main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
-            InlineKeyboardButton("🆕 မဖတ်ရသေးသော Summary", callback_data="cmd_unread_summary"),
-            InlineKeyboardButton("📅 ဒီနေ့ Summary", callback_data="cmd_today_summary"),
+            InlineKeyboardButton("Unread Summary", callback_data="cmd_unread_summary"),
+            InlineKeyboardButton("Today Summary", callback_data="cmd_today_summary"),
         ],
         [
-            InlineKeyboardButton("⏮️ မနေ့က Summary", callback_data="cmd_yesterday_summary"),
-            InlineKeyboardButton("👥 Group အလိုက် ရွေးရန်", callback_data="cmd_list_groups"),
+            InlineKeyboardButton("Yesterday Summary", callback_data="cmd_yesterday_summary"),
+            InlineKeyboardButton("Select Group", callback_data="cmd_list_groups"),
         ],
         [
-            InlineKeyboardButton("📋 Task စာရင်းကြည့်ရန်", callback_data="cmd_list_tasks"),
+            InlineKeyboardButton("Tasks List", callback_data="cmd_list_tasks"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -347,14 +355,26 @@ def build_main_menu_keyboard() -> InlineKeyboardMarkup:
 def build_groups_keyboard() -> tuple[str, InlineKeyboardMarkup | None]:
     groups = get_available_groups()
     if not groups:
-        return "လွန်ခဲ့သော ရက် ၃၀ အတွင်း မှတ်တမ်းတင်ထားသော Group မရှိသေးပါ။", None
+        return "No groups found within the last 30 days.", None
 
     keyboard = []
     for idx, g_name in enumerate(groups):
-        # Callback data length limit (64 bytes) မကျော်စေရန် index ဖြင့် ပို့မည်
-        keyboard.append([InlineKeyboardButton(f"📌 {g_name}", callback_data=f"grp_idx_{idx}")])
+        keyboard.append([InlineKeyboardButton(g_name, callback_data=f"grp_sel_{idx}")])
 
-    return "Report ထုတ်လိုသော Group ကို အောက်ပါခလုတ်များမှ နှိပ်ရွေးပါ:", InlineKeyboardMarkup(keyboard)
+    return "Select a group:", InlineKeyboardMarkup(keyboard)
+
+
+def build_group_date_keyboard(group_idx: int, group_name: str) -> tuple[str, InlineKeyboardMarkup]:
+    keyboard = [
+        [
+            InlineKeyboardButton("Today", callback_data=f"grp_day_{group_idx}_today"),
+            InlineKeyboardButton("Yesterday", callback_data=f"grp_day_{group_idx}_yesterday"),
+        ],
+        [
+            InlineKeyboardButton("Back to Groups", callback_data="cmd_list_groups"),
+        ],
+    ]
+    return f"Group: {group_name}\nSelect date for daily report:", InlineKeyboardMarkup(keyboard)
 
 
 async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -363,14 +383,14 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if message.from_user.id != ADMIN_USER_ID:
-        await message.reply_text("ခွင့်ပြုချက်မရှိပါ။")
+        await message.reply_text("Unauthorized.")
         return
 
     cmd = message.text.split()[0].lower()
 
     if cmd in ["/start", "/menu"]:
         await message.reply_text(
-            "🤖 **Personal AI Assistant Quick Menu**\nအောက်ပါ ခလုတ်များကို နှိပ်၍ အလွယ်တကူ ခိုင်းစေနိုင်ပါသည်:",
+            "Quick Menu:",
             reply_markup=build_main_menu_keyboard()
         )
         return
@@ -381,10 +401,10 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_text = get_group_report("unread summary")
         await message.reply_text(reply_text)
     elif cmd == "/today":
-        reply_text = get_group_report("ဒီနေ့ summary")
+        reply_text = get_group_report("today summary", day_mode="today")
         await message.reply_text(reply_text)
     elif cmd == "/yesterday":
-        reply_text = get_group_report("မနေ့က summary")
+        reply_text = get_group_report("yesterday summary", day_mode="yesterday")
         await message.reply_text(reply_text)
     elif cmd == "/groups":
         text, markup = build_groups_keyboard()
@@ -399,7 +419,7 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if query.from_user.id != ADMIN_USER_ID:
-        await query.answer("ခွင့်ပြုချက်မရှိပါ။", show_alert=True)
+        await query.answer("Unauthorized.", show_alert=True)
         return
 
     await query.answer()
@@ -410,26 +430,39 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.message.reply_text(text, reply_markup=markup)
         return
 
+    if data.startswith("grp_sel_"):
+        idx = int(data.replace("grp_sel_", ""))
+        groups = get_available_groups()
+        if 0 <= idx < len(groups):
+            text, markup = build_group_date_keyboard(idx, groups[idx])
+            await query.message.reply_text(text, reply_markup=markup)
+        else:
+            await query.message.reply_text("Group not found. Please run /groups again.")
+        return
+
     await context.bot.send_chat_action(chat_id=query.message.chat_id, action="typing")
 
     if data == "cmd_unread_summary":
         reply_text = get_group_report("unread summary")
     elif data == "cmd_today_summary":
-        reply_text = get_group_report("ဒီနေ့ summary")
+        reply_text = get_group_report("today summary", day_mode="today")
     elif data == "cmd_yesterday_summary":
-        reply_text = get_group_report("မနေ့က summary")
+        reply_text = get_group_report("yesterday summary", day_mode="yesterday")
     elif data == "cmd_list_tasks":
         reply_text = get_formatted_tasks()
-    elif data.startswith("grp_idx_"):
-        idx = int(data.replace("grp_idx_", ""))
+    elif data.startswith("grp_day_"):
+        # Format: grp_day_<idx>_<today|yesterday>
+        parts = data.split("_")
+        idx = int(parts[2])
+        day_mode = parts[3]
         groups = get_available_groups()
         if 0 <= idx < len(groups):
             selected_group = groups[idx]
-            reply_text = get_group_report(f"{selected_group} summary", exact_group_name=selected_group)
+            reply_text = get_group_report(exact_group_name=selected_group, day_mode=day_mode)
         else:
-            reply_text = "ရွေးချယ်ထားသော Group ကို ရှာမတွေ့ပါ။ /groups ကို ပြန်နှိပ်ကြည့်ပါ။"
+            reply_text = "Group not found. Please run /groups again."
     else:
-        reply_text = "မသိရှိသော ခလုတ်ဖြစ်ပါသည်။"
+        reply_text = "Unknown action."
 
     await query.message.reply_text(reply_text)
 
@@ -444,7 +477,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_name = message.from_user.first_name if message.from_user else "Unknown"
     group_name = message.chat.title if chat_type in ["group", "supergroup"] else "Private"
 
-    # CASE A: Group ထဲမှ မက်ဆေ့ခ်ျများ
+    # CASE A: Group Messages
     if chat_type in ["group", "supergroup"]:
         content_summary = ""
 
@@ -455,14 +488,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             photo_bytes = await photo_file.download_as_bytearray()
             img_prompt = "ဒီပုံထဲမှာ ပါဝင်တဲ့ အဓိက အချက်အလက်များ၊ စာသားများ သို့မဟုတ် လုပ်ငန်းဆိုင်ရာ အခြေအနေများကို အတိုချုံး ဖော်ပြပေးပါ။"
             img_summary = call_ai_with_3tier_fallback(img_prompt, image_bytes=photo_bytes, mime_type='image/jpeg')
-            content_summary = f"[ပုံပါဖိုင်] {img_summary}"
+            content_summary = f"[Photo] {img_summary}"
         elif message.document:
             doc_file = await message.document.get_file()
             doc_bytes = await doc_file.download_as_bytearray()
             doc_prompt = "ဒီဖိုင်ထဲပါတဲ့ အဓိက အကြောင်းအရာနဲ့ အရေးကြီးတဲ့ အချက်တွေကို အနှစ်ချုပ်ပေးပါ။"
             doc_summary = call_ai_with_3tier_fallback(doc_prompt, image_bytes=doc_bytes,
                                                       mime_type=message.document.mime_type or 'application/pdf')
-            content_summary = f"[စာရွက်စာတမ်း: {message.document.file_name}] {doc_summary}"
+            content_summary = f"[Document: {message.document.file_name}] {doc_summary}"
 
         if content_summary:
             supabase.table("raw_logs").insert({
@@ -475,10 +508,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # CASE B: Private Chat မှ ခိုင်းစေချက်များ
+    # CASE B: Private Chat Instructions
     if chat_type == "private":
         if message.from_user.id != ADMIN_USER_ID:
-            await message.reply_text("ခွင့်ပြုချက်မရှိပါ။ ဤ Bot သည် ကိုယ်ပိုင်အသုံးအတွက်သာ ဖြစ်ပါသည်။")
+            await message.reply_text("Unauthorized.")
             return
 
         user_message = message.text
@@ -491,9 +524,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_chat_message(message.from_user.id, "user", user_message)
 
             msg_lower = user_message.lower()
-            if msg_lower.strip() in ["menu", "မီနူး", "help"]:
+            if msg_lower.strip() in ["menu", "help"]:
                 await message.reply_text(
-                    "🤖 အမြန်သုံး ခလုတ်များ (Quick Menu):",
+                    "Quick Menu:",
                     reply_markup=build_main_menu_keyboard()
                 )
                 return
@@ -501,7 +534,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_text = get_group_report(user_message)
             elif any(k in msg_lower for k in ["task", "လုပ်စရာ", "ထည့်"]):
                 add_task(user_message)
-                reply_text = f"Task အသစ် ထည့်သွင်းပြီးပါပြီ: {user_message}"
+                reply_text = f"Task added: {user_message}"
             elif any(k in msg_lower for k in ["စာရင်း", "list"]):
                 reply_text = get_formatted_tasks()
             else:
@@ -523,7 +556,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text(reply_text)
 
         except Exception as e:
-            await message.reply_text(f"မှားယွင်းမှု ဖြစ်ပေါ်သွားပါသည်: {str(e)}")
+            await message.reply_text(f"Error: {str(e)}")
 
 
 async def main_async():
@@ -531,26 +564,23 @@ async def main_async():
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Slash Commands (/menu, /summary, /today, /yesterday, /groups, /tasks)
     application.add_handler(CommandHandler(["start", "menu", "summary", "today", "yesterday", "groups", "tasks"], handle_command))
-    # Inline Button Clicks
     application.add_handler(CallbackQueryHandler(handle_button_callback))
-    # Normal Messages
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
     await application.initialize()
 
-    # Telegram စာရိုက် Box ဘေးရှိ Menu (/) Drop-down List ကို အလိုအလျောက် သတ်မှတ်ပေးခြင်း
+    # English Bot Commands Menu
     await application.bot.set_my_commands([
-        BotCommand("menu", "အမြန်သုံး ခလုတ်များ (Quick Menu) ဖွင့်ရန်"),
-        BotCommand("summary", "မဖတ်ရသေးသော Group စာများ အနှစ်ချုပ်ရန်"),
-        BotCommand("today", "ဒီနေ့ Group အားလုံး၏ Summary ကြည့်ရန်"),
-        BotCommand("yesterday", "မနေ့က Group အားလုံး၏ Summary ကြည့်ရန်"),
-        BotCommand("groups", "Group နာမည်အလိုက် ရွေးချယ်ပြီး Report ထုတ်ရန်"),
-        BotCommand("tasks", "လက်ရှိ Task စာရင်းအားလုံး ကြည့်ရန်"),
+        BotCommand("menu", "Quick menu buttons"),
+        BotCommand("summary", "Unread group summary"),
+        BotCommand("today", "Today group summary"),
+        BotCommand("yesterday", "Yesterday group summary"),
+        BotCommand("groups", "Select group report"),
+        BotCommand("tasks", "View current tasks"),
     ])
 
-    print("🤖 AI Agent with Quick Menu, Memory & 3-Tier Fallback စတင် အလုပ်လုပ်နေပါပြီ...")
+    print("🤖 AI Agent started...")
 
     await application.start()
     await application.updater.start_polling()
