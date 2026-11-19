@@ -4,8 +4,8 @@ import threading
 import asyncio
 import re
 import urllib.parse
-import requests
 import xml.etree.ElementTree as ET
+import requests
 from datetime import datetime, timedelta, timezone, time as dt_time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
@@ -45,7 +45,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Telegram AI Agent with Scheduler & News Summary is running!")
+        self.wfile.write(b"Telegram AI Agent with Scheduler, News & Live Search is running!")
 
 
 def run_health_server():
@@ -252,6 +252,54 @@ def get_myanmar_news_summary() -> str:
 
     summary = call_ai_with_3tier_fallback(prompt)
     return f"📰 Myanmar News Summary ({now_str})\n\n{summary}"
+
+
+# --- Dynamic Live Topic Search (via Google News RSS + Built-in ElementTree) ---
+def search_live_topic(query_text: str) -> str:
+    """မေးခွန်းပါ အကြောင်းအရာအတိုင်း Google News RSS မှ လတ်တလော သတင်း/အချက်အလက်များ ရှာဖွေဖြေကြားပေးသည်။"""
+    clean_q = re.sub(r"[?？!]", "", query_text).strip()
+    search_queries = [clean_q, f"{clean_q} Myanmar"]
+    collected_items = []
+    seen_titles = set()
+
+    for q in search_queries:
+        try:
+            encoded_q = urllib.parse.quote(q)
+            url = f"https://news.google.com/rss/search?q={encoded_q}&hl=en-US&gl=MM&ceid=MM:en"
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+
+            root = ET.fromstring(resp.content)
+            for item in root.findall(".//channel/item")[:6]:
+                title_el = item.find("title")
+                pub_el = item.find("pubDate")
+                title = (title_el.text or "").strip() if title_el is not None and title_el.text else ""
+                published = (pub_el.text or "").strip() if pub_el is not None and pub_el.text else ""
+
+                if title and title not in seen_titles:
+                    seen_titles.add(title)
+                    collected_items.append(f"- {title} ({published})")
+        except Exception as e:
+            print(f"Live search error for '{q}': {e}")
+
+    if not collected_items:
+        return None
+
+    now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
+    raw_results = "\n".join(collected_items[:12])
+
+    prompt = f"""
+    လက်ရှိအချိန်: {now_str}
+    အသုံးပြုသူ မေးခွန်း: {query_text}
+
+    အောက်ပါတို့မှာ Google News မှ လတ်တလော ရှာဖွေရရှိထားသော သတင်းခေါင်းစဉ်များ ဖြစ်သည်။
+    ယင်းအချက်အလက်များကိုသာ အခြေခံ၍ မေးခွန်းကို မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်း ဖြေကြားပေးပါ။
+    (ရက်စွဲ အဟောင်းဖြစ်နေပါက ရက်စွဲကိုပါ ထည့်သွင်းဖော်ပြပေးပါ။ အချက်အလက် မလုံလောက်ပါက မတွေ့ရှိကြောင်း ရိုးသားစွာ ဖြေပါ။)
+
+    ရှာဖွေရရှိမှုများ:
+    {raw_results}
+    """
+    return call_ai_with_3tier_fallback(prompt)
 
 
 # --- Scheduled Daily 9:00 AM MMT Job ---
@@ -620,6 +668,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_text = get_formatted_tasks()
             elif not is_question and ("သတင်း" in msg_lower or "news" in msg_lower) and ("အချုပ်" in msg_lower or "summary" in msg_lower or "ရှာ" in msg_lower or "တင်" in msg_lower):
                 reply_text = await asyncio.to_thread(get_myanmar_news_summary)
+            elif any(w in msg_lower for w in ["update", "ဈေး", "သတင်း", "news", "ရာသီဥတု", "weather", "ငလျင်", "ပေါက်ဈေး"]):
+                live_reply = await asyncio.to_thread(search_live_topic, user_message)
+                reply_text = live_reply if live_reply else "လတ်တလော အွန်လိုင်းသတင်း မှတ်တမ်းတွင် ထိုအကြောင်းအရာ မတွေ့ရှိသေးပါ။"
             else:
                 memory_context = recall_relevant_history(message.from_user.id, user_message)
                 system_prompt = (
@@ -683,7 +734,7 @@ async def main_async():
         BotCommand("addtask", "Add a new task"),
     ])
 
-    print("🤖 AI Agent with Scheduler, News & Memory started...")
+    print("🤖 AI Agent with Scheduler, News, Live Search & Memory started...")
 
     await application.start()
     await application.updater.start_polling()
