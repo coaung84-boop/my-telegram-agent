@@ -42,6 +42,14 @@ ADMIN_USER_ID = int(os.getenv("MY_TELEGRAM_USER_ID", "0"))
 MM_TZ = timezone(timedelta(hours=6, minutes=30))
 RETENTION_DAYS = 30
 
+STRICT_MYANMAR_SYSTEM = (
+    "သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။ "
+    "အမြဲတမ်း မြန်မာဘာသာ (Unicode) ဖြင့်သာ ရှင်းလင်းပြတ်သားစွာ ဖြေဆိုပါ။ "
+    "တရုတ်၊ ကိုရီးယား၊ အာရဗီ စသည့် မသက်ဆိုင်သော ဘာသာစကား/စာလုံးများ ရောနှောမရေးပါနှင့်။ "
+    "အရှေ့နောက် Conversation History နှင့် အသုံးပြုသူ၏ အသုံးအနှုန်းပုံစံများကို သေချာမှတ်မိပြီး သဘာဝကျကျ ဆက်စပ်ဖြေပါ။ "
+    "မေးခွန်းနှင့် မသက်ဆိုင်သော Search အချက်အလက်များကို လုံးဝ မသုံးပါနှင့်။"
+)
+
 
 # --- Dummy Health Check Server for Render ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -60,7 +68,7 @@ def run_health_server():
 # --- Safe Long Message Sender (Prevents Telegram 'Text is too long' & Empty Text Errors) ---
 async def send_long_message(message, text: str, chunk_size: int = 3500):
     if not text or not str(text).strip():
-        await message.reply_text("လောလောဆယ် အဖြေပြန်ထုတ်ရာတွင် အခက်အခဲ ရှိနေပါသည်။ နောက်မှ ထပ်မေးကြည့်ပါရှင်။")
+        await message.reply_text("ဟုတ်ကဲ့ရှင်၊ လောလောဆယ် အဖြေပြန်ထုတ်ရာတွင် အခက်အခဲ ရှိနေပါသည်။ နောက်မှ ထပ်မေးကြည့်ပါနော်။")
         return
 
     clean_text = str(text).strip()
@@ -82,7 +90,17 @@ def cleanup_old_raw_logs():
         print(f"Error cleaning up old raw_logs: {e}")
 
 
-# --- Supabase Chat Memory Helpers ---
+# --- Supabase Chat Memory Helpers (Full Conversation & Style Recall) ---
+def _format_mm_timestamp(ts_str: str) -> str:
+    if not ts_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+        return dt.astimezone(MM_TZ).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(ts_str)[:16]
+
+
 def save_chat_message(user_id: int, role: str, content: str):
     try:
         supabase.table("chat_messages").insert({
@@ -103,19 +121,32 @@ def extract_search_terms(query_text: str) -> list:
 
     compact = re.sub(r"\s+", "", query_text)
     if len(compact) >= 4:
-        for i in range(0, min(len(compact), 32), 4):
+        for i in range(0, min(len(compact), 36), 4):
             chunk = compact[i:i + 5]
-            if len(chunk) >= 3:
+            if len(chunk) >= 3 and chunk not in terms:
                 terms.append(chunk)
 
-    unique_terms = []
-    for t in terms:
-        if t not in unique_terms:
-            unique_terms.append(t)
-    return unique_terms[:6]
+    return terms[:10]
 
 
-def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 6, search_limit: int = 4) -> str:
+def get_recent_history_for_router(user_id: int, limit: int = 4) -> str:
+    try:
+        res = (
+            supabase.table("chat_messages")
+            .select("role, content")
+            .eq("user_id", user_id)
+            .order("id", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = list(reversed(res.data or []))
+        return "\n".join([f"{r['role']}: {r['content'][:160]}" for r in rows])
+    except Exception:
+        return ""
+
+
+def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 8, search_limit: int = 10) -> str:
+    """ပြောခဲ့/မေးခဲ့သမျှထဲမှ သက်ဆိုင်ရာ မှတ်တမ်းများ၊ အသုံးအနှုန်းပုံစံများနှင့် လတ်တလော စကားပြောဆိုမှုများကို ပြန်ဆွဲထုတ်သည်။"""
     try:
         recent_res = (
             supabase.table("chat_messages")
@@ -128,8 +159,11 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 6
         recent_rows = list(reversed(recent_res.data or []))
 
         search_terms = extract_search_terms(query_text)
+        extra_words = [w for w in re.findall(r"[\w\u1000-\u109F]{2,}", query_text) if w not in search_terms]
+        search_terms = (search_terms + extra_words)[:10]
+
         matched_rows = []
-        seen = set((r["role"], r["content"]) for r in recent_rows)
+        seen = set((r.get("role"), r.get("content"), r.get("created_at")) for r in recent_rows)
 
         for term in search_terms:
             search_res = (
@@ -142,19 +176,27 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 6
                 .execute()
             )
             for r in reversed(search_res.data or []):
-                key = (r["role"], r["content"])
+                key = (r.get("role"), r.get("content"), r.get("created_at"))
                 if key not in seen:
                     seen.add(key)
                     matched_rows.append(r)
 
+        matched_rows.sort(key=lambda x: x.get("created_at") or "")
+
         sections = []
         if matched_rows:
-            matched_text = "\n".join([f"[{m['role']}]: {m['content']}" for m in matched_rows[-8:]])
-            sections.append(f"--- Relevant Past History ---\n{matched_text}")
+            matched_lines = [
+                f"[{_format_mm_timestamp(m.get('created_at'))} | {m.get('role')}]: {m.get('content')}"
+                for m in matched_rows[-15:]
+            ]
+            sections.append("--- Past Memory Matches (Earlier Conversations & Phrasing) ---\n" + "\n".join(matched_lines))
 
         if recent_rows:
-            recent_text = "\n".join([f"[{r['role']}]: {r['content']}" for r in recent_rows])
-            sections.append(f"--- Recent Conversation ---\n{recent_text}")
+            recent_lines = [
+                f"[{_format_mm_timestamp(r.get('created_at'))} | {r.get('role')}]: {r.get('content')}"
+                for r in recent_rows
+            ]
+            sections.append("--- Recent Conversation ---\n" + "\n".join(recent_lines))
 
         return "\n\n".join(sections)
     except Exception as e:
@@ -174,11 +216,11 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
         else:
             contents = prompt_text
 
-        config = None
-        if use_google_search:
-            config = types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())]
-            )
+        tools = [types.Tool(google_search=types.GoogleSearch())] if use_google_search else None
+        config = types.GenerateContentConfig(
+            system_instruction=STRICT_MYANMAR_SYSTEM,
+            tools=tools,
+        )
 
         response = gemini_client.models.generate_content(
             model="gemini-3.5-flash-lite",
@@ -192,10 +234,10 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
 
     # 2nd Attempt: Groq (Llama 3.1 8B Instant)
     try:
-        completion = groq_client.chat.completions.create(
+        completion = groq_client.with_options(timeout=8.0).chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content": "သင်သည် မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေဆိုပေးသော AI Assistant ဖြစ်သည်။"},
+                {"role": "system", "content": STRICT_MYANMAR_SYSTEM},
                 {"role": "user", "content": prompt_text}
             ],
             temperature=0.1,
@@ -207,7 +249,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
     except Exception as e:
         print(f"2. Groq Error: {e}")
 
-    # 3rd Attempt: OpenRouter Auto-Free Router (fast 8s timeout)
+    # 3rd Attempt: OpenRouter Auto-Free Router
     try:
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -216,7 +258,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
         data = {
             "model": "openrouter/free",
             "messages": [
-                {"role": "system", "content": "သင်သည် မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေဆိုပေးသော AI Assistant ဖြစ်သည်။"},
+                {"role": "system", "content": STRICT_MYANMAR_SYSTEM},
                 {"role": "user", "content": prompt_text}
             ]
         }
@@ -229,77 +271,61 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
     except Exception as e:
         print(f"3. OpenRouter Error: {e}")
 
-    return "လောလောဆယ် AI ဝန်ဆောင်မှုများ နှေးကွေးနေပါသည်။ ခဏနေမှ ထပ်မံမေးမြန်းကြည့်ပါရှင်။"
+    return "ဟုတ်ကဲ့ရှင်၊ လောလောဆယ် AI ဝန်ဆောင်မှုများ နှေးကွေးနေပါသည်။ ခဏနေမှ ထပ်မံမေးမြန်းကြည့်ပါနော်။"
 
 
-# --- 6-Intent AI Router (Zero-Keyword Smart Routing) ---
-def classify_user_intent(user_message: str, available_groups: list) -> dict:
+# --- 6-Intent AI Router (Zero-Keyword Smart Routing with Recent Context) ---
+def classify_user_intent(user_message: str, available_groups: list, recent_ctx: str = "") -> dict:
     """
     မေးခွန်း/ခိုင်းစေချက်ကို အမျိုးအစား ၆ မျိုးထဲမှ တစ်ခုအဖြစ် AI ကိုယ်တိုင် ခွဲခြားပေးသည်:
     - GROUP_QUERY: Group log များထဲမှ သီးခြားအချက်အလက် မေးမြန်းခြင်း
     - GROUP_SUMMARY: Group အနှစ်ချုပ် Report ထုတ်ခိုင်းခြင်း
     - TASK: Task ထည့်ခြင်း၊ ကြည့်ခြင်း၊ ပြီးစီးကြောင်း မှတ်ခြင်း
     - ADVICE: အကြံဉာဏ်တောင်းခြင်း၊ ပြဿနာ ဖြေရှင်းနည်း/ဆုံးဖြတ်ချက် အကြံပြုခိုင်းခြင်း
-    - GENERAL_TASK: Web search မလိုသော ခိုင်းစေချက်များ (စာရေး/ဘာသာပြန်/ရှင်းပြ/စကားပြော)
+    - GENERAL_TASK: Web search မလိုသော ခိုင်းစေချက်များ (စာရေး/ဘာသာပြန်/ရှင်းပြ/စကားပြော/အတိတ်မှတ်ဉာဏ်ပြန်မေး)
     - GENERAL_SEARCH: ပြင်ပသတင်း၊ ရာသီဥတု၊ ပွဲစဉ်/ရလဒ်၊ ဈေးနှုန်း၊ Real-time အချက်အလက် ရှာဖွေခြင်း
     """
-    groups_str = ", ".join(available_groups) if available_groups else "None"
+    groups_str = ", ".join(available_groups[:15]) if available_groups else "None"
     router_prompt = f"""
-Analyze the user's message and classify its intent into one of these exact categories:
-1. "GROUP_QUERY": Asking a specific question/check about internal operations, ways, cancellations, parcels, riders, branches, or events inside Telegram work groups.
-2. "GROUP_SUMMARY": Requesting a summary/report of unread or daily messages from Telegram groups.
-3. "TASK": Managing personal to-do tasks (adding a task, listing tasks, or marking a task done).
-4. "ADVICE": Asking for advice, recommendations, strategic options, or how to handle/solve a problem or decision.
-5. "GENERAL_TASK": General requests/instructions like drafting messages, translating, summarizing user-provided text, coding/tech help, explanations, or casual chat that don't require live web search or strategic advice.
-6. "GENERAL_SEARCH": Asking for current/live facts, weather/rain/temperature, news, prices, sports scores/fixtures, or external web information.
+Classify the user's latest message using recent context if needed.
+Intents:
+1. GROUP_QUERY: Asking a specific question/check about internal operations, ways, cancellations, parcels, riders, branches, or events inside Telegram work groups.
+2. GROUP_SUMMARY: Requesting a summary/report of unread or daily messages from Telegram groups.
+3. TASK: Managing personal to-do tasks (adding a task, listing tasks, or marking a task done).
+4. ADVICE: Asking for advice, recommendations, strategic options, or how to handle/solve a problem or decision.
+5. GENERAL_TASK: General requests/instructions like drafting messages, translating, summarizing user-provided text, coding/tech help, explanations, recalling earlier conversation/phrasing, or casual chat.
+6. GENERAL_SEARCH: Asking for current/live facts, weather/rain/temperature, news, prices, sports scores/fixtures, or external web information.
 
-Available Telegram Groups: [{groups_str}]
-User Message: "{user_message}"
+Available Groups: [{groups_str}]
+Recent Context:
+{recent_ctx or "None"}
 
-Return ONLY a valid JSON object:
-{{
-  "intent": "GROUP_QUERY" | "GROUP_SUMMARY" | "TASK" | "ADVICE" | "GENERAL_TASK" | "GENERAL_SEARCH",
-  "group_name": "exact matching group name from Available Telegram Groups or null",
-  "period": "today" | "yesterday" | "recent",
-  "task_action": "add" | "list" | "done" | null,
-  "task_title": "extracted task description if adding/completing or null",
-  "task_id": null
-}}
+Latest Message: "{user_message}"
+Return ONLY JSON:
+{{"intent":"...","group_name":null,"period":"today|yesterday|recent","task_action":null,"task_title":null,"task_id":null}}
 """
     try:
-        completion = groq_client.chat.completions.create(
+        completion = groq_client.with_options(timeout=4.0).chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content": "You are a strict JSON intent router. Output only valid JSON."},
+                {"role": "system", "content": "Output only valid JSON."},
                 {"role": "user", "content": router_prompt}
             ],
             temperature=0.0,
-            max_tokens=160,
+            max_tokens=140,
         )
-        raw = completion.choices[0].message.content.strip()
+        raw = (completion.choices[0].message.content or "").strip()
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if match:
             return json.loads(match.group(0))
     except Exception as e:
-        print(f"Groq router fallback to Gemini: {e}")
-
-    try:
-        resp = gemini_client.models.generate_content(
-            model="gemini-3.5-flash-lite",
-            contents=router_prompt
-        )
-        raw = (resp.text or "").strip()
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-    except Exception as e:
-        print(f"Gemini router error: {e}")
+        print(f"Fast router fallback: {e}")
 
     return {"intent": "GENERAL_SEARCH", "group_name": None, "period": "recent"}
 
 
 # --- Fast & Keyword-Free Parallel Web Search Helpers (Tavily + Google News RSS) ---
-def _tavily_worker(search_query: str, max_results: int = 5) -> str:
+def _tavily_worker(search_query: str, max_results: int = 4) -> str:
     if not TAVILY_API_KEY:
         return ""
     try:
@@ -313,7 +339,7 @@ def _tavily_worker(search_query: str, max_results: int = 5) -> str:
                 "max_results": max_results,
                 "include_answer": True,
             },
-            timeout=6,
+            timeout=5,
         )
         if resp.status_code != 200:
             return ""
@@ -323,7 +349,7 @@ def _tavily_worker(search_query: str, max_results: int = 5) -> str:
             lines.append(f"[Tavily Answer]: {data['answer']}")
         for r in data.get("results", []):
             title = r.get("title", "")
-            content = (r.get("content", "") or "")[:300]
+            content = (r.get("content", "") or "")[:280]
             lines.append(f"- {title}: {content}")
         return "\n".join(lines)
     except Exception as e:
@@ -331,14 +357,14 @@ def _tavily_worker(search_query: str, max_results: int = 5) -> str:
         return ""
 
 
-def _rss_worker(queries: list, per_query: int = 4) -> str:
+def _rss_worker(queries: list, per_query: int = 3) -> str:
     collected_items = []
     seen_titles = set()
     for q in queries:
         try:
             encoded_q = urllib.parse.quote(q)
             url = f"https://news.google.com/rss/search?q={encoded_q}&hl=en-US&gl=MM&ceid=MM:en"
-            resp = requests.get(url, timeout=6)
+            resp = requests.get(url, timeout=5)
             resp.raise_for_status()
             root = ET.fromstring(resp.content)
             for item in root.findall(".//channel/item")[:per_query]:
@@ -351,17 +377,17 @@ def _rss_worker(queries: list, per_query: int = 4) -> str:
                     collected_items.append(f"- {title} ({published})")
         except Exception as e:
             print(f"RSS fast error for '{q}': {e}")
-    return "\n".join(collected_items[:10])
+    return "\n".join(collected_items[:8])
 
 
-def fetch_combined_web_context(tavily_query: str, rss_queries: list = None, max_results: int = 5) -> str:
+def fetch_combined_web_context(tavily_query: str, rss_queries: list = None, max_results: int = 4) -> str:
     results_map = {"tavily": "", "rss": ""}
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = {executor.submit(_tavily_worker, tavily_query, max_results): "tavily"}
         if rss_queries:
-            futures[executor.submit(_rss_worker, rss_queries, 4)] = "rss"
+            futures[executor.submit(_rss_worker, rss_queries, 3)] = "rss"
 
-        for fut in as_completed(futures, timeout=7):
+        for fut in as_completed(futures, timeout=6):
             key = futures[fut]
             try:
                 results_map[key] = fut.result() or ""
@@ -384,7 +410,7 @@ def get_myanmar_news_summary() -> str:
     web_context = fetch_combined_web_context(
         tavily_query=f"Myanmar latest news {today_date} Yangon",
         rss_queries=["Myanmar news", "မြန်မာ သတင်း", "Yangon news"],
-        max_results=5,
+        max_results=4,
     )
 
     prompt = f"""
@@ -399,28 +425,32 @@ def get_myanmar_news_summary() -> str:
     return f"📰 Myanmar News Summary ({now_str})\n\n{summary}"
 
 
-# --- Keyword-Free Universal Web Search + AI Answer ---
+# --- Keyword-Free Universal Web Search + Full Memory Answer ---
 def answer_with_universal_search(user_id: int, user_message: str) -> str:
+    stripped_lower = user_message.strip().lower()
+    if stripped_lower in ["မာယာ", "maya", "hi", "hello", "hey", "မင်္ဂလာပါ"]:
+        return "ဟုတ်ကဲ့ရှင်၊ မာယာ (Maya) ရှိပါတယ်နော်။ ဘာကူညီပေးရမလဲ ပြောပြပါရှင်။"
+
     now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
-    memory_context = recall_relevant_history(user_id, user_message, recent_limit=5, search_limit=3)
+    memory_context = recall_relevant_history(user_id, user_message, recent_limit=8, search_limit=10)
 
     clean_q = re.sub(r"[?？!]", "", user_message).strip()
-    web_context = fetch_combined_web_context(clean_q, rss_queries=[clean_q], max_results=5)
+    web_context = fetch_combined_web_context(clean_q, rss_queries=[clean_q], max_results=4)
 
     system_prompt = (
-        f"သင်သည် မာယာ (Maya) အမည်ရှိ ကိုယ်ပိုင် အလုပ်အမှုဆောင် AI Assistant ဖြစ်သည်။\n"
+        f"သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။\n"
         f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n"
         f"စည်းမျဉ်းများ:\n"
-        f"1. Web Search ရလဒ်များနှင့် Google Search Tool ကို အသုံးပြု၍ သတင်းအစုံ၊ ရာသီဥတု၊ အားကစားပွဲစဉ်/ရလဒ် အဟောင်းအသစ်၊ ဈေးနှုန်း၊ နည်းပညာနှင့် ဗဟုသုတ မေးခွန်းများကို တိကျပြည့်စုံစွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ။\n"
-        f"2. အဖြေကို အဓိက အချက်အလက် (၃ - ၅ ချက်) သာ ဖော်ပြပြီး စာလုံးရေ ၁,၅၀၀ အတွင်း တိုတိုရှင်းရှင်းနှင့် မြန်မာစာလုံး မှန်ကန်သန့်ရှင်းစွာ ဖြေကြားပါ။\n"
-        f"3. Web Search ရလဒ် ပါရှိပါက အတိတ် Chat History ထဲက ဈေးနှုန်း/ရာသီဥတု/ပွဲစဉ် အချက်အလက်ဟောင်းများကို မကိုးကားဘဲ လက်ရှိ Web Search ရလဒ်ကိုသာ ဦးစားပေး ဖြေပါ။\n"
-        f"4. အချက်အလက် အတိအကျ ရှာမတွေ့ပါက မမှန်မကန် မဖြေဘဲ မတွေ့ရှိကြောင်း ရိုးသားစွာ ရှင်းပြပါ။ Task မှတ်လိုပါက /addtask ဖြင့် မှတ်နိုင်သည်။\n"
+        f"1. Past Memory Matches နှင့် Recent Conversation ထဲတွင် အရင် ပြောခဲ့/မေးခဲ့ဖူးသည့် အကြောင်းအရာများနှင့် အသုံးအနှုန်းပုံစံများ ရှိပါက အချိန်မရွေး ပြန်မေးလျှင် သေချာမှတ်မိပြီး တိတိကျကျ ဆက်စပ်ဖြေပါ။\n"
+        f"2. အရင် စကားပြောဆိုမှုထဲက အချက်ကို ပြန်မေးနေခြင်း ဖြစ်ပါက Web Search ရလဒ်ထက် Past Memory / Recent Conversation ကို ဦးစားပေး ဖြေပါ။\n"
+        f"3. ပြင်ပသတင်း၊ ရာသီဥတု၊ အားကစားပွဲစဉ်/ရလဒ်၊ ဈေးနှုန်း၊ နည်းပညာနှင့် ဗဟုသုတ မေးခွန်းများအတွက် Web Search ရလဒ်နှင့် Google Search Tool ကို အသုံးပြု၍ တိကျစွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ။\n"
+        f"4. မေးခွန်းနှင့် မသက်ဆိုင်သော Search ရလဒ်များကို လုံးဝ မသုံးပါနှင့်။ အဖြေကို တိုတိုရှင်းရှင်းနှင့် မြန်မာစာ သန့်သန့်ရှင်းရှင်း ဖြေပါ။\n"
     )
 
     full_prompt = (
         f"{system_prompt}\n"
+        f"{memory_context or '--- Conversation History ---\nNone'}\n\n"
         f"{web_context or '--- Web Search Results ---\nNone'}\n\n"
-        f"{memory_context}\n\n"
         f"လက်ရှိ မေးခွန်း/စကား: {user_message}"
     )
 
@@ -816,7 +846,7 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
     await send_long_message(query.message, reply_text)
 
 
-# --- 4. General Telegram Message Handler (6-Intent Zero-Keyword AI Routing) ---
+# --- 4. General Telegram Message Handler (6-Intent Zero-Keyword AI Routing + Full Memory) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
@@ -872,12 +902,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             save_chat_message(message.from_user.id, "user", user_message)
 
-            if user_message.strip().lower() in ["menu", "help"]:
+            stripped_lower = user_message.strip().lower()
+            if stripped_lower in ["menu", "help"]:
                 await message.reply_text("Quick Menu:", reply_markup=build_main_menu_keyboard())
                 return
 
+            if stripped_lower in ["မာယာ", "maya", "hi", "hello", "hey", "မင်္ဂလာပါ"]:
+                reply_text = "ဟုတ်ကဲ့ရှင်၊ မာယာ (Maya) ရှိပါတယ်နော်။ ဘာကူညီပေးရမလဲ ပြောပြပါရှင်။"
+                save_chat_message(message.from_user.id, "assistant", reply_text)
+                await message.reply_text(reply_text)
+                return
+
             available_groups = await asyncio.to_thread(get_available_groups)
-            route = await asyncio.to_thread(classify_user_intent, user_message, available_groups)
+            recent_ctx = await asyncio.to_thread(get_recent_history_for_router, message.from_user.id, 4)
+            route = await asyncio.to_thread(classify_user_intent, user_message, available_groups, recent_ctx)
 
             intent = route.get("intent", "GENERAL_SEARCH")
             target_group = route.get("group_name")
@@ -895,23 +933,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif intent == "TASK":
                 reply_text = await asyncio.to_thread(handle_task_intent, user_message, route)
             elif intent == "ADVICE":
-                memory_context = recall_relevant_history(message.from_user.id, user_message, recent_limit=6, search_limit=4)
+                memory_context = recall_relevant_history(message.from_user.id, user_message, recent_limit=8, search_limit=10)
                 advice_prompt = (
-                    f"သင်သည် မာယာ (Maya) အမည်ရှိ လက်တွေ့ကျကျ အကြံဉာဏ်ပေးနိုင်သော ကိုယ်ပိုင် အလုပ်အမှုဆောင် AI Advisor ဖြစ်သည်။\n"
-                    f"အသုံးပြုသူ၏ အခြေအနေနှင့် မေးခွန်းကို သုံးသပ်ပြီး အောက်ပါပုံစံအတိုင်း မြန်မာဘာသာဖြင့် ရှင်းလင်းပြတ်သားစွာ အကြံပြုပါ:\n"
-                    f"1. အခြေအနေ သုံးသပ်ချက် (တိုတိုရှင်းရှင်း)\n"
-                    f"2. အကြံပြု လုပ်ဆောင်သင့်သော နည်းလမ်းများ (Actionable Options / Pros & Cons ရှိလျှင် ဖော်ပြပါ)\n"
+                    f"အသုံးပြုသူ၏ အခြေအနေ၊ အတိတ်မှတ်ဉာဏ်နှင့် မေးခွန်းကို သုံးသပ်ပြီး မြန်မာဘာသာဖြင့် ရှင်းလင်းပြတ်သားစွာ အကြံပြုပါ:\n"
+                    f"1. အခြေအနေ သုံးသပ်ချက်\n"
+                    f"2. အကြံပြု လုပ်ဆောင်သင့်သော နည်းလမ်းများ\n"
                     f"3. ချက်ချင်း စတင်နိုင်မည့် Next Step\n\n"
                     f"{memory_context}\n\n"
                     f"အကြံတောင်းသည့် အကြောင်းအရာ: {user_message}"
                 )
                 reply_text = await asyncio.to_thread(call_ai_with_3tier_fallback, advice_prompt, None, None, False)
             elif intent == "GENERAL_TASK":
-                memory_context = recall_relevant_history(message.from_user.id, user_message, recent_limit=5, search_limit=3)
+                memory_context = recall_relevant_history(message.from_user.id, user_message, recent_limit=8, search_limit=10)
                 gen_prompt = (
-                    f"သင်သည် မာယာ (Maya) အမည်ရှိ ကိုယ်ပိုင် အလုပ်အမှုဆောင် AI Assistant ဖြစ်သည်။\n"
-                    f"အသုံးပြုသူ ခိုင်းစေချက်/မေးခွန်းကို မြန်မာဘာသာဖြင့် (သို့မဟုတ် တောင်းဆိုသည့် ဘာသာစကားဖြင့်) "
-                    f"တိုတိုရှင်းရှင်း၊ ထိထိရောက်ရောက်နှင့် လက်တွေ့ကျကျ ကူညီဆောင်ရွက်ပေးပါ။\n\n"
+                    f"အသုံးပြုသူ၏ အတိတ်စကားပြောဆိုမှုများ၊ အသုံးအနှုန်းပုံစံများနှင့် ခိုင်းစေချက်ကို သေချာမှတ်မိပြီး "
+                    f"မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်း၊ ထိထိရောက်ရောက် ကူညီဆောင်ရွက်ပေးပါ။\n\n"
                     f"{memory_context}\n\n"
                     f"ခိုင်းစေချက်: {user_message}"
                 )
@@ -965,7 +1001,7 @@ async def main_async():
         BotCommand("addtask", "Add a new task"),
     ])
 
-    print("🤖 6-Intent Universal AI Agent (Maya) started...")
+    print("🤖 6-Intent Universal AI Agent with Full Memory (Maya) started...")
 
     await application.start()
     await application.updater.start_polling()
