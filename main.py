@@ -6,8 +6,15 @@ import re
 import requests
 from datetime import datetime, timedelta, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    MessageHandler,
+    CommandHandler,
+    CallbackQueryHandler,
+    filters,
+    ContextTypes,
+)
 from google import genai
 from google.genai import types
 from groq import Groq
@@ -26,9 +33,9 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("MY_TELEGRAM_USER_ID", "0"))
 
-# မြန်မာစံတော်ချိန် (UTC+6:30) သတ်မှတ်ခြင်း
+# မြန်မာစံတော်ချိန် (UTC+6:30) နှင့် ရက် ၃၀ သိမ်းဆည်းမှု သတ်မှတ်ခြင်း
 MM_TZ = timezone(timedelta(hours=6, minutes=30))
-RETENTION_DAYS = 30  # raw_logs ကို သိမ်းဆည်းမည့် ရက်အရေအတွက် (တစ်လစာ)
+RETENTION_DAYS = 30
 
 
 # --- Render Web Service အတွက် Dummy Health Check Server ---
@@ -36,7 +43,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Telegram AI Agent with Memory, Group Reports & 3-Tier Fallback is running!")
+        self.wfile.write(b"Telegram AI Agent with Quick Menu, Memory & 3-Tier Fallback is running!")
 
 
 def run_health_server():
@@ -47,7 +54,6 @@ def run_health_server():
 
 # --- Database Auto-Cleanup (ရက် ၃၀ ကျော်သော raw_logs များကို အော်တိုဖျက်ခြင်း) ---
 def cleanup_old_raw_logs():
-    """တစ်လ (ရက် ၃၀) ထက် ကျော်လွန်နေသော raw_logs မှတ်တမ်းအဟောင်းများကို ဖျက်ပေးသည်။"""
     try:
         cutoff_dt = datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)
         supabase.table("raw_logs").delete().lt("created_at", cutoff_dt.isoformat()).execute()
@@ -55,9 +61,8 @@ def cleanup_old_raw_logs():
         print(f"Error cleaning up old raw_logs: {e}")
 
 
-# --- Supabase Chat Memory Helpers (All History Saved + Smart Recall) ---
+# --- Supabase Chat Memory Helpers ---
 def save_chat_message(user_id: int, role: str, content: str):
-    """ပြောခဲ့သမျှ စကားအားလုံးကို Supabase chat_messages table တွင် သိမ်းဆည်းသည်။"""
     try:
         supabase.table("chat_messages").insert({
             "user_id": user_id,
@@ -69,7 +74,6 @@ def save_chat_message(user_id: int, role: str, content: str):
 
 
 def extract_search_terms(query_text: str) -> list:
-    """Space ခြားထားသော စကားလုံးများအပြင် ရှည်လျားသော စာကြောင်းများမှလည်း အပိုင်းအစများ ထုတ်ယူသည်။"""
     terms = []
     for raw in query_text.split():
         cleaned = re.sub(r"[^\w\u1000-\u109F]", "", raw)
@@ -91,7 +95,6 @@ def extract_search_terms(query_text: str) -> list:
 
 
 def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 12, search_limit: int = 10) -> str:
-    """လတ်တလော မက်ဆေ့ခ်ျများအပြင် မေးခွန်းနှင့် သက်ဆိုင်သည့် အတိတ်မှတ်တမ်းများကို ပြန်ရှာပေးသည်။"""
     try:
         recent_res = (
             supabase.table("chat_messages")
@@ -138,7 +141,7 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 1
         return ""
 
 
-# --- 3-Tier AI Fallback Helper (Gemini Flash-Lite -> Groq Instant -> OpenRouter Auto-Free) ---
+# --- 3-Tier AI Fallback Helper ---
 def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
     errors = []
 
@@ -201,28 +204,35 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
     return "API ၃ ခုစလုံး အလုပ်မလုပ်ပါ:\n\n" + "\n\n".join(errors)
 
 
-# --- 1. Supabase Tools (Functions) for Personal Tasks ---
+# --- 1. Personal Tasks Helpers ---
 def add_task(title: str) -> dict:
-    """Supabase database ထဲသို့ Task အသစ်တစ်ခု ထည့်သွင်းပေးသည်။"""
     supabase.table("tasks").insert({"title": title, "status": "pending"}).execute()
     return {"status": "success", "message": f"Task အသစ် ထည့်သွင်းပြီးပါပြီ: {title}"}
 
 
 def list_tasks() -> list:
-    """Supabase database ထဲတွင် ရှိနေသော Task အားလုံးကို စာရင်းထုတ်ကြည့်သည်။"""
     res = supabase.table("tasks").select("*").order("id").execute()
     return res.data
 
 
-def update_task_status(task_id: int, new_status: str) -> dict:
-    """Task တစ်ခု၏ အခြေအနေကို ပြင်ဆင်ပေးသည်။ ('completed', 'pending')"""
-    supabase.table("tasks").update({"status": new_status}).eq("id", task_id).execute()
-    return {"status": "success", "message": f"Task ID {task_id} ကို {new_status} သို့ ပြောင်းလဲပြီးပါပြီ။"}
+def get_formatted_tasks() -> str:
+    tasks = list_tasks()
+    if not tasks:
+        return "လက်ရှိ Task စာရင်း မရှိသေးပါ။"
+    return "📋 လက်ရှိ Task များ:\n" + "\n".join([f"- ID {t['id']}: {t['title']} ({t['status']})" for t in tasks])
 
 
-# --- 2. Group Summary & Report Tools (By Group Name & Date within 30 Days) ---
+# --- 2. Group Summary & Report Tools ---
+def get_available_groups() -> list:
+    """ရက် ၃၀ အတွင်း raw_logs ထဲတွင် ရှိနေသော Group နာမည်များကို စာရင်းထုတ်ပေးသည်။"""
+    cleanup_old_raw_logs()
+    thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
+    res = supabase.table("raw_logs").select("group_name").gte("created_at", thirty_days_ago_iso).execute()
+    groups = sorted(list({r["group_name"] for r in (res.data or []) if r.get("group_name")}))
+    return groups
+
+
 def parse_date_range_from_text(text: str):
-    """မေးခွန်းထဲမှ ဒီနေ့၊ မနေ့က သို့မဟုတ် YYYY-MM-DD ရက်စွဲကို ရှာဖွေပေးသည်။"""
     text_lower = text.lower()
     now_mm = datetime.now(MM_TZ)
 
@@ -252,28 +262,25 @@ def parse_date_range_from_text(text: str):
     return None, None, None
 
 
-def get_group_report(user_query: str) -> str:
-    """Group နာမည်နှင့် ရက်စွဲ (သို့မဟုတ် မဖတ်ရသေးသော စာများ) အလိုက် Report ထုတ်ပေးသည်။"""
-    # Report မထုတ်မီ ရက် ၃၀ ကျော်နေသော မှတ်တမ်းအဟောင်းများကို အရင်ရှင်းလင်းမည်
+def get_group_report(user_query: str, exact_group_name: str = None) -> str:
     cleanup_old_raw_logs()
-
     start_iso, end_iso, date_label = parse_date_range_from_text(user_query)
 
-    # လွန်ခဲ့သော ရက် ၃၀ အတွင်း ဒေတာများကိုသာ ကန့်သတ်ဆွဲယူမည်
     thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
     query = supabase.table("raw_logs").select("*").gte("created_at", thirty_days_ago_iso).order("id")
 
     if start_iso and end_iso:
         query = query.gte("created_at", start_iso).lt("created_at", end_iso)
-    else:
+    elif not exact_group_name:
         query = query.eq("is_read", False)
 
     logs_res = query.execute()
     logs = logs_res.data or []
 
-    # Group နာမည်အလိုက် အော်တို စစ်ထုတ်ခြင်း
-    matched_group_name = None
-    if logs:
+    matched_group_name = exact_group_name
+    if exact_group_name:
+        logs = [l for l in logs if l.get("group_name") == exact_group_name]
+    elif logs:
         all_groups = list({l.get("group_name") for l in logs if l.get("group_name")})
         q_lower = user_query.lower()
         for g_name in all_groups:
@@ -286,14 +293,14 @@ def get_group_report(user_query: str) -> str:
     if not logs:
         scope_desc = f" ({matched_group_name})" if matched_group_name else ""
         if date_label:
-            return f"{date_label}{scope_desc} အတွက် သိမ်းဆည်းထားသော Group မက်ဆေ့ခ်ျ မှတ်တမ်း မရှိပါ။ (မှတ်ချက် - ရက် ၃၀ အတွင်း ဒေတာများကိုသာ ထိန်းသိမ်းထားပါသည်။)"
+            return f"{date_label}{scope_desc} အတွက် သိမ်းဆည်းထားသော Group မက်ဆေ့ခ်ျ မှတ်တမ်း မရှိပါ။"
         return f"လက်ရှိ{scope_desc} တွင် မဖတ်ရသေးသော မက်ဆေ့ခ်ျအသစ် မရှိသေးပါ။"
 
     raw_text = "\n".join(
         [f"[{l['group_name']} | {l['sender_name']} | {str(l.get('created_at', ''))[:16]}]: {l['content_summary']}" for l in logs]
     )
 
-    header_info = f"Group: {matched_group_name or 'All Groups'} | ကာလ: {date_label or 'မဖတ်ရသေးသော မက်ဆေ့ခ်ျအသစ်များ'}"
+    header_info = f"Group: {matched_group_name or 'All Groups'} | ကာလ: {date_label or 'မဖတ်ရသေးသော စာများ (သို့) ရွေးချယ်ထားသော Group'}"
 
     prompt = f"""
     အောက်ပါတို့မှာ Telegram Group များမှ ရရှိထားသော မက်ဆေ့ခ်ျများနှင့် ပုံ/ဖိုင် အနှစ်ချုပ်များ ဖြစ်သည်။
@@ -312,15 +319,122 @@ def get_group_report(user_query: str) -> str:
 
     supabase.table("daily_reports").insert({"report_content": f"[{header_info}]\n{report_text}"}).execute()
 
-    # ရက်စွဲမပါဘဲ မဖတ်ရသေးတာကို ထုတ်ခဲ့ခြင်းဖြစ်လျှင် is_read = True ပြောင်းမှတ်ထားမည် (ရက် ၃၀ ပြည့်မှ အော်တိုဖျက်မည်)
-    if not date_label:
+    if not date_label and not exact_group_name:
         for l in logs:
             supabase.table("raw_logs").update({"is_read": True}).eq("id", l["id"]).execute()
 
     return f"📊 {header_info}\n\n{report_text}"
 
 
-# --- 3. Telegram Message Handler ---
+# --- 3. Quick Menu & Command Handlers ---
+def build_main_menu_keyboard() -> InlineKeyboardMarkup:
+    keyboard = [
+        [
+            InlineKeyboardButton("🆕 မဖတ်ရသေးသော Summary", callback_data="cmd_unread_summary"),
+            InlineKeyboardButton("📅 ဒီနေ့ Summary", callback_data="cmd_today_summary"),
+        ],
+        [
+            InlineKeyboardButton("⏮️ မနေ့က Summary", callback_data="cmd_yesterday_summary"),
+            InlineKeyboardButton("👥 Group အလိုက် ရွေးရန်", callback_data="cmd_list_groups"),
+        ],
+        [
+            InlineKeyboardButton("📋 Task စာရင်းကြည့်ရန်", callback_data="cmd_list_tasks"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def build_groups_keyboard() -> tuple[str, InlineKeyboardMarkup | None]:
+    groups = get_available_groups()
+    if not groups:
+        return "လွန်ခဲ့သော ရက် ၃၀ အတွင်း မှတ်တမ်းတင်ထားသော Group မရှိသေးပါ။", None
+
+    keyboard = []
+    for idx, g_name in enumerate(groups):
+        # Callback data length limit (64 bytes) မကျော်စေရန် index ဖြင့် ပို့မည်
+        keyboard.append([InlineKeyboardButton(f"📌 {g_name}", callback_data=f"grp_idx_{idx}")])
+
+    return "Report ထုတ်လိုသော Group ကို အောက်ပါခလုတ်များမှ နှိပ်ရွေးပါ:", InlineKeyboardMarkup(keyboard)
+
+
+async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message or message.chat.type != "private":
+        return
+
+    if message.from_user.id != ADMIN_USER_ID:
+        await message.reply_text("ခွင့်ပြုချက်မရှိပါ။")
+        return
+
+    cmd = message.text.split()[0].lower()
+
+    if cmd in ["/start", "/menu"]:
+        await message.reply_text(
+            "🤖 **Personal AI Assistant Quick Menu**\nအောက်ပါ ခလုတ်များကို နှိပ်၍ အလွယ်တကူ ခိုင်းစေနိုင်ပါသည်:",
+            reply_markup=build_main_menu_keyboard()
+        )
+        return
+
+    await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
+
+    if cmd == "/summary":
+        reply_text = get_group_report("unread summary")
+        await message.reply_text(reply_text)
+    elif cmd == "/today":
+        reply_text = get_group_report("ဒီနေ့ summary")
+        await message.reply_text(reply_text)
+    elif cmd == "/yesterday":
+        reply_text = get_group_report("မနေ့က summary")
+        await message.reply_text(reply_text)
+    elif cmd == "/groups":
+        text, markup = build_groups_keyboard()
+        await message.reply_text(text, reply_markup=markup)
+    elif cmd == "/tasks":
+        await message.reply_text(get_formatted_tasks())
+
+
+async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+
+    if query.from_user.id != ADMIN_USER_ID:
+        await query.answer("ခွင့်ပြုချက်မရှိပါ။", show_alert=True)
+        return
+
+    await query.answer()
+    data = query.data
+
+    if data == "cmd_list_groups":
+        text, markup = build_groups_keyboard()
+        await query.message.reply_text(text, reply_markup=markup)
+        return
+
+    await context.bot.send_chat_action(chat_id=query.message.chat_id, action="typing")
+
+    if data == "cmd_unread_summary":
+        reply_text = get_group_report("unread summary")
+    elif data == "cmd_today_summary":
+        reply_text = get_group_report("ဒီနေ့ summary")
+    elif data == "cmd_yesterday_summary":
+        reply_text = get_group_report("မနေ့က summary")
+    elif data == "cmd_list_tasks":
+        reply_text = get_formatted_tasks()
+    elif data.startswith("grp_idx_"):
+        idx = int(data.replace("grp_idx_", ""))
+        groups = get_available_groups()
+        if 0 <= idx < len(groups):
+            selected_group = groups[idx]
+            reply_text = get_group_report(f"{selected_group} summary", exact_group_name=selected_group)
+        else:
+            reply_text = "ရွေးချယ်ထားသော Group ကို ရှာမတွေ့ပါ။ /groups ကို ပြန်နှိပ်ကြည့်ပါ။"
+    else:
+        reply_text = "မသိရှိသော ခလုတ်ဖြစ်ပါသည်။"
+
+    await query.message.reply_text(reply_text)
+
+
+# --- 4. General Telegram Message Handler ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
@@ -336,14 +450,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if message.text:
             content_summary = message.text
-
         elif message.photo:
             photo_file = await message.photo[-1].get_file()
             photo_bytes = await photo_file.download_as_bytearray()
             img_prompt = "ဒီပုံထဲမှာ ပါဝင်တဲ့ အဓိက အချက်အလက်များ၊ စာသားများ သို့မဟုတ် လုပ်ငန်းဆိုင်ရာ အခြေအနေများကို အတိုချုံး ဖော်ပြပေးပါ။"
             img_summary = call_ai_with_3tier_fallback(img_prompt, image_bytes=photo_bytes, mime_type='image/jpeg')
             content_summary = f"[ပုံပါဖိုင်] {img_summary}"
-
         elif message.document:
             doc_file = await message.document.get_file()
             doc_bytes = await doc_file.download_as_bytearray()
@@ -379,15 +491,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_chat_message(message.from_user.id, "user", user_message)
 
             msg_lower = user_message.lower()
-            if any(k in msg_lower for k in ["report", "summary", "အနှစ်ချုပ်", "အကျဉ်းချုပ်"]):
+            if msg_lower.strip() in ["menu", "မီနူး", "help"]:
+                await message.reply_text(
+                    "🤖 အမြန်သုံး ခလုတ်များ (Quick Menu):",
+                    reply_markup=build_main_menu_keyboard()
+                )
+                return
+            elif any(k in msg_lower for k in ["report", "summary", "အနှစ်ချုပ်", "အကျဉ်းချုပ်"]):
                 reply_text = get_group_report(user_message)
             elif any(k in msg_lower for k in ["task", "လုပ်စရာ", "ထည့်"]):
                 add_task(user_message)
                 reply_text = f"Task အသစ် ထည့်သွင်းပြီးပါပြီ: {user_message}"
             elif any(k in msg_lower for k in ["စာရင်း", "list"]):
-                tasks = list_tasks()
-                reply_text = "လက်ရှိ Task များ:\n" + "\n".join(
-                    [f"- ID {t['id']}: {t['title']} ({t['status']})" for t in tasks]) if tasks else "Task မရှိသေးပါ။"
+                reply_text = get_formatted_tasks()
             else:
                 memory_context = recall_relevant_history(message.from_user.id, user_message)
                 system_prompt = (
@@ -414,11 +530,28 @@ async def main_async():
     threading.Thread(target=run_health_server, daemon=True).start()
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # Slash Commands (/menu, /summary, /today, /yesterday, /groups, /tasks)
+    application.add_handler(CommandHandler(["start", "menu", "summary", "today", "yesterday", "groups", "tasks"], handle_command))
+    # Inline Button Clicks
+    application.add_handler(CallbackQueryHandler(handle_button_callback))
+    # Normal Messages
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-    print("🤖 AI Agent with Memory, Group Reports (30-Day Retention) & 3-Tier Fallback စတင် အလုပ်လုပ်နေပါပြီ...")
-
     await application.initialize()
+
+    # Telegram စာရိုက် Box ဘေးရှိ Menu (/) Drop-down List ကို အလိုအလျောက် သတ်မှတ်ပေးခြင်း
+    await application.bot.set_my_commands([
+        BotCommand("menu", "အမြန်သုံး ခလုတ်များ (Quick Menu) ဖွင့်ရန်"),
+        BotCommand("summary", "မဖတ်ရသေးသော Group စာများ အနှစ်ချုပ်ရန်"),
+        BotCommand("today", "ဒီနေ့ Group အားလုံး၏ Summary ကြည့်ရန်"),
+        BotCommand("yesterday", "မနေ့က Group အားလုံး၏ Summary ကြည့်ရန်"),
+        BotCommand("groups", "Group နာမည်အလိုက် ရွေးချယ်ပြီး Report ထုတ်ရန်"),
+        BotCommand("tasks", "လက်ရှိ Task စာရင်းအားလုံး ကြည့်ရန်"),
+    ])
+
+    print("🤖 AI Agent with Quick Menu, Memory & 3-Tier Fallback စတင် အလုပ်လုပ်နေပါပြီ...")
+
     await application.start()
     await application.updater.start_polling()
 
