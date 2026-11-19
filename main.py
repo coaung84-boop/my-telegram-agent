@@ -5,7 +5,7 @@ import asyncio
 import re
 import urllib.parse
 import requests
-import feedparser
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone, time as dt_time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
@@ -206,9 +206,9 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
     return "API ၃ ခုစလုံး အလုပ်မလုပ်ပါ:\n\n" + "\n\n".join(errors)
 
 
-# --- Myanmar News Fetcher & Summarizer (via Google News RSS) ---
+# --- Myanmar News Fetcher & Summarizer (via Google News RSS + Built-in ElementTree) ---
 def get_myanmar_news_summary() -> str:
-    """Google News RSS မှ မြန်မာပြည် လတ်တလော သတင်းခေါင်းစဉ်များကို ဆွဲယူပြီး အနှစ်ချုပ်ပေးသည်။"""
+    """Google News RSS XML မှ မြန်မာပြည် လတ်တလော သတင်းခေါင်းစဉ်များကို ElementTree ဖြင့် ဆွဲယူပြီး အနှစ်ချုပ်ပေးသည်။"""
     queries = ["Myanmar news", "မြန်မာ သတင်း", "Yangon news"]
     collected_items = []
     seen_titles = set()
@@ -218,10 +218,16 @@ def get_myanmar_news_summary() -> str:
             encoded_q = urllib.parse.quote(q)
             url = f"https://news.google.com/rss/search?q={encoded_q}&hl=en-US&gl=MM&ceid=MM:en"
             resp = requests.get(url, timeout=15)
-            feed = feedparser.parse(resp.text)
-            for entry in feed.entries[:8]:
-                title = (entry.get("title") or "").strip()
-                published = (entry.get("published") or "").strip()
+            resp.raise_for_status()
+
+            root = ET.fromstring(resp.content)
+            for item in root.findall(".//channel/item")[:8]:
+                title_el = item.find("title")
+                pub_el = item.find("pubDate")
+
+                title = (title_el.text or "").strip() if title_el is not None and title_el.text else ""
+                published = (pub_el.text or "").strip() if pub_el is not None and pub_el.text else ""
+
                 if title and title not in seen_titles:
                     seen_titles.add(title)
                     collected_items.append(f"- {title} ({published})")
