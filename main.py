@@ -44,10 +44,10 @@ RETENTION_DAYS = 30
 
 STRICT_MYANMAR_SYSTEM = (
     "သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။ "
-    "အမြဲတမ်း မြန်မာဘာသာ (Unicode) ဖြင့်သာ ရှင်းလင်းပြတ်သားစွာ ဖြေဆိုပါ။ "
-    "တရုတ်၊ ကိုရီးယား၊ အာရဗီ စသည့် မသက်ဆိုင်သော ဘာသာစကား/စာလုံးများ ရောနှောမရေးပါနှင့်။ "
-    "အရှေ့နောက် Conversation History နှင့် အသုံးပြုသူ၏ အသုံးအနှုန်းပုံစံများကို သေချာမှတ်မိပြီး သဘာဝကျကျ ဆက်စပ်ဖြေပါ။ "
-    "မေးခွန်းနှင့် မသက်ဆိုင်သော Search အချက်အလက်များကို လုံးဝ မသုံးပါနှင့်။"
+    "အမြဲတမ်း မြန်မာဘာသာ (Unicode) ဖြင့်သာ သဘာဝကျကျ၊ ရှင်းလင်းပြတ်သားစွာ ဖြေဆိုပါ။ "
+    "စာလုံးပေါင်းနှင့် စာလုံးအကူးအပြောင်းများ (ဥပမာ - နိုင်ငံခြားစာလုံး/သင်္ကေတများ မလိုအပ်ဘဲ ရောနှောခြင်း) ကို လုံးဝ ရှောင်ကြဉ်ပါ။ "
+    "အသုံးပြုသူ၏ Profile၊ အတိတ်မှတ်တမ်းနှင့် အလေ့အထများကို နားလည်ပြီး အလိုက်သိသိနှင့် တိုတိုရှင်းရှင်း ဖြေပါ။ "
+    "မေးခွန်းနှင့် မသက်ဆိုင်သော Search အချက်အလက်များကို လုံးဝ မသုံးပါနှင့်။ မသေချာပါက မသိကြောင်း ရိုးသားစွာ ဖြေပါ။"
 )
 
 
@@ -65,7 +65,7 @@ def run_health_server():
     server.serve_forever()
 
 
-# --- Safe Long Message Sender (Prevents Telegram 'Text is too long' & Empty Text Errors) ---
+# --- Safe Long Message Sender ---
 async def send_long_message(message, text: str, chunk_size: int = 3500):
     if not text or not str(text).strip():
         await message.reply_text("ဟုတ်ကဲ့ရှင်၊ လောလောဆယ် အဖြေပြန်ထုတ်ရာတွင် အခက်အခဲ ရှိနေပါသည်။ နောက်မှ ထပ်မေးကြည့်ပါနော်။")
@@ -90,7 +90,7 @@ def cleanup_old_raw_logs():
         print(f"Error cleaning up old raw_logs: {e}")
 
 
-# --- Supabase Chat Memory Helpers (Full Conversation & Style Recall) ---
+# --- Timestamp & Chat Memory Helpers ---
 def _format_mm_timestamp(ts_str: str) -> str:
     if not ts_str:
         return ""
@@ -112,6 +112,64 @@ def save_chat_message(user_id: int, role: str, content: str):
         print(f"Error saving chat message: {e}")
 
 
+def get_user_profile(user_id: int) -> str:
+    """အသုံးပြုသူအကြောင်း တဖြည်းဖြည်း လေ့လာမှတ်သားထားသော Profile ကို ပြန်ယူသည်။"""
+    try:
+        res = (
+            supabase.table("user_profile")
+            .select("profile_summary")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        if rows and rows[0].get("profile_summary"):
+            return rows[0]["profile_summary"].strip()
+    except Exception as e:
+        print(f"Error reading user_profile: {e}")
+    return ""
+
+
+def evolve_user_profile(user_id: int, user_msg: str, assistant_reply: str):
+    """ပြောခဲ့/မေးခဲ့သမျှထဲမှ အသုံးပြုသူ၏ အကြောင်းအရာ၊ ကြိုက်နှစ်သက်မှုနှင့် အလုပ်/လူနေမှုပုံစံကို တဖြည်းဖြည်း Update လုပ်သည်။"""
+    try:
+        current_profile = get_user_profile(user_id)
+        update_prompt = f"""
+You are building a concise, evolving memory profile of the user from their conversations so the AI assistant understands them naturally with minimal explanation.
+
+Existing User Profile:
+{current_profile or "None yet."}
+
+Latest Exchange:
+User: {user_msg}
+Assistant: {assistant_reply[:400]}
+
+Update the User Profile in Burmese (bullet points, max ~180 words):
+- Keep important facts, preferences, work context, communication style, and recurring topics learned about the user.
+- Remove outdated or contradictory details.
+- Do not include raw temporary news, weather, or random search trivia.
+Return ONLY the updated profile text.
+"""
+        completion = groq_client.with_options(timeout=5.0).chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "Output concise factual user profile notes in Myanmar Unicode."},
+                {"role": "user", "content": update_prompt}
+            ],
+            temperature=0.1,
+            max_tokens=260,
+        )
+        updated = (completion.choices[0].message.content or "").strip()
+        if updated:
+            supabase.table("user_profile").upsert({
+                "user_id": user_id,
+                "profile_summary": updated,
+                "updated_at": datetime.now(MM_TZ).isoformat()
+            }).execute()
+    except Exception as e:
+        print(f"Error evolving user_profile: {e}")
+
+
 def extract_search_terms(query_text: str) -> list:
     terms = []
     for raw in query_text.split():
@@ -129,7 +187,7 @@ def extract_search_terms(query_text: str) -> list:
     return terms[:10]
 
 
-def get_recent_history_for_router(user_id: int, limit: int = 4) -> str:
+def get_recent_history_for_router(user_id: int, limit: int = 5) -> str:
     try:
         res = (
             supabase.table("chat_messages")
@@ -146,7 +204,13 @@ def get_recent_history_for_router(user_id: int, limit: int = 4) -> str:
 
 
 def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 8, search_limit: int = 10) -> str:
-    """ပြောခဲ့/မေးခဲ့သမျှထဲမှ သက်ဆိုင်ရာ မှတ်တမ်းများ၊ အသုံးအနှုန်းပုံစံများနှင့် လတ်တလော စကားပြောဆိုမှုများကို ပြန်ဆွဲထုတ်သည်။"""
+    """User Profile + Past Memory Matches + Recent Conversation ကို စုစည်းထုတ်ပေးသည်။"""
+    sections = []
+
+    profile_text = get_user_profile(user_id)
+    if profile_text:
+        sections.append(f"--- Learned User Profile (How This User Works & Prefers) ---\n{profile_text}")
+
     try:
         recent_res = (
             supabase.table("chat_messages")
@@ -183,13 +247,12 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 8
 
         matched_rows.sort(key=lambda x: x.get("created_at") or "")
 
-        sections = []
         if matched_rows:
             matched_lines = [
                 f"[{_format_mm_timestamp(m.get('created_at'))} | {m.get('role')}]: {m.get('content')}"
                 for m in matched_rows[-15:]
             ]
-            sections.append("--- Past Memory Matches (Earlier Conversations & Phrasing) ---\n" + "\n".join(matched_lines))
+            sections.append("--- Past Memory Matches ---\n" + "\n".join(matched_lines))
 
         if recent_rows:
             recent_lines = [
@@ -198,10 +261,10 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 8
             ]
             sections.append("--- Recent Conversation ---\n" + "\n".join(recent_lines))
 
-        return "\n\n".join(sections)
     except Exception as e:
         print(f"Error recalling chat history: {e}")
-        return ""
+
+    return "\n\n".join(sections)
 
 
 # --- 3-Tier AI Fallback Helper (Gemini 3.5 Flash-Lite -> Groq -> OpenRouter) ---
@@ -274,17 +337,8 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
     return "ဟုတ်ကဲ့ရှင်၊ လောလောဆယ် AI ဝန်ဆောင်မှုများ နှေးကွေးနေပါသည်။ ခဏနေမှ ထပ်မံမေးမြန်းကြည့်ပါနော်။"
 
 
-# --- 6-Intent AI Router (Zero-Keyword Smart Routing with Recent Context) ---
+# --- 6-Intent AI Router (Zero-Keyword Smart Routing with Context) ---
 def classify_user_intent(user_message: str, available_groups: list, recent_ctx: str = "") -> dict:
-    """
-    မေးခွန်း/ခိုင်းစေချက်ကို အမျိုးအစား ၆ မျိုးထဲမှ တစ်ခုအဖြစ် AI ကိုယ်တိုင် ခွဲခြားပေးသည်:
-    - GROUP_QUERY: Group log များထဲမှ သီးခြားအချက်အလက် မေးမြန်းခြင်း
-    - GROUP_SUMMARY: Group အနှစ်ချုပ် Report ထုတ်ခိုင်းခြင်း
-    - TASK: Task ထည့်ခြင်း၊ ကြည့်ခြင်း၊ ပြီးစီးကြောင်း မှတ်ခြင်း
-    - ADVICE: အကြံဉာဏ်တောင်းခြင်း၊ ပြဿနာ ဖြေရှင်းနည်း/ဆုံးဖြတ်ချက် အကြံပြုခိုင်းခြင်း
-    - GENERAL_TASK: Web search မလိုသော ခိုင်းစေချက်များ (စာရေး/ဘာသာပြန်/ရှင်းပြ/စကားပြော/အတိတ်မှတ်ဉာဏ်ပြန်မေး)
-    - GENERAL_SEARCH: ပြင်ပသတင်း၊ ရာသီဥတု၊ ပွဲစဉ်/ရလဒ်၊ ဈေးနှုန်း၊ Real-time အချက်အလက် ရှာဖွေခြင်း
-    """
     groups_str = ", ".join(available_groups[:15]) if available_groups else "None"
     router_prompt = f"""
 Classify the user's latest message using recent context if needed.
@@ -293,8 +347,8 @@ Intents:
 2. GROUP_SUMMARY: Requesting a summary/report of unread or daily messages from Telegram groups.
 3. TASK: Managing personal to-do tasks (adding a task, listing tasks, or marking a task done).
 4. ADVICE: Asking for advice, recommendations, strategic options, or how to handle/solve a problem or decision.
-5. GENERAL_TASK: General requests/instructions like drafting messages, translating, summarizing user-provided text, coding/tech help, explanations, recalling earlier conversation/phrasing, or casual chat.
-6. GENERAL_SEARCH: Asking for current/live facts, weather/rain/temperature, news, prices, sports scores/fixtures, or external web information.
+5. GENERAL_TASK: General requests/instructions like drafting messages, translating, summarizing, coding/tech help, explanations, recalling earlier conversation/user profile, or casual chat.
+6. GENERAL_SEARCH: Asking for current/live facts, weather, news, prices, sports scores/fixtures, or external web information.
 
 Available Groups: [{groups_str}]
 Recent Context:
@@ -321,10 +375,10 @@ Return ONLY JSON:
     except Exception as e:
         print(f"Fast router fallback: {e}")
 
-    return {"intent": "GENERAL_SEARCH", "group_name": None, "period": "recent"}
+    return {"intent": "GENERAL_TASK", "group_name": None, "period": "recent"}
 
 
-# --- Fast & Keyword-Free Parallel Web Search Helpers (Tavily + Google News RSS) ---
+# --- Keyword-Free Parallel Web Search Helpers (Tavily + Google News RSS) ---
 def _tavily_worker(search_query: str, max_results: int = 4) -> str:
     if not TAVILY_API_KEY:
         return ""
@@ -349,7 +403,7 @@ def _tavily_worker(search_query: str, max_results: int = 4) -> str:
             lines.append(f"[Tavily Answer]: {data['answer']}")
         for r in data.get("results", []):
             title = r.get("title", "")
-            content = (r.get("content", "") or "")[:280]
+            content = (r.get("content", "") or "")[:240]
             lines.append(f"- {title}: {content}")
         return "\n".join(lines)
     except Exception as e:
@@ -377,7 +431,7 @@ def _rss_worker(queries: list, per_query: int = 3) -> str:
                     collected_items.append(f"- {title} ({published})")
         except Exception as e:
             print(f"RSS fast error for '{q}': {e}")
-    return "\n".join(collected_items[:8])
+    return "\n".join(collected_items[:6])
 
 
 def fetch_combined_web_context(tavily_query: str, rss_queries: list = None, max_results: int = 4) -> str:
@@ -425,12 +479,8 @@ def get_myanmar_news_summary() -> str:
     return f"📰 Myanmar News Summary ({now_str})\n\n{summary}"
 
 
-# --- Keyword-Free Universal Web Search + Full Memory Answer ---
+# --- Keyword-Free Universal Web Search + Profile/Memory Answer ---
 def answer_with_universal_search(user_id: int, user_message: str) -> str:
-    stripped_lower = user_message.strip().lower()
-    if stripped_lower in ["မာယာ", "maya", "hi", "hello", "hey", "မင်္ဂလာပါ"]:
-        return "ဟုတ်ကဲ့ရှင်၊ မာယာ (Maya) ရှိပါတယ်နော်။ ဘာကူညီပေးရမလဲ ပြောပြပါရှင်။"
-
     now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
     memory_context = recall_relevant_history(user_id, user_message, recent_limit=8, search_limit=10)
 
@@ -441,15 +491,15 @@ def answer_with_universal_search(user_id: int, user_message: str) -> str:
         f"သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။\n"
         f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n"
         f"စည်းမျဉ်းများ:\n"
-        f"1. Past Memory Matches နှင့် Recent Conversation ထဲတွင် အရင် ပြောခဲ့/မေးခဲ့ဖူးသည့် အကြောင်းအရာများနှင့် အသုံးအနှုန်းပုံစံများ ရှိပါက အချိန်မရွေး ပြန်မေးလျှင် သေချာမှတ်မိပြီး တိတိကျကျ ဆက်စပ်ဖြေပါ။\n"
-        f"2. အရင် စကားပြောဆိုမှုထဲက အချက်ကို ပြန်မေးနေခြင်း ဖြစ်ပါက Web Search ရလဒ်ထက် Past Memory / Recent Conversation ကို ဦးစားပေး ဖြေပါ။\n"
-        f"3. ပြင်ပသတင်း၊ ရာသီဥတု၊ အားကစားပွဲစဉ်/ရလဒ်၊ ဈေးနှုန်း၊ နည်းပညာနှင့် ဗဟုသုတ မေးခွန်းများအတွက် Web Search ရလဒ်နှင့် Google Search Tool ကို အသုံးပြု၍ တိကျစွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ။\n"
-        f"4. မေးခွန်းနှင့် မသက်ဆိုင်သော Search ရလဒ်များကို လုံးဝ မသုံးပါနှင့်။ အဖြေကို တိုတိုရှင်းရှင်းနှင့် မြန်မာစာ သန့်သန့်ရှင်းရှင်း ဖြေပါ။\n"
+        f"1. Learned User Profile၊ Past Memory Matches နှင့် Recent Conversation တို့ကို အခြေခံ၍ အသုံးပြုသူ၏ အကြောင်း၊ အလေ့အထနှင့် အဓိပ္ပာယ်ကို အလိုက်သိသိ နားလည်ပြီး ဖြေကြားပါ။\n"
+        f"2. Web Search ရလဒ်များနှင့် Google Search Tool ကို အသုံးပြု၍ သက်ဆိုင်ရာ အချက်အလက်များကို တိကျစွာ မြန်မာဘာသာဖြင့် ဖြေပါ။\n"
+        f"3. Web Search ရလဒ်ထဲတွင် မေးခွန်းနှင့် မသက်ဆိုင်သော သို့မဟုတ် ဘာသာစကားရောထွေးနေသော အချက်များ ပါလာပါက လုံးဝ မသုံးပါနှင့်။ သေချာမသိပါက မသိကြောင်း ရိုးသားစွာ ဖြေပါ။\n"
+        f"4. မြန်မာစာလုံး သန့်သန့်ရှင်းရှင်းနှင့် တိုတိုရှင်းရှင်း ဖြေပါ။\n"
     )
 
     full_prompt = (
         f"{system_prompt}\n"
-        f"{memory_context or '--- Conversation History ---\nNone'}\n\n"
+        f"{memory_context or '--- Memory ---\nNone'}\n\n"
         f"{web_context or '--- Web Search Results ---\nNone'}\n\n"
         f"လက်ရှိ မေးခွန်း/စကား: {user_message}"
     )
@@ -552,7 +602,6 @@ def parse_date_range_from_text(text: str):
 
 
 def query_specific_group_logs(user_message: str, router_group: str = None, router_period: str = "recent") -> str:
-    """Group တစ်ခု (သို့မဟုတ် အားလုံး) ၏ Log များကို Overall ပြန်ဖတ်ပြီး မေးခွန်းနှင့် သက်ဆိုင်သည့် အချက်ကိုသာ လူတစ်ယောက်လို ဖြေပေးသည်။"""
     cleanup_old_raw_logs()
 
     if router_period in ["today", "yesterday"]:
@@ -846,7 +895,7 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
     await send_long_message(query.message, reply_text)
 
 
-# --- 4. General Telegram Message Handler (6-Intent Zero-Keyword AI Routing + Full Memory) ---
+# --- 4. General Telegram Message Handler (6-Intent AI Router + Self-Improving Memory) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
@@ -887,7 +936,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # CASE B: Private Chat (6-Intent AI Router - No Hardcoded Keywords)
+    # CASE B: Private Chat
     if chat_type == "private":
         if message.from_user.id != ADMIN_USER_ID:
             await message.reply_text("Unauthorized.")
@@ -908,16 +957,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             if stripped_lower in ["မာယာ", "maya", "hi", "hello", "hey", "မင်္ဂလာပါ"]:
-                reply_text = "ဟုတ်ကဲ့ရှင်၊ မာယာ (Maya) ရှိပါတယ်နော်။ ဘာကူညီပေးရမလဲ ပြောပြပါရှင်။"
+                memory_ctx = await asyncio.to_thread(recall_relevant_history, message.from_user.id, user_message, 4, 2)
+                greet_prompt = (
+                    f"အသုံးပြုသူက နှုတ်ဆက်/ခေါ်နေပါသည်။ လက်ရှိ လေ့လာမှတ်သားထားသော Profile/Conversation ရှိလျှင် အလိုက်သိသိ "
+                    f"ရင်းနှီးယဉ်ကျေးစွာ နှုတ်ဆက်ပြီး ဘာကူညီပေးနိုင်မလဲ တိုတိုရှင်းရှင်း မြန်မာဘာသာဖြင့် ဖြေပါ။\n\n{memory_ctx}"
+                )
+                reply_text = await asyncio.to_thread(call_ai_with_3tier_fallback, greet_prompt, None, None, False)
                 save_chat_message(message.from_user.id, "assistant", reply_text)
-                await message.reply_text(reply_text)
+                await send_long_message(message, reply_text)
                 return
 
             available_groups = await asyncio.to_thread(get_available_groups)
-            recent_ctx = await asyncio.to_thread(get_recent_history_for_router, message.from_user.id, 4)
+            recent_ctx = await asyncio.to_thread(get_recent_history_for_router, message.from_user.id, 5)
             route = await asyncio.to_thread(classify_user_intent, user_message, available_groups, recent_ctx)
 
-            intent = route.get("intent", "GENERAL_SEARCH")
+            intent = route.get("intent", "GENERAL_TASK")
             target_group = route.get("group_name")
             period = route.get("period", "recent")
 
@@ -933,9 +987,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif intent == "TASK":
                 reply_text = await asyncio.to_thread(handle_task_intent, user_message, route)
             elif intent == "ADVICE":
-                memory_context = recall_relevant_history(message.from_user.id, user_message, recent_limit=8, search_limit=10)
+                memory_context = await asyncio.to_thread(
+                    recall_relevant_history, message.from_user.id, user_message, 8, 10
+                )
                 advice_prompt = (
-                    f"အသုံးပြုသူ၏ အခြေအနေ၊ အတိတ်မှတ်ဉာဏ်နှင့် မေးခွန်းကို သုံးသပ်ပြီး မြန်မာဘာသာဖြင့် ရှင်းလင်းပြတ်သားစွာ အကြံပြုပါ:\n"
+                    f"အသုံးပြုသူ၏ Profile၊ အတိတ်မှတ်ဉာဏ်နှင့် မေးခွန်းကို သုံးသပ်ပြီး အလိုက်သိသိ မြန်မာဘာသာဖြင့် အကြံပြုပါ:\n"
                     f"1. အခြေအနေ သုံးသပ်ချက်\n"
                     f"2. အကြံပြု လုပ်ဆောင်သင့်သော နည်းလမ်းများ\n"
                     f"3. ချက်ချင်း စတင်နိုင်မည့် Next Step\n\n"
@@ -944,10 +1000,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 reply_text = await asyncio.to_thread(call_ai_with_3tier_fallback, advice_prompt, None, None, False)
             elif intent == "GENERAL_TASK":
-                memory_context = recall_relevant_history(message.from_user.id, user_message, recent_limit=8, search_limit=10)
+                memory_context = await asyncio.to_thread(
+                    recall_relevant_history, message.from_user.id, user_message, 8, 10
+                )
                 gen_prompt = (
-                    f"အသုံးပြုသူ၏ အတိတ်စကားပြောဆိုမှုများ၊ အသုံးအနှုန်းပုံစံများနှင့် ခိုင်းစေချက်ကို သေချာမှတ်မိပြီး "
-                    f"မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်း၊ ထိထိရောက်ရောက် ကူညီဆောင်ရွက်ပေးပါ။\n\n"
+                    f"အသုံးပြုသူ၏ Profile၊ အတိတ်စကားပြောဆိုမှုများနှင့် ခိုင်းစေချက်ကို သေချာမှတ်မိပြီး "
+                    f"အလိုက်သိသိနှင့် မြန်မာစာ သန့်သန့်ရှင်းရှင်းဖြင့် တိုတိုရှင်းရှင်း ကူညီဆောင်ရွက်ပေးပါ။\n\n"
                     f"{memory_context}\n\n"
                     f"ခိုင်းစေချက်: {user_message}"
                 )
@@ -958,10 +1016,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
             save_chat_message(message.from_user.id, "assistant", reply_text)
+            asyncio.create_task(asyncio.to_thread(evolve_user_profile, message.from_user.id, user_message, reply_text))
             await send_long_message(message, reply_text)
 
         except Exception as e:
-            await send_long_message(message, f"Error: {str(e)}")
+            await send_long_message(message, "ဟုတ်ကဲ့ရှင်၊ လောလောဆယ် အဖြေပြန်ထုတ်ရာတွင် အခက်အခဲ ရှိနေပါသည်။ နောက်မှ ထပ်မံမေးကြည့်ပါနော်။")
+            print(f"Error in handle_message: {e}")
 
 
 async def main_async():
@@ -1001,7 +1061,7 @@ async def main_async():
         BotCommand("addtask", "Add a new task"),
     ])
 
-    print("🤖 6-Intent Universal AI Agent with Full Memory (Maya) started...")
+    print("🤖 Self-Improving 6-Intent AI Agent (Maya) started...")
 
     await application.start()
     await application.updater.start_polling()
