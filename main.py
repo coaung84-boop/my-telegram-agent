@@ -27,10 +27,11 @@ load_dotenv()
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-# AI Clients Initialization
+# AI & Search Clients Initialization
 gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("MY_TELEGRAM_USER_ID", "0"))
@@ -45,7 +46,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Telegram AI Agent with Scheduler, News & Live Search is running!")
+        self.wfile.write(b"Telegram AI Agent with Gemini Search, Tavily, Weather & Memory is running!")
 
 
 def run_health_server():
@@ -144,10 +145,10 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 1
 
 
 # --- 3-Tier AI Fallback Helper (Gemini 3.5 Flash-Lite -> Groq -> OpenRouter) ---
-def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
+def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, use_google_search=False):
     errors = []
 
-    # 1st Attempt: Gemini 3.5 Flash-Lite
+    # 1st Attempt: Gemini 3.5 Flash-Lite (with optional Google Search Grounding)
     try:
         if image_bytes:
             contents = [
@@ -157,9 +158,16 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
         else:
             contents = prompt_text
 
+        config = None
+        if use_google_search:
+            config = types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            )
+
         response = gemini_client.models.generate_content(
             model="gemini-3.5-flash-lite",
-            contents=contents
+            contents=contents,
+            config=config
         )
         if response and response.text:
             return response.text
@@ -206,105 +214,242 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
     return "API ၃ ခုစလုံး အလုပ်မလုပ်ပါ:\n\n" + "\n\n".join(errors)
 
 
-# --- Myanmar News Fetcher & Summarizer (via Google News RSS + Built-in ElementTree) ---
-def get_myanmar_news_summary() -> str:
-    """Google News RSS XML မှ မြန်မာပြည် လတ်တလော သတင်းခေါင်းစဉ်များကို ElementTree ဖြင့် ဆွဲယူပြီး အနှစ်ချုပ်ပေးသည်။"""
-    queries = ["Myanmar news", "မြန်မာ သတင်း", "Yangon news"]
+# --- Real-Time Weather Helper (Open-Meteo - 100% Free, No API Key Needed) ---
+MYANMAR_CITIES = {
+    "yangon": ("ရန်ကုန် (Yangon)", 16.8661, 96.1951),
+    "ရန်ကုန်": ("ရန်ကုန် (Yangon)", 16.8661, 96.1951),
+    "mandalay": ("မန္တလေး (Mandalay)", 21.9588, 96.0891),
+    "မန္တလေး": ("မန္တလေး (Mandalay)", 21.9588, 96.0891),
+    "naypyidaw": ("နေပြည်တော် (Naypyidaw)", 19.7633, 96.0785),
+    "နေပြည်တော်": ("နေပြည်တော် (Naypyidaw)", 19.7633, 96.0785),
+    "bago": ("ပဲခူး (Bago)", 17.3352, 96.4814),
+    "ပဲခူး": ("ပဲခူး (Bago)", 17.3352, 96.4814),
+    "mawlamyine": ("မော်လမြိုင် (Mawlamyine)", 16.4905, 97.6283),
+    "မော်လမြိုင်": ("မော်လမြိုင် (Mawlamyine)", 16.4905, 97.6283),
+    "hpa-an": ("ဘားအံ (Hpa-An)", 16.8906, 97.6348),
+    "ဘားအံ": ("ဘားအံ (Hpa-An)", 16.8906, 97.6348),
+    "myawaddy": ("မြဝတီ (Myawaddy)", 16.6891, 98.5085),
+    "မြဝတီ": ("မြဝတီ (Myawaddy)", 16.6891, 98.5085),
+    "taunggyi": ("တောင်ကြီး (Taunggyi)", 20.7892, 97.0378),
+    "တောင်ကြီး": ("တောင်ကြီး (Taunggyi)", 20.7892, 97.0378),
+}
+
+WEATHER_CODES = {
+    0: "ကောင်းကင်ကြည်လင် (Clear sky)",
+    1: "တိမ်အနည်းငယ်ရှိ (Mainly clear)",
+    2: "တိမ်အသင့်အတင့်ရှိ (Partly cloudy)",
+    3: "တိမ်ထူထပ် (Overcast)",
+    45: "မြူဆိုင်း (Fog)",
+    48: "မြူထူဆိုင်း (Depositing rime fog)",
+    51: "မိုးဖွဲအနည်းငယ်ရွာ (Light drizzle)",
+    53: "မိုးဖွဲရွာ (Moderate drizzle)",
+    55: "မိုးဖွဲသည်း (Dense drizzle)",
+    61: "မိုးအနည်းငယ်ရွာ (Slight rain)",
+    63: "မိုးအသင့်အတင့်ရွာ (Moderate rain)",
+    65: "မိုးသည်းထန်စွာရွာ (Heavy rain)",
+    80: "မိုးတစ်ပြိုက်နှစ်ပြိုက်ရွာ (Slight rain showers)",
+    81: "မိုးရွာသွန်း (Moderate rain showers)",
+    82: "မိုးသည်းထန် (Violent rain showers)",
+    95: "မိုးကြိုးမုန်တိုင်း (Thunderstorm)",
+}
+
+
+def get_realtime_weather(query_text: str) -> str:
+    q_lower = query_text.lower()
+    city_label, lat, lon = ("ရန်ကုန် (Yangon)", 16.8661, 96.1951)
+    for key, info in MYANMAR_CITIES.items():
+        if key in q_lower:
+            city_label, lat, lon = info
+            break
+
+    try:
+        url = (
+            f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+            f"&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m"
+            f"&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+            f"&timezone=Asia%2FYangon&forecast_days=2"
+        )
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+
+        curr = data.get("current", {})
+        daily = data.get("daily", {})
+
+        temp = curr.get("temperature_2m", "-")
+        humidity = curr.get("relative_humidity_2m", "-")
+        wind = curr.get("wind_speed_10m", "-")
+        w_code = curr.get("weather_code", 0)
+        condition = WEATHER_CODES.get(w_code, f"Weather code {w_code}")
+
+        max_t = daily.get("temperature_2m_max", ["-"])[0]
+        min_t = daily.get("temperature_2m_min", ["-"])[0]
+        rain_prob = daily.get("precipitation_probability_max", ["-"])[0]
+
+        now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
+        return (
+            f"🌤️ {city_label} ရာသီဥတု ({now_str})\n\n"
+            f"• လက်ရှိအခြေအနေ: {condition}\n"
+            f"• လက်ရှိအပူချိန်: {temp}°C (အမြင့်ဆုံး {max_t}°C / အနိမ့်ဆုံး {min_t}°C)\n"
+            f"• မိုးရွာနိုင်ခြေ: {rain_prob}%\n"
+            f"• စိုထိုင်းဆ: {humidity}% | လေတိုက်နှုန်း: {wind} km/h"
+        )
+    except Exception as e:
+        return f"ရာသီဥတု အချက်အလက် ဆွဲယူရာတွင် အမှားဖြစ်ပွားပါသည်: {str(e)}"
+
+
+# --- Web Search Helpers (Tavily + Google News RSS) ---
+def fetch_tavily_context(search_query: str, max_results: int = 6) -> str:
+    if not TAVILY_API_KEY:
+        return ""
+    try:
+        resp = requests.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": TAVILY_API_KEY,
+                "query": search_query,
+                "search_depth": "basic",
+                "max_results": max_results,
+                "include_answer": True,
+            },
+            timeout=20,
+        )
+        data = resp.json()
+        lines = []
+        if data.get("answer"):
+            lines.append(f"[Tavily Summary]: {data['answer']}")
+        for r in data.get("results", []):
+            title = r.get("title", "")
+            content = r.get("content", "")
+            url = r.get("url", "")
+            lines.append(f"- {title}: {content} ({url})")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"Tavily search error: {e}")
+        return ""
+
+
+def fetch_google_news_rss(queries: list, per_query: int = 6) -> str:
     collected_items = []
     seen_titles = set()
-
     for q in queries:
         try:
             encoded_q = urllib.parse.quote(q)
             url = f"https://news.google.com/rss/search?q={encoded_q}&hl=en-US&gl=MM&ceid=MM:en"
             resp = requests.get(url, timeout=15)
             resp.raise_for_status()
-
             root = ET.fromstring(resp.content)
-            for item in root.findall(".//channel/item")[:8]:
+            for item in root.findall(".//channel/item")[:per_query]:
                 title_el = item.find("title")
                 pub_el = item.find("pubDate")
-
                 title = (title_el.text or "").strip() if title_el is not None and title_el.text else ""
                 published = (pub_el.text or "").strip() if pub_el is not None and pub_el.text else ""
-
                 if title and title not in seen_titles:
                     seen_titles.add(title)
                     collected_items.append(f"- {title} ({published})")
         except Exception as e:
-            print(f"News fetch error for '{q}': {e}")
+            print(f"RSS fetch error for '{q}': {e}")
+    return "\n".join(collected_items[:18])
 
-    if not collected_items:
-        return "လတ်တလော အွန်လိုင်းသတင်းများကို ဆွဲယူ၍ မရသေးပါ။ နောက်မှ ထပ်မံကြိုးစားကြည့်ပါ။"
 
-    news_raw = "\n".join(collected_items[:20])
+# --- Myanmar News Fetcher & Summarizer (Gemini Search -> Tavily -> RSS) ---
+def get_myanmar_news_summary() -> str:
     now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
 
+    # 1. Try Gemini Google Search Grounding first
+    try:
+        search_prompt = (
+            f"ယနေ့ ({now_str}) မြန်မာပြည်နှင့် ပတ်သက်သည့် နောက်ဆုံးရ အရေးကြီး သတင်းအစုံအလင် (ပြည်တွင်းသတင်း၊ စီးပွားရေး၊ ရွှေဈေး/ငွေလဲနှုန်း နှင့် ထူးခြားဖြစ်စဉ်များ) ကို "
+            f"Google Search မှ ရှာဖွေပြီး မြန်မာဘာသာဖြင့် ရှင်းလင်းပြတ်သားသော Bullet point များဖြင့် အနှစ်ချုပ် တင်ပြပေးပါ။"
+        )
+        response = gemini_client.models.generate_content(
+            model="gemini-3.5-flash-lite",
+            contents=search_prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            )
+        )
+        if response and response.text:
+            return f"📰 Myanmar News Summary ({now_str})\n\n{response.text}"
+    except Exception as e:
+        print(f"Gemini Google Search News error: {e}")
+
+    # 2. Fallback: Tavily + Google News RSS -> Groq/OpenRouter
+    tavily_text = fetch_tavily_context("Myanmar latest news today Yangon gold exchange rate", max_results=6)
+    rss_text = fetch_google_news_rss(["Myanmar news", "မြန်မာ သတင်း", "Yangon news"], per_query=6)
+    combined_data = f"{tavily_text}\n\n{rss_text}".strip()
+
+    if not combined_data:
+        return "လတ်တလော အွန်လိုင်းသတင်းများကို ဆွဲယူ၍ မရသေးပါ။ နောက်မှ ထပ်မံကြိုးစားကြည့်ပါ။"
+
     prompt = f"""
-    အောက်ပါတို့မှာ အွန်လိုင်းသတင်းများမှ ရရှိထားသော မြန်မာပြည်နှင့် သက်ဆိုင်သည့် လတ်တလော သတင်းခေါင်းစဉ်များ ဖြစ်သည်။ ({now_str})
-    ထပ်နေသော သတင်းများကို ပေါင်းစပ်ပြီး အရေးပါပြီး စိတ်ဝင်စားဖွယ် အကောင်းဆုံး သတင်းအချက်အလက်များကို
-    မြန်မာဘာသာဖြင့် ရှင်းလင်းပြတ်သားသော Bullet point များဖြင့် အနှစ်ချုပ် တင်ပြပေးပါ။
-    (အချက်အလက် မှန်ကန်မှုကိုသာ အခြေခံပြီး ထပ်မံမချဲ့ကားပါနှင့်။)
+    လက်ရှိအချိန်: {now_str}
+    အောက်ပါတို့မှာ Tavily Web Search နှင့် Google News မှ ရရှိထားသော မြန်မာပြည် လတ်တလော သတင်းအချက်အလက်များ ဖြစ်သည်။
+    အရေးပါဆုံး သတင်းများကို စုစည်းပြီး မြန်မာဘာသာဖြင့် ရှင်းလင်းပြတ်သားသော Bullet point များဖြင့် အနှစ်ချုပ် တင်ပြပေးပါ။
 
-    သတင်းစာရင်း:
-    {news_raw}
+    သတင်းအချက်အလက်များ:
+    {combined_data}
     """
-
-    summary = call_ai_with_3tier_fallback(prompt)
+    summary = call_ai_with_3tier_fallback(prompt, use_google_search=False)
     return f"📰 Myanmar News Summary ({now_str})\n\n{summary}"
 
 
-# --- Dynamic Live Topic Search (via Google News RSS + Built-in ElementTree) ---
+# --- Dynamic Live Topic Search (Gemini Google Search -> Tavily -> RSS) ---
 def search_live_topic(query_text: str) -> str:
-    """မေးခွန်းပါ အကြောင်းအရာအတိုင်း Google News RSS မှ လတ်တလော သတင်း/အချက်အလက်များ ရှာဖွေဖြေကြားပေးသည်။"""
-    clean_q = re.sub(r"[?？!]", "", query_text).strip()
-    search_queries = [clean_q, f"{clean_q} Myanmar"]
-    collected_items = []
-    seen_titles = set()
-
-    for q in search_queries:
-        try:
-            encoded_q = urllib.parse.quote(q)
-            url = f"https://news.google.com/rss/search?q={encoded_q}&hl=en-US&gl=MM&ceid=MM:en"
-            resp = requests.get(url, timeout=15)
-            resp.raise_for_status()
-
-            root = ET.fromstring(resp.content)
-            for item in root.findall(".//channel/item")[:6]:
-                title_el = item.find("title")
-                pub_el = item.find("pubDate")
-                title = (title_el.text or "").strip() if title_el is not None and title_el.text else ""
-                published = (pub_el.text or "").strip() if pub_el is not None and pub_el.text else ""
-
-                if title and title not in seen_titles:
-                    seen_titles.add(title)
-                    collected_items.append(f"- {title} ({published})")
-        except Exception as e:
-            print(f"Live search error for '{q}': {e}")
-
-    if not collected_items:
-        return None
-
     now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
-    raw_results = "\n".join(collected_items[:12])
+
+    # 1. Try Gemini Google Search Grounding first (best for Myanmar gold price, USD rate, live events)
+    try:
+        gemini_search_prompt = (
+            f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n"
+            f"အသုံးပြုသူ မေးခွန်း: {query_text}\n\n"
+            f"Google Search ကို အသုံးပြု၍ မြန်မာပြည်နှင့် သက်ဆိုင်သည့် နောက်ဆုံးရ အချက်အလက်အတိအကျ (ရက်စွဲ၊ ဈေးနှုန်း သို့မဟုတ် သတင်းရင်းမြစ် အပါအဝင်) ကို ရှာဖွေပြီး "
+            f"မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်း တိတိကျကျ ဖြေကြားပေးပါ။"
+        )
+        response = gemini_client.models.generate_content(
+            model="gemini-3.5-flash-lite",
+            contents=gemini_search_prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            )
+        )
+        if response and response.text:
+            return response.text
+    except Exception as e:
+        print(f"Gemini Google Search Topic error: {e}")
+
+    # 2. Fallback: Tavily Search + Google News RSS
+    clean_q = re.sub(r"[?？!]", "", query_text).strip()
+    # Add English keywords if user asks about gold or dollar in Burmese for better web search hits
+    extra_keywords = ""
+    if "ရွှေ" in clean_q:
+        extra_keywords = " Myanmar gold price today YGEA"
+    elif "ဒေါ်လာ" in clean_q or "ငွေလဲ" in clean_q:
+        extra_keywords = " Myanmar USD exchange rate MMK today"
+
+    tavily_data = fetch_tavily_context(f"{clean_q}{extra_keywords}", max_results=6)
+    rss_data = fetch_google_news_rss([clean_q, f"{clean_q} Myanmar"], per_query=5)
+    combined = f"{tavily_data}\n\n{rss_data}".strip()
+
+    if not combined:
+        return "လတ်တလော အွန်လိုင်းရှာဖွေမှုတွင် ထိုအကြောင်းအရာ မတွေ့ရှိသေးပါ။"
 
     prompt = f"""
     လက်ရှိအချိန်: {now_str}
     အသုံးပြုသူ မေးခွန်း: {query_text}
 
-    အောက်ပါတို့မှာ Google News မှ လတ်တလော ရှာဖွေရရှိထားသော သတင်းခေါင်းစဉ်များ ဖြစ်သည်။
+    အောက်ပါတို့မှာ Tavily Web Search နှင့် Google News မှ လတ်တလော ရှာဖွေရရှိထားသော အချက်အလက်များ ဖြစ်သည်။
     ယင်းအချက်အလက်များကိုသာ အခြေခံ၍ မေးခွန်းကို မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်း ဖြေကြားပေးပါ။
-    (ရက်စွဲ အဟောင်းဖြစ်နေပါက ရက်စွဲကိုပါ ထည့်သွင်းဖော်ပြပေးပါ။ အချက်အလက် မလုံလောက်ပါက မတွေ့ရှိကြောင်း ရိုးသားစွာ ဖြေပါ။)
+    (ရက်စွဲနှင့် ဈေးနှုန်း/အချက်အလက် အတိအကျကို ထည့်သွင်းဖော်ပြပေးပါ။)
 
     ရှာဖွေရရှိမှုများ:
-    {raw_results}
+    {combined}
     """
-    return call_ai_with_3tier_fallback(prompt)
+    return call_ai_with_3tier_fallback(prompt, use_google_search=False)
 
 
 # --- Scheduled Daily 9:00 AM MMT Job ---
 async def scheduled_morning_news_job(context: ContextTypes.DEFAULT_TYPE):
-    """နေ့စဉ် မနက် ၉:၀၀ နာရီ (မြန်မာစံတော်ချိန်) တွင် ADMIN_USER_ID ထံ သတင်းအချုပ် ပို့ပေးသည်။"""
     if not ADMIN_USER_ID:
         return
     try:
@@ -343,7 +488,6 @@ def get_available_groups() -> list:
 
 
 def get_date_bounds(day_mode: str):
-    """day_mode: 'today' or 'yesterday'"""
     now_mm = datetime.now(MM_TZ)
     if day_mode == "yesterday":
         target_date = (now_mm - timedelta(days=1)).date()
@@ -434,7 +578,7 @@ def get_group_report(user_query: str = "", exact_group_name: str = None, day_mod
     {raw_text}
     """
 
-    report_text = call_ai_with_3tier_fallback(prompt)
+    report_text = call_ai_with_3tier_fallback(prompt, use_google_search=False)
 
     supabase.table("daily_reports").insert({"report_content": f"[{header_info}]\n{report_text}"}).execute()
 
@@ -658,6 +802,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=build_main_menu_keyboard()
                 )
                 return
+            elif any(w in msg_lower for w in ["ရာသီဥတု", "weather", "အပူချိန်"]):
+                reply_text = await asyncio.to_thread(get_realtime_weather, user_message)
             elif not is_question and any(k in msg_lower for k in ["report", "summary", "အနှစ်ချုပ်", "အကျဉ်းချုပ်"]) and "သတင်း" not in msg_lower and "news" not in msg_lower:
                 reply_text = get_group_report(user_message)
             elif not is_question and (msg_lower.startswith("task:") or msg_lower.startswith("လုပ်စရာ:") or "task မှတ်ထား" in msg_lower or "task ထည့်" in msg_lower):
@@ -668,18 +814,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_text = get_formatted_tasks()
             elif not is_question and ("သတင်း" in msg_lower or "news" in msg_lower) and ("အချုပ်" in msg_lower or "summary" in msg_lower or "ရှာ" in msg_lower or "တင်" in msg_lower):
                 reply_text = await asyncio.to_thread(get_myanmar_news_summary)
-            elif any(w in msg_lower for w in ["update", "ဈေး", "သတင်း", "news", "ရာသီဥတု", "weather", "ငလျင်", "ပေါက်ဈေး"]):
-                live_reply = await asyncio.to_thread(search_live_topic, user_message)
-                reply_text = live_reply if live_reply else "လတ်တလော အွန်လိုင်းသတင်း မှတ်တမ်းတွင် ထိုအကြောင်းအရာ မတွေ့ရှိသေးပါ။"
+            elif any(w in msg_lower for w in ["update", "ဈေး", "ပေါက်ဈေး", "ရွှေ", "ဒေါ်လာ", "ငွေလဲ", "သတင်း", "news", "ငလျင်", "ဘောလုံး", "ပွဲစဉ်"]):
+                reply_text = await asyncio.to_thread(search_live_topic, user_message)
             else:
                 memory_context = recall_relevant_history(message.from_user.id, user_message)
                 system_prompt = (
                     "သင်သည် မာယာ (Maya) အမည်ရှိ ကိုယ်ပိုင် အလုပ်အမှုဆောင် AI Assistant ဖြစ်သည်။ "
                     "ပေးထားသော အတိတ်မှတ်တမ်းများနှင့် လတ်တလော ပြောဆိုမှုများကို ကိုးကားပြီး မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်း ဖြေကြားပါ။ "
-                    "အရေးကြီးချက် - နေ့စဉ် မနက် ၉:၀၀ နာရီ (မြန်မာစံတော်ချိန်) တွင် အွန်လိုင်းမြန်မာသတင်း အနှစ်ချုပ်ကို "
-                    "အလိုအလျောက် ပို့ပေးမည့် Scheduler စနစ် ပါဝင်ပြီး ဖြစ်သော်လည်း သီးခြားစိတ်ကြိုက် အချိန်အလိုက် ခိုင်းစေချက်များ သို့မဟုတ် "
-                    "Facebook Private Account များကို တိုက်ရိုက် ဝင်ကြည့်ခြင်းများကို မလုပ်ဆောင်နိုင်ပါ။ "
-                    "မလုပ်နိုင်သေးသည့် အရာများကို မမှန်မကန် ကတိမပေးဘဲ ရိုးသားစွာ ရှင်းပြပါ။ "
+                    "သင်သည် Google Search၊ Tavily Web Search နှင့် Real-time Weather တို့ကို ချိတ်ဆက်ထားပြီး နေ့စဉ် မနက် ၉:၀၀ နာရီတွင် မြန်မာသတင်း အနှစ်ချုပ် ပို့ပေးနိုင်သည်။ "
                     "Task မှတ်လိုပါက /addtask ဖြင့် မှတ်နိုင်ကြောင်း အကြံပြုပါ။\n"
                 )
                 full_prompt = (
@@ -687,7 +829,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{memory_context}\n\n"
                     f"လက်ရှိ မေးခွန်း/စကား: {user_message}"
                 )
-                reply_text = call_ai_with_3tier_fallback(full_prompt)
+                reply_text = call_ai_with_3tier_fallback(full_prompt, use_google_search=True)
 
             save_chat_message(message.from_user.id, "assistant", reply_text)
 
@@ -711,7 +853,7 @@ async def main_async():
     # Normal Messages
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-    # နေ့စဉ် မနက် ၉:၀၀ နာရီ (UTC+6:30) တွင် သတင်းအချုပ် အလိုအလျောက် ပို့ပေးမည့် Scheduler
+    # Daily 9:00 AM MMT News Scheduler
     if application.job_queue:
         morning_9_mmt = dt_time(hour=9, minute=0, second=0, tzinfo=MM_TZ)
         application.job_queue.run_daily(
@@ -734,7 +876,7 @@ async def main_async():
         BotCommand("addtask", "Add a new task"),
     ])
 
-    print("🤖 AI Agent with Scheduler, News, Live Search & Memory started...")
+    print("🤖 AI Agent with Gemini Search, Tavily, Weather & Memory started...")
 
     await application.start()
     await application.updater.start_polling()
