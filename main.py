@@ -2,6 +2,7 @@ import os
 import logging
 import threading
 import asyncio
+import re
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
@@ -30,7 +31,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Telegram AI Agent with Gemini -> Groq -> OpenRouter Fallback is running!")
+        self.wfile.write(b"Telegram AI Agent with Memory & 3-Tier Fallback is running!")
 
 
 def run_health_server():
@@ -39,11 +40,99 @@ def run_health_server():
     server.serve_forever()
 
 
-# --- 3-Tier AI Fallback Helper (Gemini Lite -> Groq Instant -> OpenRouter Auto-Free) ---
+# --- Supabase Chat Memory Helpers (All History Saved + Smart Recall) ---
+def save_chat_message(user_id: int, role: str, content: str):
+    """ပြောခဲ့သမျှ စကားအားလုံးကို Supabase chat_messages table တွင် သိမ်းဆည်းသည်။"""
+    try:
+        supabase.table("chat_messages").insert({
+            "user_id": user_id,
+            "role": role,
+            "content": content
+        }).execute()
+    except Exception as e:
+        print(f"Error saving chat message: {e}")
+
+
+def extract_search_terms(query_text: str) -> list:
+    """Space ခြားထားသော စကားလုံးများအပြင် ရှည်လျားသော စာကြောင်းများမှလည်း အပိုင်းအစများ ထုတ်ယူသည်။"""
+    terms = []
+    # 1. Space ခြားထားသော စကားလုံးများ
+    for raw in query_text.split():
+        cleaned = re.sub(r"[^\w\u1000-\u109F]", "", raw)
+        if len(cleaned) >= 2:
+            terms.append(cleaned)
+
+    # 2. Space မခြားဘဲ ရှည်နေသော စာသားများအတွက် sub-chunks ထုတ်ယူခြင်း
+    compact = re.sub(r"\s+", "", query_text)
+    if len(compact) >= 4:
+        for i in range(0, min(len(compact), 40), 4):
+            chunk = compact[i:i + 5]
+            if len(chunk) >= 3:
+                terms.append(chunk)
+
+    # Duplicate ဖယ်ပြီး အများဆုံး 8 ခု ပြန်ပေးမည်
+    unique_terms = []
+    for t in terms:
+        if t not in unique_terms:
+            unique_terms.append(t)
+    return unique_terms[:8]
+
+
+def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 12, search_limit: int = 10) -> str:
+    """လတ်တလော မက်ဆေ့ခ်ျများအပြင် မေးခွန်းနှင့် သက်ဆိုင်သည့် အတိတ်မှတ်တမ်းများကို ပြန်ရှာပေးသည်။"""
+    try:
+        # 1. လတ်တလော ပြောဆိုမှုများ
+        recent_res = (
+            supabase.table("chat_messages")
+            .select("role, content, created_at")
+            .eq("user_id", user_id)
+            .order("id", desc=True)
+            .limit(recent_limit)
+            .execute()
+        )
+        recent_rows = list(reversed(recent_res.data or []))
+
+        # 2. အတိတ်မှတ်တမ်းဟောင်းများထဲမှ Keyword / Substring ဖြင့် ရှာဖွေခြင်း
+        search_terms = extract_search_terms(query_text)
+        matched_rows = []
+        seen = set((r["role"], r["content"]) for r in recent_rows)
+
+        for term in search_terms:
+            search_res = (
+                supabase.table("chat_messages")
+                .select("role, content, created_at")
+                .eq("user_id", user_id)
+                .ilike("content", f"%{term}%")
+                .order("id", desc=True)
+                .limit(search_limit)
+                .execute()
+            )
+            for r in reversed(search_res.data or []):
+                key = (r["role"], r["content"])
+                if key not in seen:
+                    seen.add(key)
+                    matched_rows.append(r)
+
+        sections = []
+        if matched_rows:
+            matched_text = "\n".join([f"[{m['role']}]: {m['content']}" for m in matched_rows[-15:]])
+            sections.append(f"--- သက်ဆိုင်ရာ အတိတ်မှတ်တမ်းဟောင်းများ ---\n{matched_text}")
+
+        if recent_rows:
+            recent_text = "\n".join([f"[{r['role']}]: {r['content']}" for r in recent_rows])
+            sections.append(f"--- လတ်တလော ပြောဆိုမှုများ ---\n{recent_text}")
+
+        return "\n\n".join(sections)
+    except Exception as e:
+        print(f"Error recalling chat history: {e}")
+        return ""
+
+
+# --- 3-Tier AI Fallback Helper (Gemini Flash-Lite -> Groq Instant -> OpenRouter Auto-Free) ---
 def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
     errors = []
 
-    # 1st Attempt: Gemini 3.5 Flash-Lite (503 High Demand အကင်းဆုံးနှင့် အမြန်ဆုံး)
+    # 1st Attempt: Gemini 3.5 Flash-Lite
     try:
         if image_bytes:
             contents = [
@@ -62,7 +151,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
     except Exception as e:
         errors.append(f"1. Gemini Error: {str(e)}")
 
-    # 2nd Attempt: Groq (Llama 3.1 8B Instant - လက်ရှိ အလုပ်လုပ်နေသော Model)
+    # 2nd Attempt: Groq (Llama 3.1 8B Instant)
     try:
         completion = groq_client.chat.completions.create(
             model="llama-3.1-8b-instant",
@@ -77,7 +166,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None):
     except Exception as e:
         errors.append(f"2. Groq Error: {str(e)}")
 
-    # 3rd Attempt: OpenRouter Auto-Free Router (Free ရသမျှ Model ကို အော်တိုရွေးပေးသည်)
+    # 3rd Attempt: OpenRouter Auto-Free Router
     try:
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -208,6 +297,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
 
         try:
+            # ဝင်လာသော မက်ဆေ့ခ်ျကို Database ထဲ အရင်သိမ်းမည်
+            save_chat_message(message.from_user.id, "user", user_message)
+
             if "report" in user_message.lower() or "အနှစ်ချုပ်" in user_message:
                 reply_text = get_group_report()
             elif "task" in user_message.lower() or "လုပ်စရာ" in user_message or "ထည့်" in user_message:
@@ -218,8 +310,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_text = "လက်ရှိ Task များ:\n" + "\n".join(
                     [f"- ID {t['id']}: {t['title']} ({t['status']})" for t in tasks]) if tasks else "Task မရှိသေးပါ။"
             else:
-                system_prompt = "သင်သည် ကိုယ်ပိုင် အလုပ်အမှုဆောင် AI Assistant ဖြစ်သည်။ မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေကြားပါ။\nသုံးစွဲသူ၏ မေးခွန်း: "
-                reply_text = call_ai_with_3tier_fallback(system_prompt + user_message)
+                memory_context = recall_relevant_history(message.from_user.id, user_message)
+                system_prompt = (
+                    "သင်သည် ကိုယ်ပိုင် အလုပ်အမှုဆောင် AI Assistant ဖြစ်သည်။ "
+                    "ပေးထားသော အတိတ်မှတ်တမ်းများနှင့် လတ်တလော ပြောဆိုမှုများကို ကိုးကားပြီး "
+                    "မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ဖြေကြားပါ။\n"
+                )
+                full_prompt = (
+                    f"{system_prompt}\n"
+                    f"{memory_context}\n\n"
+                    f"လက်ရှိ မေးခွန်း/စကား: {user_message}"
+                )
+                reply_text = call_ai_with_3tier_fallback(full_prompt)
+
+            # Bot ပြန်ဖြေလိုက်သော စာကိုလည်း Database ထဲ ပြန်သိမ်းမည်
+            save_chat_message(message.from_user.id, "assistant", reply_text)
 
             await message.reply_text(reply_text)
 
@@ -233,7 +338,7 @@ async def main_async():
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-    print("🤖 Gemini -> Groq -> OpenRouter Telegram Bot စတင် အလုပ်လုပ်နေပါပြီ...")
+    print("🤖 AI Agent with Full Chat Memory & 3-Tier Fallback စတင် အလုပ်လုပ်နေပါပြီ...")
 
     await application.initialize()
     await application.start()
