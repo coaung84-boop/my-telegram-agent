@@ -56,6 +56,22 @@ def run_health_server():
     server.serve_forever()
 
 
+# --- Safe Long Message Sender (Prevents Telegram 'Text is too long' Error) ---
+async def send_long_message(message, text: str, chunk_size: int = 3500):
+    if not text or not str(text).strip():
+        await message.reply_text("လောလောဆယ် အဖြေပြန်ထုတ်ရာတွင် အခက်အခဲ ရှိနေပါသည်။ နောက်မှ ထပ်မေးကြည့်ပါရှင်။")
+        return
+
+    clean_text = str(text).strip()
+    if len(clean_text) <= chunk_size:
+        await message.reply_text(clean_text)
+        return
+
+    for i in range(0, len(clean_text), chunk_size):
+        part = clean_text[i:i + chunk_size]
+        await message.reply_text(part)
+
+
 # --- Auto-Cleanup Old Raw Logs (Older than 30 days) ---
 def cleanup_old_raw_logs():
     try:
@@ -244,7 +260,7 @@ def _tavily_worker(search_query: str, max_results: int = 5) -> str:
             lines.append(f"[Tavily Answer]: {data['answer']}")
         for r in data.get("results", []):
             title = r.get("title", "")
-            content = (r.get("content", "") or "")[:320]
+            content = (r.get("content", "") or "")[:300]
             lines.append(f"- {title}: {content}")
         return "\n".join(lines)
     except Exception as e:
@@ -276,7 +292,6 @@ def _rss_worker(queries: list, per_query: int = 4) -> str:
 
 
 def fetch_combined_web_context(tavily_query: str, rss_queries: list = None, max_results: int = 5) -> str:
-    """Tavily နှင့် Google News RSS ကို ThreadPool ဖြင့် တစ်ပြိုင်နက်တည်း (မြန်မြန်) ရှာဖွေသည်။"""
     results_map = {"tavily": "", "rss": ""}
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = {executor.submit(_tavily_worker, tavily_query, max_results): "tavily"}
@@ -401,7 +416,7 @@ def get_myanmar_news_summary() -> str:
     လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)
     Google Search နှင့် အောက်ပါ Web Search / RSS အချက်အလက်များကို ပေါင်းစပ်၍ ယနေ့ မြန်မာပြည်နှင့် ပတ်သက်သည့်
     နောက်ဆုံးရ အရေးကြီး သတင်းအစုံအလင် (ပြည်တွင်းသတင်း၊ စီးပွားရေး၊ ရွှေဈေး/ငွေလဲနှုန်း နှင့် ထူးခြားဖြစ်စဉ်များ) ကို
-    မြန်မာဘာသာဖြင့် ရှင်းလင်းပြတ်သားသော Bullet point များဖြင့် အနှစ်ချုပ် တင်ပြပေးပါ။
+    မြန်မာဘာသာဖြင့် ရှင်းလင်းပြတ်သားသော Bullet point များဖြင့် စာလုံးရေ ၁,၅၀၀ အတွင်း တိုတိုရှင်းရှင်း အနှစ်ချုပ် တင်ပြပေးပါ။
 
     {web_context}
     """
@@ -429,7 +444,7 @@ def answer_with_universal_search(user_id: int, user_message: str) -> str:
         elif "ဒေါ်လာ" in clean_q or "ငွေလဲ" in clean_q:
             extra = f" Myanmar USD exchange rate MMK {today_date}"
             rss_qs = ["Myanmar exchange rate USD MMK", "ဒေါ်လာဈေး"]
-        elif "premier league" in clean_q.lower() or "ပွဲစဉ်" in clean_q or "chelsea" in clean_q.lower() or "man u" in clean_q.lower() or "manchester" in clean_q.lower():
+        elif any(k in clean_q.lower() for k in ["premier league", "ပွဲစဉ်", "chelsea", "man u", "manchester"]):
             extra = f" Premier League fixtures results {today_date}"
             rss_qs = ["Premier League fixtures results"]
 
@@ -440,8 +455,9 @@ def answer_with_universal_search(user_id: int, user_message: str) -> str:
         f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n"
         f"စည်းမျဉ်းများ:\n"
         f"1. Web Search ရလဒ်များနှင့် Google Search Tool ကို အသုံးပြု၍ သတင်းအစုံ၊ အားကစားပွဲစဉ်/ရလဒ် အဟောင်းအသစ်၊ ဈေးနှုန်း၊ နည်းပညာနှင့် ဗဟုသုတ မေးခွန်းများကို တိကျပြည့်စုံစွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ။\n"
-        f"2. Web Search ရလဒ် ပါရှိပါက အတိတ် Chat History ထဲက ဈေးနှုန်း/ရာသီဥတု/ပွဲစဉ် အချက်အလက်ဟောင်းများကို မကိုးကားဘဲ လက်ရှိ Web Search ရလဒ်ကိုသာ ဦးစားပေး ဖြေပါ။\n"
-        f"3. အချက်အလက် အတိအကျ ရှာမတွေ့ပါက မမှန်မကန် မဖြေဘဲ မတွေ့ရှိကြောင်း ရိုးသားစွာ ရှင်းပြပါ။ Task မှတ်လိုပါက /addtask ဖြင့် မှတ်နိုင်သည်။\n"
+        f"2. အဖြေကို အဓိက အချက်အလက် (၃ - ၅ ချက်) သာ ဖော်ပြပြီး စာလုံးရေ ၁,၅၀၀ အတွင်း တိုတိုရှင်းရှင်းနှင့် မြန်မာစာလုံး မှန်ကန်သန့်ရှင်းစွာ ဖြေကြားပါ။\n"
+        f"3. Web Search ရလဒ် ပါရှိပါက အတိတ် Chat History ထဲက ဈေးနှုန်း/ရာသီဥတု/ပွဲစဉ် အချက်အလက်ဟောင်းများကို မကိုးကားဘဲ လက်ရှိ Web Search ရလဒ်ကိုသာ ဦးစားပေး ဖြေပါ။\n"
+        f"4. အချက်အလက် အတိအကျ ရှာမတွေ့ပါက မမှန်မကန် မဖြေဘဲ မတွေ့ရှိကြောင်း ရိုးသားစွာ ရှင်းပြပါ။ Task မှတ်လိုပါက /addtask ဖြင့် မှတ်နိုင်သည်။\n"
     )
 
     full_prompt = (
@@ -461,7 +477,8 @@ async def scheduled_morning_news_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         news_text = await asyncio.to_thread(get_myanmar_news_summary)
         save_chat_message(ADMIN_USER_ID, "assistant", news_text)
-        await context.bot.send_message(chat_id=ADMIN_USER_ID, text=news_text)
+        for i in range(0, len(news_text), 3500):
+            await context.bot.send_message(chat_id=ADMIN_USER_ID, text=news_text[i:i + 3500])
     except Exception as e:
         print(f"Error sending scheduled morning news: {e}")
 
@@ -671,21 +688,21 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if cmd == "/summary":
         reply_text = get_group_report("unread summary")
-        await message.reply_text(reply_text)
+        await send_long_message(message, reply_text)
     elif cmd == "/today":
         reply_text = get_group_report("today summary", day_mode="today")
-        await message.reply_text(reply_text)
+        await send_long_message(message, reply_text)
     elif cmd == "/yesterday":
         reply_text = get_group_report("yesterday summary", day_mode="yesterday")
-        await message.reply_text(reply_text)
+        await send_long_message(message, reply_text)
     elif cmd == "/groups":
         text, markup = build_groups_keyboard()
         await message.reply_text(text, reply_markup=markup)
     elif cmd == "/news":
         reply_text = await asyncio.to_thread(get_myanmar_news_summary)
-        await message.reply_text(reply_text)
+        await send_long_message(message, reply_text)
     elif cmd == "/tasks":
-        await message.reply_text(get_formatted_tasks())
+        await send_long_message(message, get_formatted_tasks())
 
 
 async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -740,7 +757,7 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
     else:
         reply_text = "Unknown action."
 
-    await query.message.reply_text(reply_text)
+    await send_long_message(query.message, reply_text)
 
 
 # --- 4. General Telegram Message Handler ---
@@ -826,10 +843,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             save_chat_message(message.from_user.id, "assistant", reply_text)
 
-            await message.reply_text(reply_text)
+            await send_long_message(message, reply_text)
 
         except Exception as e:
-            await message.reply_text(f"Error: {str(e)}")
+            await send_long_message(message, f"Error: {str(e)}")
 
 
 async def main_async():
