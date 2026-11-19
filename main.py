@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import threading
 import asyncio
@@ -56,7 +57,7 @@ def run_health_server():
     server.serve_forever()
 
 
-# --- Safe Long Message Sender (Prevents Telegram 'Text is too long' Error) ---
+# --- Safe Long Message Sender (Prevents Telegram 'Text is too long' & Empty Text Errors) ---
 async def send_long_message(message, text: str, chunk_size: int = 3500):
     if not text or not str(text).strip():
         await message.reply_text("လောလောဆယ် အဖြေပြန်ထုတ်ရာတွင် အခက်အခဲ ရှိနေပါသည်။ နောက်မှ ထပ်မေးကြည့်ပါရှင်။")
@@ -163,9 +164,7 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 6
 
 # --- 3-Tier AI Fallback Helper (Gemini 3.5 Flash-Lite -> Groq -> OpenRouter) ---
 def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, use_google_search=False):
-    errors = []
-
-    # 1st Attempt: Gemini 3.5 Flash-Lite (with optional Google Search Grounding)
+    # 1st Attempt: Gemini 3.5 Flash-Lite
     try:
         if image_bytes:
             contents = [
@@ -189,7 +188,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
         if response and response.text and response.text.strip():
             return response.text.strip()
     except Exception as e:
-        errors.append(f"1. Gemini Error: {str(e)}")
+        print(f"1. Gemini Error: {e}")
 
     # 2nd Attempt: Groq (Llama 3.1 8B Instant)
     try:
@@ -206,7 +205,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
             if txt:
                 return txt
     except Exception as e:
-        errors.append(f"2. Groq Error: {str(e)}")
+        print(f"2. Groq Error: {e}")
 
     # 3rd Attempt: OpenRouter Auto-Free Router (fast 8s timeout)
     try:
@@ -227,15 +226,79 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
             txt = (res_json["choices"][0]["message"].get("content") or "").strip()
             if txt:
                 return txt
-        else:
-            errors.append(f"3. OpenRouter Response: {res_json}")
     except Exception as e:
-        errors.append(f"3. OpenRouter Error: {str(e)}")
+        print(f"3. OpenRouter Error: {e}")
 
     return "လောလောဆယ် AI ဝန်ဆောင်မှုများ နှေးကွေးနေပါသည်။ ခဏနေမှ ထပ်မံမေးမြန်းကြည့်ပါရှင်။"
 
 
-# --- Fast & Comprehensive Web Search Helpers (Tavily + Google News RSS in Parallel) ---
+# --- 6-Intent AI Router (Zero-Keyword Smart Routing) ---
+def classify_user_intent(user_message: str, available_groups: list) -> dict:
+    """
+    မေးခွန်း/ခိုင်းစေချက်ကို အမျိုးအစား ၆ မျိုးထဲမှ တစ်ခုအဖြစ် AI ကိုယ်တိုင် ခွဲခြားပေးသည်:
+    - GROUP_QUERY: Group log များထဲမှ သီးခြားအချက်အလက် မေးမြန်းခြင်း
+    - GROUP_SUMMARY: Group အနှစ်ချုပ် Report ထုတ်ခိုင်းခြင်း
+    - TASK: Task ထည့်ခြင်း၊ ကြည့်ခြင်း၊ ပြီးစီးကြောင်း မှတ်ခြင်း
+    - ADVICE: အကြံဉာဏ်တောင်းခြင်း၊ ပြဿနာ ဖြေရှင်းနည်း/ဆုံးဖြတ်ချက် အကြံပြုခိုင်းခြင်း
+    - GENERAL_TASK: Web search မလိုသော ခိုင်းစေချက်များ (စာရေး/ဘာသာပြန်/ရှင်းပြ/စကားပြော)
+    - GENERAL_SEARCH: ပြင်ပသတင်း၊ ရာသီဥတု၊ ပွဲစဉ်/ရလဒ်၊ ဈေးနှုန်း၊ Real-time အချက်အလက် ရှာဖွေခြင်း
+    """
+    groups_str = ", ".join(available_groups) if available_groups else "None"
+    router_prompt = f"""
+Analyze the user's message and classify its intent into one of these exact categories:
+1. "GROUP_QUERY": Asking a specific question/check about internal operations, ways, cancellations, parcels, riders, branches, or events inside Telegram work groups.
+2. "GROUP_SUMMARY": Requesting a summary/report of unread or daily messages from Telegram groups.
+3. "TASK": Managing personal to-do tasks (adding a task, listing tasks, or marking a task done).
+4. "ADVICE": Asking for advice, recommendations, strategic options, or how to handle/solve a problem or decision.
+5. "GENERAL_TASK": General requests/instructions like drafting messages, translating, summarizing user-provided text, coding/tech help, explanations, or casual chat that don't require live web search or strategic advice.
+6. "GENERAL_SEARCH": Asking for current/live facts, weather/rain/temperature, news, prices, sports scores/fixtures, or external web information.
+
+Available Telegram Groups: [{groups_str}]
+User Message: "{user_message}"
+
+Return ONLY a valid JSON object:
+{{
+  "intent": "GROUP_QUERY" | "GROUP_SUMMARY" | "TASK" | "ADVICE" | "GENERAL_TASK" | "GENERAL_SEARCH",
+  "group_name": "exact matching group name from Available Telegram Groups or null",
+  "period": "today" | "yesterday" | "recent",
+  "task_action": "add" | "list" | "done" | null,
+  "task_title": "extracted task description if adding/completing or null",
+  "task_id": null
+}}
+"""
+    try:
+        completion = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "You are a strict JSON intent router. Output only valid JSON."},
+                {"role": "user", "content": router_prompt}
+            ],
+            temperature=0.0,
+            max_tokens=160,
+        )
+        raw = completion.choices[0].message.content.strip()
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+    except Exception as e:
+        print(f"Groq router fallback to Gemini: {e}")
+
+    try:
+        resp = gemini_client.models.generate_content(
+            model="gemini-3.5-flash-lite",
+            contents=router_prompt
+        )
+        raw = (resp.text or "").strip()
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+    except Exception as e:
+        print(f"Gemini router error: {e}")
+
+    return {"intent": "GENERAL_SEARCH", "group_name": None, "period": "recent"}
+
+
+# --- Fast & Keyword-Free Parallel Web Search Helpers (Tavily + Google News RSS) ---
 def _tavily_worker(search_query: str, max_results: int = 5) -> str:
     if not TAVILY_API_KEY:
         return ""
@@ -313,101 +376,13 @@ def fetch_combined_web_context(tavily_query: str, rss_queries: list = None, max_
     return "\n\n".join(parts)
 
 
-# --- Real-Time Weather Helper (Open-Meteo with Fast Web Fallback) ---
-MYANMAR_CITIES = {
-    "yangon": ("ရန်ကုန် (Yangon)", 16.8661, 96.1951),
-    "ရန်ကုန်": ("ရန်ကုန် (Yangon)", 16.8661, 96.1951),
-    "mandalay": ("မန္တလေး (Mandalay)", 21.9588, 96.0891),
-    "မန္တလေး": ("မန္တလေး (Mandalay)", 21.9588, 96.0891),
-    "naypyidaw": ("နေပြည်တော် (Naypyidaw)", 19.7633, 96.0785),
-    "နေပြည်တော်": ("နေပြည်တော် (Naypyidaw)", 19.7633, 96.0785),
-    "bago": ("ပဲခူး (Bago)", 17.3352, 96.4814),
-    "ပဲခူး": ("ပဲခူး (Bago)", 17.3352, 96.4814),
-    "mawlamyine": ("မော်လမြိုင် (Mawlamyine)", 16.4905, 97.6283),
-    "မော်လမြိုင်": ("မော်လမြိုင် (Mawlamyine)", 16.4905, 97.6283),
-    "hpa-an": ("ဘားအံ (Hpa-An)", 16.8906, 97.6348),
-    "ဘားအံ": ("ဘားအံ (Hpa-An)", 16.8906, 97.6348),
-    "myawaddy": ("မြဝတီ (Myawaddy)", 16.6891, 98.5085),
-    "မြဝတီ": ("မြဝတီ (Myawaddy)", 16.6891, 98.5085),
-    "taunggyi": ("တောင်ကြီး (Taunggyi)", 20.7892, 97.0378),
-    "တောင်ကြီး": ("တောင်ကြီး (Taunggyi)", 20.7892, 97.0378),
-}
-
-WEATHER_CODES = {
-    0: "ကောင်းကင်ကြည်လင် (Clear sky)",
-    1: "တိမ်အနည်းငယ်ရှိ (Mainly clear)",
-    2: "တိမ်အသင့်အတင့်ရှိ (Partly cloudy)",
-    3: "တိမ်ထူထပ် (Overcast)",
-    45: "မြူဆိုင်း (Fog)",
-    51: "မိုးဖွဲအနည်းငယ်ရွာ (Light drizzle)",
-    61: "မိုးအနည်းငယ်ရွာ (Slight rain)",
-    63: "မိုးအသင့်အတင့်ရွာ (Moderate rain)",
-    65: "မိုးသည်းထန်စွာရွာ (Heavy rain)",
-    80: "မိုးတစ်ပြိုက်နှစ်ပြိုက်ရွာ (Rain showers)",
-    95: "မိုးကြိုးမုန်တိုင်း (Thunderstorm)",
-}
-
-
-def get_realtime_weather(query_text: str) -> str:
-    q_lower = query_text.lower()
-    city_label, lat, lon = ("ရန်ကုန် (Yangon)", 16.8661, 96.1951)
-    city_en = "Yangon"
-    for key, info in MYANMAR_CITIES.items():
-        if key in q_lower:
-            city_label, lat, lon = info
-            city_en = info[0].split("(")[-1].replace(")", "").strip()
-            break
-
-    now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
-    today_date = datetime.now(MM_TZ).strftime("%Y-%m-%d")
-
-    try:
-        url = (
-            f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
-            f"&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m"
-            f"&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max"
-            f"&timezone=Asia%2FYangon&forecast_days=2"
-        )
-        resp = requests.get(url, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-
-        curr = data.get("current", {})
-        daily = data.get("daily", {})
-
-        temp = curr.get("temperature_2m", "-")
-        humidity = curr.get("relative_humidity_2m", "-")
-        wind = curr.get("wind_speed_10m", "-")
-        w_code = curr.get("weather_code", 0)
-        condition = WEATHER_CODES.get(w_code, f"Weather code {w_code}")
-
-        max_t = daily.get("temperature_2m_max", ["-"])[0]
-        min_t = daily.get("temperature_2m_min", ["-"])[0]
-        rain_prob = daily.get("precipitation_probability_max", ["-"])[0]
-
-        return (
-            f"🌤️ {city_label} ရာသီဥတု ({now_str})\n\n"
-            f"• လက်ရှိအခြေအနေ: {condition}\n"
-            f"• လက်ရှိအပူချိန်: {temp}°C (အမြင့်ဆုံး {max_t}°C / အနိမ့်ဆုံး {min_t}°C)\n"
-            f"• မိုးရွာနိုင်ခြေ: {rain_prob}%\n"
-            f"• စိုထိုင်းဆ: {humidity}% | လေတိုက်နှုန်း: {wind} km/h"
-        )
-    except Exception:
-        web_weather = fetch_combined_web_context(f"{city_en} Myanmar weather forecast {today_date}", max_results=4)
-        prompt = (
-            f"ယနေ့ ({today_date}) {city_label} ရာသီဥတု အခြေအနေကို အောက်ပါ ရှာဖွေတွေ့ရှိချက်များမှ ထုတ်နုတ်ပြီး "
-            f"မြန်မာဘာသာဖြင့် တိုတိုရှင်းရှင်း ဖြေပေးပါ။ (အချက်အလက် မရှိပါက မသိကြောင်း ရိုးသားစွာ ဖြေပါ။)\n\n{web_weather}"
-        )
-        return call_ai_with_3tier_fallback(prompt, use_google_search=True)
-
-
 # --- Myanmar News Fetcher & Summarizer (/news & 9:00 AM Daily Job) ---
 def get_myanmar_news_summary() -> str:
     now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
     today_date = datetime.now(MM_TZ).strftime("%Y-%m-%d")
 
     web_context = fetch_combined_web_context(
-        tavily_query=f"Myanmar latest news {today_date} Yangon gold exchange rate",
+        tavily_query=f"Myanmar latest news {today_date} Yangon",
         rss_queries=["Myanmar news", "မြန်မာ သတင်း", "Yangon news"],
         max_results=5,
     )
@@ -415,8 +390,8 @@ def get_myanmar_news_summary() -> str:
     prompt = f"""
     လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)
     Google Search နှင့် အောက်ပါ Web Search / RSS အချက်အလက်များကို ပေါင်းစပ်၍ ယနေ့ မြန်မာပြည်နှင့် ပတ်သက်သည့်
-    နောက်ဆုံးရ အရေးကြီး သတင်းအစုံအလင် (ပြည်တွင်းသတင်း၊ စီးပွားရေး၊ ရွှေဈေး/ငွေလဲနှုန်း နှင့် ထူးခြားဖြစ်စဉ်များ) ကို
-    မြန်မာဘာသာဖြင့် ရှင်းလင်းပြတ်သားသော Bullet point များဖြင့် စာလုံးရေ ၁,၅၀၀ အတွင်း တိုတိုရှင်းရှင်း အနှစ်ချုပ် တင်ပြပေးပါ။
+    နောက်ဆုံးရ အရေးကြီး သတင်းအစုံအလင်ကို မြန်မာဘာသာဖြင့် ရှင်းလင်းပြတ်သားသော Bullet point များဖြင့်
+    စာလုံးရေ ၁,၅၀၀ အတွင်း တိုတိုရှင်းရှင်း အနှစ်ချုပ် တင်ပြပေးပါ။
 
     {web_context}
     """
@@ -424,37 +399,19 @@ def get_myanmar_news_summary() -> str:
     return f"📰 Myanmar News Summary ({now_str})\n\n{summary}"
 
 
-# --- Fast & Comprehensive Universal Search + AI Answer ---
+# --- Keyword-Free Universal Web Search + AI Answer ---
 def answer_with_universal_search(user_id: int, user_message: str) -> str:
     now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
-    today_date = datetime.now(MM_TZ).strftime("%Y-%m-%d")
     memory_context = recall_relevant_history(user_id, user_message, recent_limit=5, search_limit=3)
 
-    greetings = ["မင်္ဂလာပါ", "hi", "hello", "hey", "မာယာ", "ကျေးဇူး", "thanks", "thank you", "ok", "ဟုတ်"]
-    is_simple_greeting = user_message.lower().strip() in greetings
-
-    web_context = ""
-    if not is_simple_greeting:
-        clean_q = re.sub(r"[?？!]", "", user_message).strip()
-        extra = ""
-        rss_qs = None
-        if "ရွှေ" in clean_q:
-            extra = f" Myanmar gold price {today_date}"
-            rss_qs = ["Myanmar gold price", "ရွှေဈေး"]
-        elif "ဒေါ်လာ" in clean_q or "ငွေလဲ" in clean_q:
-            extra = f" Myanmar USD exchange rate MMK {today_date}"
-            rss_qs = ["Myanmar exchange rate USD MMK", "ဒေါ်လာဈေး"]
-        elif any(k in clean_q.lower() for k in ["premier league", "ပွဲစဉ်", "chelsea", "man u", "manchester"]):
-            extra = f" Premier League fixtures results {today_date}"
-            rss_qs = ["Premier League fixtures results"]
-
-        web_context = fetch_combined_web_context(f"{clean_q}{extra}", rss_queries=rss_qs, max_results=5)
+    clean_q = re.sub(r"[?？!]", "", user_message).strip()
+    web_context = fetch_combined_web_context(clean_q, rss_queries=[clean_q], max_results=5)
 
     system_prompt = (
         f"သင်သည် မာယာ (Maya) အမည်ရှိ ကိုယ်ပိုင် အလုပ်အမှုဆောင် AI Assistant ဖြစ်သည်။\n"
         f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n"
         f"စည်းမျဉ်းများ:\n"
-        f"1. Web Search ရလဒ်များနှင့် Google Search Tool ကို အသုံးပြု၍ သတင်းအစုံ၊ အားကစားပွဲစဉ်/ရလဒ် အဟောင်းအသစ်၊ ဈေးနှုန်း၊ နည်းပညာနှင့် ဗဟုသုတ မေးခွန်းများကို တိကျပြည့်စုံစွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ။\n"
+        f"1. Web Search ရလဒ်များနှင့် Google Search Tool ကို အသုံးပြု၍ သတင်းအစုံ၊ ရာသီဥတု၊ အားကစားပွဲစဉ်/ရလဒ် အဟောင်းအသစ်၊ ဈေးနှုန်း၊ နည်းပညာနှင့် ဗဟုသုတ မေးခွန်းများကို တိကျပြည့်စုံစွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ။\n"
         f"2. အဖြေကို အဓိက အချက်အလက် (၃ - ၅ ချက်) သာ ဖော်ပြပြီး စာလုံးရေ ၁,၅၀၀ အတွင်း တိုတိုရှင်းရှင်းနှင့် မြန်မာစာလုံး မှန်ကန်သန့်ရှင်းစွာ ဖြေကြားပါ။\n"
         f"3. Web Search ရလဒ် ပါရှိပါက အတိတ် Chat History ထဲက ဈေးနှုန်း/ရာသီဥတု/ပွဲစဉ် အချက်အလက်ဟောင်းများကို မကိုးကားဘဲ လက်ရှိ Web Search ရလဒ်ကိုသာ ဦးစားပေး ဖြေပါ။\n"
         f"4. အချက်အလက် အတိအကျ ရှာမတွေ့ပါက မမှန်မကန် မဖြေဘဲ မတွေ့ရှိကြောင်း ရိုးသားစွာ ရှင်းပြပါ။ Task မှတ်လိုပါက /addtask ဖြင့် မှတ်နိုင်သည်။\n"
@@ -501,7 +458,27 @@ def get_formatted_tasks() -> str:
     return "Current Tasks:\n" + "\n".join([f"- ID {t['id']}: {t['title']} ({t['status']})" for t in tasks])
 
 
-# --- 2. Group Summary & Report Tools ---
+def handle_task_intent(user_message: str, route: dict) -> str:
+    action = (route.get("task_action") or "").lower()
+    task_title = (route.get("task_title") or "").strip()
+    task_id = route.get("task_id")
+
+    if action == "list":
+        return get_formatted_tasks()
+
+    if action == "done" and task_id:
+        try:
+            supabase.table("tasks").update({"status": "done"}).eq("id", int(task_id)).execute()
+            return f"Task ID {task_id} ကို ပြီးစီးကြောင်း မှတ်သားလိုက်ပါပြီ။"
+        except Exception as e:
+            return f"Task update error: {e}"
+
+    clean_title = task_title or user_message.strip()
+    add_task(clean_title)
+    return f"Task added: {clean_title}"
+
+
+# --- 2. Group Summary, Report & Specific Group Q&A Tools ---
 def get_available_groups() -> list:
     cleanup_old_raw_logs()
     thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
@@ -528,7 +505,7 @@ def parse_date_range_from_text(text: str):
     text_lower = text.lower()
     if "မနေ့" in text_lower or "yesterday" in text_lower:
         return get_date_bounds("yesterday")
-    if "ဒီနေ့" in text_lower or "today" in text_lower:
+    if "ဒီနေ့" in text_lower or "today" in text_lower or "ယနေ့" in text_lower:
         return get_date_bounds("today")
 
     match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text_lower)
@@ -542,6 +519,85 @@ def parse_date_range_from_text(text: str):
             pass
 
     return None, None, None
+
+
+def query_specific_group_logs(user_message: str, router_group: str = None, router_period: str = "recent") -> str:
+    """Group တစ်ခု (သို့မဟုတ် အားလုံး) ၏ Log များကို Overall ပြန်ဖတ်ပြီး မေးခွန်းနှင့် သက်ဆိုင်သည့် အချက်ကိုသာ လူတစ်ယောက်လို ဖြေပေးသည်။"""
+    cleanup_old_raw_logs()
+
+    if router_period in ["today", "yesterday"]:
+        start_iso, end_iso, date_label = get_date_bounds(router_period)
+    else:
+        start_iso, end_iso, date_label = parse_date_range_from_text(user_message)
+
+    thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
+    query = supabase.table("raw_logs").select("*").gte("created_at", thirty_days_ago_iso).order("id")
+
+    if start_iso and end_iso:
+        query = query.gte("created_at", start_iso).lt("created_at", end_iso)
+    else:
+        query = query.limit(150)
+
+    logs_res = query.execute()
+    all_logs = logs_res.data or []
+
+    if not all_logs:
+        scope_d = f" ({date_label})" if date_label else ""
+        return f"သက်ဆိုင်ရာ ကာလ{scope_d} အတွက် Group log မှတ်တမ်းများ မရှိသေးပါ။"
+
+    matched_group = router_group
+    if not matched_group:
+        q_lower = user_message.lower()
+        available_groups = list({l.get("group_name") for l in all_logs if l.get("group_name")})
+        best_score = 0
+        for g_name in available_groups:
+            g_lower = g_name.lower()
+            score = 100 if g_lower in q_lower else 0
+            for word in re.findall(r"[a-z0-9\u1000-\u109F]+", g_lower):
+                if len(word) >= 2 and word in q_lower:
+                    score += len(word) * 2
+            if score > best_score:
+                best_score = score
+                matched_group = g_name
+
+    if matched_group:
+        filtered_logs = [l for l in all_logs if l.get("group_name") == matched_group]
+    else:
+        filtered_logs = all_logs
+
+    if not filtered_logs:
+        scope_g = matched_group or "သက်ဆိုင်ရာ Group"
+        scope_d = f" ({date_label})" if date_label else ""
+        return f"{scope_g}{scope_d} အတွက် Log မှတ်တမ်း မရှိပါ။"
+
+    raw_text = "\n".join(
+        [
+            f"[{l.get('group_name', '')} | {str(l.get('created_at', ''))[:16]} | {l.get('sender_name', 'Unknown')}]: {l.get('content_summary', '')}"
+            for l in filtered_logs
+        ]
+    )
+
+    now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
+    header_info = f"Group: {matched_group or 'All Groups'} | Period: {date_label or 'Recent'}"
+
+    prompt = f"""
+    လက်ရှိအချိန်: {now_str}
+    {header_info}
+
+    အောက်ပါတို့မှာ အဆိုပါ Group ထဲမှ စုစည်းရရှိထားသော Log မှတ်တမ်းများ (Overall) ဖြစ်သည်။
+    အသုံးပြုသူ၏ မေးခွန်းနှင့် တိုက်ရိုက် သက်ဆိုင်သော အချက်အလက်ကိုသာ ရှာဖွေပြီး လူတစ်ယောက်လို သဘာဝကျကျ၊
+    တိတိကျကျနှင့် တိုတိုရှင်းရှင်း မြန်မာဘာသာဖြင့် ဖြေကြားပေးပါ။
+    - မေးထားသည့် အချက် ပါဝင်ပါက အရေအတွက်၊ အချိန်၊ အကြောင်းရင်း/အသေးစိတ်ကို တိတိကျကျ ဖော်ပြပါ။
+    - မေးထားသည့် အချက် Log များထဲတွင် မပါဝင်ပါက မတွေ့ရှိကြောင်း ရှင်းလင်းစွာ ဖြေပါ။ မဆိုင်သည့် အကြောင်းအရာများကို ထည့်မရေးပါနှင့်။
+
+    အသုံးပြုသူ မေးခွန်း: {user_message}
+
+    Group Log မှတ်တမ်းများ:
+    {raw_text}
+    """
+
+    answer = call_ai_with_3tier_fallback(prompt, use_google_search=False)
+    return f"📌 {header_info}\n\n{answer}"
 
 
 def get_group_report(user_query: str = "", exact_group_name: str = None, day_mode: str = None) -> str:
@@ -612,7 +668,7 @@ def get_group_report(user_query: str = "", exact_group_name: str = None, day_mod
     return f"{header_info}\n\n{report_text}"
 
 
-# --- 3. Quick Menu & Command Handlers (English Labels) ---
+# --- 3. Quick Menu & Command Handlers ---
 def build_main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
@@ -760,7 +816,7 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
     await send_long_message(query.message, reply_text)
 
 
-# --- 4. General Telegram Message Handler ---
+# --- 4. General Telegram Message Handler (6-Intent Zero-Keyword AI Routing) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
@@ -801,7 +857,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # CASE B: Private Chat Instructions
+    # CASE B: Private Chat (6-Intent AI Router - No Hardcoded Keywords)
     if chat_type == "private":
         if message.from_user.id != ADMIN_USER_ID:
             await message.reply_text("Unauthorized.")
@@ -816,33 +872,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             save_chat_message(message.from_user.id, "user", user_message)
 
-            msg_lower = user_message.lower().strip()
-            is_question = msg_lower.endswith("?") or any(q in msg_lower for q in ["လား", "လဲ", "ရလား", "နိုင်မလား"])
-
-            if msg_lower in ["menu", "help"]:
-                await message.reply_text(
-                    "Quick Menu:",
-                    reply_markup=build_main_menu_keyboard()
-                )
+            if user_message.strip().lower() in ["menu", "help"]:
+                await message.reply_text("Quick Menu:", reply_markup=build_main_menu_keyboard())
                 return
-            elif any(w in msg_lower for w in ["ရာသီဥတု", "weather", "အပူချိန်"]):
-                reply_text = await asyncio.to_thread(get_realtime_weather, user_message)
-            elif not is_question and any(k in msg_lower for k in ["group report", "group summary", "အနှစ်ချုပ်", "အကျဉ်းချုပ်"]) and "သတင်း" not in msg_lower and "news" not in msg_lower:
-                reply_text = get_group_report(user_message)
-            elif not is_question and (msg_lower.startswith("task:") or msg_lower.startswith("လုပ်စရာ:") or "task မှတ်ထား" in msg_lower or "task ထည့်" in msg_lower):
-                clean_task = re.sub(r"^(task:|လုပ်စရာ:)\s*", "", user_message, flags=re.IGNORECASE).strip()
-                add_task(clean_task)
-                reply_text = f"Task added: {clean_task}"
-            elif msg_lower in ["tasks", "task list", "task စာရင်း", "လုပ်စရာစာရင်း"]:
-                reply_text = get_formatted_tasks()
-            else:
-                reply_text = await asyncio.to_thread(answer_with_universal_search, message.from_user.id, user_message)
 
-            if not reply_text or not str(reply_text).strip():
-                reply_text = "လောလောဆယ် အချက်အလက် ပြန်ထုတ်ရာတွင် အခက်အခဲ ရှိနေပါသည်။ နောက်တစ်ကြိမ် ထပ်မံမေးကြည့်ပေးပါရှင်။"
+            available_groups = await asyncio.to_thread(get_available_groups)
+            route = await asyncio.to_thread(classify_user_intent, user_message, available_groups)
+
+            intent = route.get("intent", "GENERAL_SEARCH")
+            target_group = route.get("group_name")
+            period = route.get("period", "recent")
+
+            if intent == "GROUP_QUERY":
+                reply_text = await asyncio.to_thread(
+                    query_specific_group_logs, user_message, target_group, period
+                )
+            elif intent == "GROUP_SUMMARY":
+                day_m = period if period in ["today", "yesterday"] else None
+                reply_text = await asyncio.to_thread(
+                    get_group_report, user_message, target_group, day_m
+                )
+            elif intent == "TASK":
+                reply_text = await asyncio.to_thread(handle_task_intent, user_message, route)
+            elif intent == "ADVICE":
+                memory_context = recall_relevant_history(message.from_user.id, user_message, recent_limit=6, search_limit=4)
+                advice_prompt = (
+                    f"သင်သည် မာယာ (Maya) အမည်ရှိ လက်တွေ့ကျကျ အကြံဉာဏ်ပေးနိုင်သော ကိုယ်ပိုင် အလုပ်အမှုဆောင် AI Advisor ဖြစ်သည်။\n"
+                    f"အသုံးပြုသူ၏ အခြေအနေနှင့် မေးခွန်းကို သုံးသပ်ပြီး အောက်ပါပုံစံအတိုင်း မြန်မာဘာသာဖြင့် ရှင်းလင်းပြတ်သားစွာ အကြံပြုပါ:\n"
+                    f"1. အခြေအနေ သုံးသပ်ချက် (တိုတိုရှင်းရှင်း)\n"
+                    f"2. အကြံပြု လုပ်ဆောင်သင့်သော နည်းလမ်းများ (Actionable Options / Pros & Cons ရှိလျှင် ဖော်ပြပါ)\n"
+                    f"3. ချက်ချင်း စတင်နိုင်မည့် Next Step\n\n"
+                    f"{memory_context}\n\n"
+                    f"အကြံတောင်းသည့် အကြောင်းအရာ: {user_message}"
+                )
+                reply_text = await asyncio.to_thread(call_ai_with_3tier_fallback, advice_prompt, None, None, False)
+            elif intent == "GENERAL_TASK":
+                memory_context = recall_relevant_history(message.from_user.id, user_message, recent_limit=5, search_limit=3)
+                gen_prompt = (
+                    f"သင်သည် မာယာ (Maya) အမည်ရှိ ကိုယ်ပိုင် အလုပ်အမှုဆောင် AI Assistant ဖြစ်သည်။\n"
+                    f"အသုံးပြုသူ ခိုင်းစေချက်/မေးခွန်းကို မြန်မာဘာသာဖြင့် (သို့မဟုတ် တောင်းဆိုသည့် ဘာသာစကားဖြင့်) "
+                    f"တိုတိုရှင်းရှင်း၊ ထိထိရောက်ရောက်နှင့် လက်တွေ့ကျကျ ကူညီဆောင်ရွက်ပေးပါ။\n\n"
+                    f"{memory_context}\n\n"
+                    f"ခိုင်းစေချက်: {user_message}"
+                )
+                reply_text = await asyncio.to_thread(call_ai_with_3tier_fallback, gen_prompt, None, None, False)
+            else:
+                reply_text = await asyncio.to_thread(
+                    answer_with_universal_search, message.from_user.id, user_message
+                )
 
             save_chat_message(message.from_user.id, "assistant", reply_text)
-
             await send_long_message(message, reply_text)
 
         except Exception as e:
@@ -886,7 +965,7 @@ async def main_async():
         BotCommand("addtask", "Add a new task"),
     ])
 
-    print("🤖 Fast & Universal AI Agent (Maya) started...")
+    print("🤖 6-Intent Universal AI Agent (Maya) started...")
 
     await application.start()
     await application.updater.start_polling()
