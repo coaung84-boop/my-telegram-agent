@@ -386,7 +386,7 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 8
 
 
 # --- Speed-First & Burmese-Safe 3-Tier AI Fallback Helper ---
-# Tier 1: gemini-3.5-flash-lite (1x retry) -> Tier 2: gemini-3.8-flash -> Tier 3: OpenRouter google/gemma-4-31b-it:free
+# Tier 1: gemini-3.5-flash-lite (1x retry) -> Tier 2: gemini-3.8-flash -> Tier 3: OpenRouter google/gemma-4-31b-it:free + Groq 70B backup
 def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, use_google_search=False):
     contents = (
         [types.Part.from_bytes(data=bytes(image_bytes), mime_type=mime_type or 'image/jpeg'), prompt_text]
@@ -425,7 +425,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
     except Exception as e:
         print(f"2. Gemini 3.8 Flash Error: {e}")
 
-    # Tier 3: OpenRouter Specific Burmese-Capable Model (google/gemma-4-31b-it:free)
+    # Tier 3A: OpenRouter Specific Burmese-Capable Model (google/gemma-4-31b-it:free)
     if OPENROUTER_API_KEY:
         try:
             headers = {
@@ -447,29 +447,42 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
                 if txt:
                     return txt
         except Exception as e:
-            print(f"3. OpenRouter (google/gemma-4-31b-it:free) Error: {e}")
+            print(f"3A. OpenRouter (google/gemma-4-31b-it:free) Error: {e}")
+
+    # Tier 3B: Groq 70B Safety Backup
+    try:
+        completion = groq_client.with_options(timeout=8.0).chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": STRICT_MYANMAR_SYSTEM},
+                {"role": "user", "content": prompt_text}
+            ],
+            temperature=0.2,
+        )
+        if completion and completion.choices and completion.choices[0].message.content:
+            txt = completion.choices[0].message.content.strip()
+            if txt:
+                return txt
+    except Exception as e:
+        print(f"3B. Groq 70B Error: {e}")
 
     return "ဟုတ်ကဲ့ရှင်၊ လောလောဆယ် AI ဆာဗာ ခဏအလုပ်များနေပါသည်။ စက္ကန့်အနည်းငယ်နေပြီး ပြန်ပို့ပေးပါနော်။"
 
 
-# --- 6-Intent AI Router (Groq Fast JSON Routing with Follow-Up Persistence) ---
+# --- 6-Intent AI Router (Clear Topic Separation + Follow-Up Persistence) ---
 def classify_user_intent(user_message: str, available_groups: list, recent_ctx: str = "") -> dict:
     groups_str = ", ".join(available_groups[:20]) if available_groups else "None"
     router_prompt = f"""
-Classify the user's latest message into one of 6 intents.
-Be careful NOT to force `GROUP_QUERY` when the user switches to a completely new outside topic (such as songs/music, entertainment, online trends, weather, news, prices, sports, general facts).
+Classify the user's latest message into one of 6 intents accurately.
+Pay close attention to whether the user is asking about internal Telegram work groups OR switching to an outside/general topic.
 
-Rules:
-1. If the latest message asks about outside/general/live topics (songs, music, movies, online/internet trends, news, weather, prices, sports, general knowledge) — EVEN IF Recent Context was about a Telegram group — classify as `GENERAL_SEARCH` and set `group_name` to `null`.
-2. Only use `GROUP_QUERY` when the user is asking about internal group messages/operations/people OR is clearly following up on the SAME group/person/topic just discussed in Recent Context (e.g., "သူပြောတဲ့...", "အဲ့ဒါကို key points...", "အဲ့ထဲမှာ...").
-
-Intents:
-1. GROUP_QUERY: Specific question or follow-up about messages, people, or operations inside Telegram groups.
-2. GROUP_SUMMARY: Summary/report of unread, today, or yesterday messages across Telegram groups.
-3. TASK: Personal to-do tasks (add, list, mark done).
-4. ADVICE: Advice, recommendations, or problem-solving options.
-5. GENERAL_TASK: Drafting messages, translating, coding/tech help, explanations, or private chat tasks.
-6. GENERAL_SEARCH: External/live info, songs/music, online/internet topics, weather, news, prices, sports, calendar.
+Decision Rules:
+1. `GENERAL_SEARCH`: Use whenever the user asks about outside/live/general topics such as songs/music, entertainment, online/internet trends, news, weather, prices, sports, general facts, or calendar/holidays — EVEN IF Recent Context was about a Telegram group. When switching to `GENERAL_SEARCH`, set `group_name` to `null`.
+2. `GROUP_SUMMARY`: Use when asking for a broad summary/report of unread, today, or yesterday messages across groups or a specified group.
+3. `GROUP_QUERY`: Use when asking about specific facts, updates, or what a specific person/sender said inside Telegram groups, OR when clearly following up on the SAME person/group/topic just discussed in Recent Context (e.g., "သူပြောတဲ့...", "အဲ့ဒါကို key points...", "အဲ့ထဲမှာ...").
+4. `TASK`: Use for personal to-do tasks (add task, list tasks, mark task done).
+5. `ADVICE`: Use when asking for advice, recommendations, or problem-solving options.
+6. `GENERAL_TASK`: Use for drafting messages, translating, coding/tech help, explanations, or private chat requests.
 
 Available Groups: [{groups_str}]
 Recent Context:
@@ -480,7 +493,7 @@ Return ONLY JSON:
 {{"intent":"...","group_name":null,"period":"today|yesterday|recent","task_action":null,"task_title":null,"task_id":null}}
 """
     try:
-        completion = groq_client.with_options(timeout=3.5).chat.completions.create(
+        completion = groq_client.with_options(timeout=4.0).chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": "Output only valid JSON."},
@@ -501,6 +514,8 @@ Return ONLY JSON:
                 "GENERAL_TASK",
                 "GENERAL_SEARCH",
             }:
+                if parsed.get("intent") == "GENERAL_SEARCH":
+                    parsed["group_name"] = None
                 return parsed
     except Exception as e:
         print(f"Groq router fallback: {e}")
@@ -508,7 +523,7 @@ Return ONLY JSON:
     return {"intent": "GENERAL_SEARCH", "group_name": None, "period": "recent"}
 
 
-# --- Keyword-Free Parallel Web Search Helpers (Tavily + Google News RSS) ---
+# --- Focused Web Search Helpers (Tavily + Google News RSS) ---
 def _tavily_worker(search_query: str, max_results: int = 4) -> str:
     if not TAVILY_API_KEY:
         return ""
@@ -614,31 +629,32 @@ def get_myanmar_news_summary() -> str:
     return f"📰 Myanmar News Summary ({now_str})\n\n{summary}"
 
 
-# --- Google AI Overview Style Web Search + Calendar + Profile/Memory Answer ---
+# --- Google AI Overview Style Web Search (Focused on User's Search Query) ---
 def answer_with_universal_search(user_id: int, user_message: str) -> str:
     now_mm = datetime.now(MM_TZ)
     now_str = now_mm.strftime("%Y-%m-%d %H:%M MMT")
     cal_info = get_myanmar_calendar_context(now_mm)
-    memory_context = recall_relevant_history(user_id, user_message, recent_limit=8, search_limit=10)
+    profile_text = get_user_profile(user_id)
 
     clean_q = re.sub(r"[?？!]", "", user_message).strip()
     web_context = fetch_combined_web_context(clean_q, rss_queries=[clean_q], max_results=5)
+
+    profile_block = f"--- Learned User Profile ---\n{profile_text}\n\n" if profile_text else ""
 
     system_prompt = (
         f"သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။\n"
         f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n"
         f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
-        f"Google Search AI Overview ကဲ့သို့ အသုံးပြုသူ ရှာဖွေမေးမြန်းသည့် မည်သည့်အကြောင်းအရာကိုမဆို "
-        f"Google Search Tool၊ Web Search ရလဒ်များနှင့် မြန်မာပြက္ခဒိန်အချက်အလက်များကို အသုံးပြု၍ အောက်ပါပုံစံအတိုင်း မြန်မာဘာသာဖြင့် ဖြေကြားပါ:\n"
+        f"အသုံးပြုသူ၏ ရှာဖွေမေးမြန်းချက်အပေါ်သာ တိုက်ရိုက် Focus ထားပြီး Google AI Overview ကဲ့သို့ "
+        f"ရှင်းလင်းပြတ်သားစွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ (Telegram Group မှတ်တမ်းများကို မရောပါနှင့်):\n"
         f"1. **တိုက်ရိုက် အဖြေချုပ် (Direct Answer):** မေးခွန်း၏ အဓိကအဖြေကို စာကြောင်း ၁–၂ ကြောင်းဖြင့် အရင်ဆုံး ရှင်းရှင်းလင်းလင်း ဖြေပါ။\n"
-        f"2. **အဓိက အချက်အလက်များ (Key Points):** ရရှိထားသော ရှာဖွေမှုရလဒ်/ပြက္ခဒိန်ထဲမှ သက်ဆိုင်ရာ ရက်စွဲ၊ ဂဏန်း/ဈေးနှုန်း၊ နေရာနှင့် အရေးကြီး အချက်များကို Bullet point များဖြင့် တိတိကျကျ ဖော်ပြပါ။\n"
-        f"3. အသုံးပြုသူ၏ Learned User Profile နှင့် အရှေ့နောက် Conversation History ကို ချိတ်ဆက်ပြီး အလိုက်သိသိ ဖြေပါ။\n"
-        f"4. မေးခွန်းနှင့် မသက်ဆိုင်သော Search ရလဒ်များကို လုံးဝ မသုံးပါနှင့်။ သေချာမသိပါက မသိကြောင်း ရိုးသားစွာ ဖြေပါ။\n"
+        f"2. **အဓိက အချက်အလက်များ (Key Points):** ရှာဖွေမှုရလဒ်နှင့် Google Search ထဲမှ သက်ဆိုင်ရာ အချက် (၃–၅ ချက်) ကို Bullet point များဖြင့် တိုတိုရှင်းရှင်း ဖော်ပြပါ။\n"
+        f"3. မေးခွန်းနှင့် မသက်ဆိုင်သော အချက်အလက်များကို လုံးဝ မထည့်ပါနှင့်။ သေချာမသိပါက မသိကြောင်း ရိုးသားစွာ ဖြေပါ။\n"
     )
 
     full_prompt = (
         f"{system_prompt}\n"
-        f"{memory_context or '--- Memory ---\nNone'}\n\n"
+        f"{profile_block}"
         f"{web_context or '--- Web Search Results ---\nNone'}\n\n"
         f"ရှာဖွေမေးမြန်းချက်: {user_message}"
     )
@@ -673,8 +689,8 @@ def list_tasks() -> list:
 def get_formatted_tasks() -> str:
     tasks = list_tasks()
     if not tasks:
-        return "No tasks found."
-    return "Current Tasks:\n" + "\n".join([f"- ID {t['id']}: {t['title']} ({t['status']})" for t in tasks])
+        return "လက်ရှိ မှတ်ထားတဲ့ Task မရှိသေးပါရှင်။"
+    return "လက်ရှိ Task များ:\n" + "\n".join([f"- ID {t['id']}: {t['title']} ({t['status']})" for t in tasks])
 
 
 def handle_task_intent(user_message: str, route: dict) -> str:
@@ -691,7 +707,6 @@ def handle_task_intent(user_message: str, route: dict) -> str:
                 supabase.table("tasks").update({"status": "done"}).eq("id", int(task_id)).execute()
                 return f"ဟုတ်ကဲ့ရှင်၊ Task ID {task_id} ကို ပြီးစီးကြောင်း မှတ်သားလိုက်ပါပြီ။"
 
-            # ID မပါဘဲ task_title သို့မဟုတ် message ထဲက စကားလုံးနဲ့ ကိုက်ညီတဲ့ pending task ကို ရှာပြီး done လုပ်ခြင်း
             search_key = (task_title or user_message).strip()
             pending_res = (
                 supabase.table("tasks")
@@ -1062,7 +1077,7 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
     await send_long_message(query.message, reply_text)
 
 
-# --- 4. General Telegram Message Handler (6-Intent AI Router + Self-Improving Memory + Calendar) ---
+# --- 4. General Telegram Message Handler (Intent-Driven Retrieval + Memory + Calendar) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
@@ -1138,9 +1153,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             recent_ctx = await asyncio.to_thread(get_recent_history_for_router, message.from_user.id, 6)
             route = await asyncio.to_thread(classify_user_intent, user_message, available_groups, recent_ctx)
 
-            intent = route.get("intent", "GENERAL_TASK")
+            intent = route.get("intent", "GENERAL_SEARCH")
             target_group = route.get("group_name")
             period = route.get("period", "recent")
+            print(f"[Intent Route] intent={intent}, group={target_group}, period={period}, msg={user_message[:60]}")
 
             if intent == "GROUP_QUERY":
                 reply_text = await asyncio.to_thread(
@@ -1232,7 +1248,7 @@ async def main_async():
         BotCommand("addtask", "Add a new task"),
     ])
 
-    print("🤖 Self-Improving 6-Intent AI Agent (Maya) started...")
+    print("🤖 Self-Improving 6-Intent AI Agent with Intent-Driven Retrieval (Maya) started...")
 
     await application.start()
     await application.updater.start_polling()
