@@ -860,6 +860,15 @@ async def scheduled_evening_task_digest_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 # --- 1. Personal Tasks & Reminder Helpers ---
+def looks_like_task_or_reminder(text: str) -> bool:
+    t = text.strip().lower()
+    keywords = [
+        "သတိပေး", "remind", "reminder", "task",
+        "မိနစ်နေရင်", "နာရီနေရင်", "မနက်ဖြန်", "မှတ်ထား", "ထည့်ထား"
+    ]
+    return any(k in t for k in keywords)
+
+
 def parse_reminder_datetime_mmt(text: str) -> datetime | None:
     """စာသားထဲက နောက် ... မိနစ်/နာရီ သို့မဟုတ် သတ်မှတ်အချိန်ကို ဖတ်ပြီး MMT datetime ပြန်ပေးသည်။"""
     now_mm = datetime.now(MM_TZ)
@@ -902,15 +911,19 @@ def parse_reminder_datetime_mmt(text: str) -> datetime | None:
         candidate += timedelta(days=1)
     return candidate
 
+
 def add_task(title: str, remind_dt: datetime | None = None) -> dict:
     payload = {"title": title, "status": "pending"}
     if remind_dt:
         payload["remind_at"] = remind_dt.isoformat()
         payload["reminded"] = False
     try:
-        supabase.table("tasks").insert(payload).execute()
-    except Exception:
-        supabase.table("tasks").insert({"title": title, "status": "pending"}).execute()
+        res = supabase.table("tasks").insert(payload).execute()
+        print(f"[Task Inserted] rows={len(res.data or [])}, remind_at={payload.get('remind_at')}")
+    except Exception as e:
+        print(f"[Task Insert Fallback] error={e}")
+        res = supabase.table("tasks").insert({"title": title, "status": "pending"}).execute()
+        print(f"[Task Inserted Basic] rows={len(res.data or [])}")
     return {"status": "success", "message": f"Task added: {title}"}
 
 
@@ -1382,7 +1395,7 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
     await send_long_message(query.message, reply_text)
 
 
-# --- 4. General Telegram Message Handler (Dedicated Buckets + Self-Improve + Calendar) ---
+# --- 4. General Telegram Message Handler (Task Guard + Dedicated Buckets + Self-Improve + Calendar) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
@@ -1450,6 +1463,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"ရင်းနှီးဖော်ရွေစွာ နှုတ်ဆက်ပြီး ဘာကူညီပေးနိုင်မလဲ တိုတိုရှင်းရှင်း မြန်မာဘာသာဖြင့် ဖြေပါ။\n\n{memory_ctx}"
                 )
                 reply_text = await asyncio.to_thread(call_ai_with_3tier_fallback, greet_prompt, None, None, False)
+                save_chat_message(message.from_user.id, "assistant", reply_text)
+                await send_long_message(message, reply_text)
+                return
+
+            if looks_like_task_or_reminder(user_message):
+                forced_route = {
+                    "bucket": "TASK_GROUP",
+                    "sub_type": "task",
+                    "task_action": "done" if any(w in user_message.lower() for w in ["ပြီးပြီ", "done", "ပြီးသွား"]) else (
+                        "list" if any(w in user_message.lower() for w in ["task တွေ ပြ", "ဘာ task", "စာရင်း"]) else "add"
+                    ),
+                    "task_title": user_message.strip(),
+                    "task_id": None,
+                }
+                reply_text = await asyncio.to_thread(handle_task_intent, user_message, forced_route)
                 save_chat_message(message.from_user.id, "assistant", reply_text)
                 await send_long_message(message, reply_text)
                 return
