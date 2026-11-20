@@ -55,7 +55,7 @@ MYANMAR_WEEKDAYS = [
 
 STRICT_MYANMAR_SYSTEM = (
     "သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။ "
-    "အမြဲတမ်း မြန်မာဘာသာ (Unicode) ဖြင့်သာ သဘာဝကျကျ၊ ရှင်းလင်းပြတ်သားစွာ ဖြေဆိုပါ။ "
+    "အမြဲတမ်း မြန်မာဘာသာ (Unicode) ဖြင့်သာ လူတစ်ယောက်ကဲ့သို့ သဘာဝကျကျ၊ ရှင်းလင်းပြတ်သားစွာ ဖြေဆိုပါ။ "
     "မလိုအပ်ဘဲ နိုင်ငံခြားစာလုံး/သင်္ကေတများ ရောနှောခြင်းကို လုံးဝ ရှောင်ကြဉ်ပါ။ "
     "အသုံးပြုသူ၏ Profile၊ အတိတ်မှတ်တမ်း၊ အလေ့အထနှင့် မြန်မာပြက္ခဒိန်အချက်အလက်များကို သေချာမှတ်မိပြီး အလိုက်သိသိနှင့် တိုတိုရှင်းရှင်း ဖြေပါ။ "
     "မေးခွန်းနှင့် မသက်ဆိုင်သော Search အချက်အလက်များကို လုံးဝ မသုံးပါနှင့်။ မသေချာပါက မသိကြောင်း ရိုးသားစွာ ဖြေပါ။"
@@ -101,6 +101,7 @@ def cleanup_old_raw_logs():
         print(f"Error cleaning up old raw_logs: {e}")
 
 
+# --- Pure Python Myanmar Calendar Helper ---
 def _julian_day_from_gregorian(year: int, month: int, day: int) -> int:
     a = (14 - month) // 12
     y = year + 4800 - a
@@ -109,51 +110,11 @@ def _julian_day_from_gregorian(year: int, month: int, day: int) -> int:
 
 
 def _calculate_myanmar_date(dt_mm: datetime) -> dict:
-    """Myanmar Calendar calculation (Julian Day based algorithm)."""
+    """Pure Python Myanmar Calendar calculation (Julian Day based)."""
     jdn = _julian_day_from_gregorian(dt_mm.year, dt_mm.month, dt_mm.day)
-    sy = 1577917828.0 / 432000.0  # Solar year
-    mo = 1577917828.0 / 53433336.0  # Lunar month
-
-    # Determine Myanmar era type and year
-    # Era 2 (1312 ME onwards)
-    seasons = [
-        (1312, 1374, 1577917828.0 / 432000.0, 1444666.0),
-        (1375, 9999, 1577917828.0 / 432000.0, 1444666.0),
-    ]
-    _ = seasons
-
-    my = int((jdn - 0.5 - 2432326.625) / sy) + 1312
-    # Refine Myanmar year by checking Thingyan / Tagu start
-    def _tagu_jdn(year_me: int) -> float:
-        return sy * year_me + 1954168.050623
-
-    while jdn < int(_tagu_jdn(my) + 0.5):
-        my -= 1
-    while jdn >= int(_tagu_jdn(my + 1) + 0.5):
-        my += 1
-
-    # Check wat (intercalary month) using standard Myanmar calendar constants
-    # Second Waso full moon day offset in year my
-    def _waso_info(year_me: int):
-        # Standard Metonic / Myanmar calendar parameters
-        # Using lunar months since epoch
-        total_m = (year_me - 1100) * 12
-        _ = total_m
-        # Approximate full moon of Tagu (month 1) in JDN
-        fm_tagu = int(_tagu_jdn(year_me) + 0.5)
-        return fm_tagu
-
-    # Accurate Myanmar calendar conversion via lunation index from 1900-01-01 (JDN 2415021)
-    # Reference: 2026-11-20 (JDN 2461365) -> 1388 ME, တန်ဆောင်မုန်း လဆန်း ၁၀ ရက်
-    ref_jdn = _julian_day_from_gregorian(2026, 11, 20)
-    # 1388 ME starts around 2026-04-17 (JDN 2461148)
-    # Let's compute exact lunation from known anchor: 2026-11-10 is 1388 ME Tazaundaing Full Moon (day 15 waxing)
-    anchor_jdn = _julian_day_from_gregorian(2026, 11, 10)  # Full moon of Tazaundaing (month 8 in 0-indexed: Tagu=0..Tazaungmon=7)
+    anchor_jdn = _julian_day_from_gregorian(2026, 11, 10)  # 1388 ME Tazaundaing Full Moon (15 waxing)
     delta_days = jdn - anchor_jdn
 
-    # Month lengths in Myanmar calendar (alternating 30 and 29 days)
-    # 0: Tagu(30), 1: Kason(29), 2: Nayon(30), 3: Waso(29), 4: Wagaung(30), 5: Tawthalin(29),
-    # 6: Thadingyut(30), 7: Tazaungmon(29), 8: Natdaw(30), 9: Pyatho(29), 10: Tabodwe(30), 11: Tabaung(30)
     month_names = [
         "တန်ခူး",
         "ကဆုန်",
@@ -170,7 +131,6 @@ def _calculate_myanmar_date(dt_mm: datetime) -> dict:
     ]
     month_days = [30, 29, 30, 29, 30, 29, 30, 29, 30, 29, 30, 30]
 
-    # Start from anchor: month_idx = 7 (တန်ဆောင်မုန်း), day_in_month = 15 (Full moon), year_me = 1388
     cur_year = 1388
     cur_m_idx = 7
     cur_day = 15 + delta_days
@@ -203,17 +163,16 @@ def _calculate_myanmar_date(dt_mm: datetime) -> dict:
     is_new_moon = (m_day_int == m_len)
     is_sabbath = (fortnight_day in [8, 15]) or is_full_moon or is_new_moon
 
-    # Yatyaza & Pyathada standard weekday rules
-    wd = dt_mm.weekday()  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
+    wd = dt_mm.weekday()  # 0=Mon .. 6=Sun
     is_yatyaza = (
-        (cur_m_idx in [0, 3, 6, 9] and wd in [1, 5]) or  # Tagu, Waso, Thadingyut, Pyatho -> Tue, Sat
-        (cur_m_idx in [1, 4, 7, 10] and wd in [3, 6]) or  # Kason, Wagaung, Tazaungmon, Tabodwe -> Thu, Sun
-        (cur_m_idx in [2, 5, 8, 11] and wd in [2, 4])  # Nayon, Tawthalin, Natdaw, Tabaung -> Wed, Fri
+        (cur_m_idx in [0, 3, 6, 9] and wd in [1, 5]) or
+        (cur_m_idx in [1, 4, 7, 10] and wd in [3, 6]) or
+        (cur_m_idx in [2, 5, 8, 11] and wd in [2, 4])
     )
     is_pyathada = (
-        (cur_m_idx in [0, 3, 6, 9] and wd == 5) or  # Sat
-        (cur_m_idx in [1, 4, 7, 10] and wd in [1, 2]) or  # Tue, Wed
-        (cur_m_idx in [2, 5, 8, 11] and wd in [0, 3])  # Mon, Thu
+        (cur_m_idx in [0, 3, 6, 9] and wd == 5) or
+        (cur_m_idx in [1, 4, 7, 10] and wd in [1, 2]) or
+        (cur_m_idx in [2, 5, 8, 11] and wd in [0, 3])
     )
 
     return {
@@ -347,7 +306,7 @@ def extract_search_terms(query_text: str) -> list:
     return terms[:10]
 
 
-def get_recent_history_for_router(user_id: int, limit: int = 5) -> str:
+def get_recent_history_for_router(user_id: int, limit: int = 6) -> str:
     try:
         res = (
             supabase.table("chat_messages")
@@ -358,7 +317,7 @@ def get_recent_history_for_router(user_id: int, limit: int = 5) -> str:
             .execute()
         )
         rows = list(reversed(res.data or []))
-        return "\n".join([f"{r['role']}: {r['content'][:160]}" for r in rows])
+        return "\n".join([f"{r['role']}: {r['content'][:220]}" for r in rows])
     except Exception:
         return ""
 
@@ -493,18 +452,21 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
     return "ဟုတ်ကဲ့ရှင်၊ လောလောဆယ် AI ဆာဗာ ခဏအလုပ်များနေပါသည်။ စက္ကန့်အနည်းငယ်နေပြီး ပြန်ပို့ပေးပါနော်။"
 
 
-# --- 6-Intent AI Router (Groq Fast JSON Routing with Recent Context) ---
+# --- 6-Intent AI Router (Groq Fast JSON Routing with Follow-Up Persistence) ---
 def classify_user_intent(user_message: str, available_groups: list, recent_ctx: str = "") -> dict:
     groups_str = ", ".join(available_groups[:20]) if available_groups else "None"
     router_prompt = f"""
-Classify the user's latest message using recent context if needed.
+Classify the user's latest message using Recent Context carefully.
+Rules for follow-up messages:
+- If Recent Context was discussing a specific group or a specific person's messages in a group, and the latest message is a follow-up referring to them ("သူပြောတဲ့...", "အဲ့ဒါကို...", "key points...", "အကျဉ်းချုပ်ပေးပါ" about what they said), KEEP that same `group_name` and classify as `GROUP_QUERY` (do NOT reset `group_name` to null or route to `GROUP_SUMMARY`).
+
 Intents:
-1. GROUP_QUERY: Asking about any specific fact, update, number, issue, status, decision, or what a specific person/sender said or did inside Telegram groups. Use this whenever the user asks about a person's words/messages in groups or details from group logs.
-2. GROUP_SUMMARY: Requesting a broad summary or report of unread/today/yesterday messages across Telegram groups.
-3. TASK: Managing personal to-do tasks (adding a task, listing tasks, or marking a task done).
-4. ADVICE: Asking for advice, recommendations, strategic options, or how to handle/solve a problem or decision.
-5. GENERAL_TASK: General requests like drafting messages, translating, coding/tech help, explanations, or recalling private chat memory with Maya.
-6. GENERAL_SEARCH: Asking for external/live information outside Telegram groups (weather, news, prices, sports scores, general facts).
+1. GROUP_QUERY: Asking about specific facts, updates, details, or summarizing/key-pointing what a specific person or group said in Telegram groups (including follow-ups about them).
+2. GROUP_SUMMARY: Requesting a general unread/today/yesterday report across groups when not following up on a specific person's already-discussed messages.
+3. TASK: Managing personal to-do tasks (adding, listing, marking done).
+4. ADVICE: Asking for advice, recommendations, or how to solve a problem/decision.
+5. GENERAL_TASK: Drafting messages, translating, coding/tech help, explanations, or private chat tasks.
+6. GENERAL_SEARCH: Asking for external/live information outside Telegram groups (weather, news, prices, sports, calendar).
 
 Available Groups: [{groups_str}]
 Recent Context:
@@ -522,7 +484,7 @@ Return ONLY JSON:
                 {"role": "user", "content": router_prompt}
             ],
             temperature=0.0,
-            max_tokens=130,
+            max_tokens=140,
         )
         raw = (completion.choices[0].message.content or "").strip()
         match = re.search(r"\{.*\}", raw, re.DOTALL)
@@ -541,6 +503,7 @@ Return ONLY JSON:
         print(f"Groq router fallback: {e}")
 
     return {"intent": "GROUP_QUERY", "group_name": None, "period": "recent"}
+
 
 # --- Keyword-Free Parallel Web Search Helpers (Tavily + Google News RSS) ---
 def _tavily_worker(search_query: str, max_results: int = 4) -> str:
@@ -731,7 +694,7 @@ def handle_task_intent(user_message: str, route: dict) -> str:
     return f"Task added: {clean_title}"
 
 
-# --- 2. Group Summary, Report & Specific Group Q&A Tools ---
+# --- 2. Group Summary, Report & Keyword-Free Natural Group Q&A Tools ---
 def get_available_groups() -> list:
     cleanup_old_raw_logs()
     thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
@@ -774,100 +737,87 @@ def parse_date_range_from_text(text: str):
     return None, None, None
 
 
-def query_specific_group_logs(user_message: str, router_group: str = None, router_period: str = "recent") -> str:
-    """Group logs များထဲမှ လိုချင်သော အချက်နှင့် လူတစ်ဦးချင်းစီ၏ ပြောစကားများကို ရှာဖွေဖြေကြားသည်။"""
+def query_specific_group_logs(
+    user_message: str,
+    router_group: str = None,
+    router_period: str = "recent",
+    recent_ctx: str = "",
+) -> str:
+    """Keyword filter မသုံးဘဲ Group logs များကို တိုက်ရိုက်ဖတ်ပြီး မေးသည့်အချက်ကိုသာ လူတစ်ယောက်လို သဘာဝကျကျ ဖြေပေးသည်။"""
     cleanup_old_raw_logs()
 
     thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
-    logs_res = (
-        supabase.table("raw_logs")
-        .select("*")
-        .gte("created_at", thirty_days_ago_iso)
-        .order("id", desc=True)
-        .limit(400)
-        .execute()
-    )
+    query = supabase.table("raw_logs").select("*").gte("created_at", thirty_days_ago_iso).order("id", desc=True)
+
+    date_label = None
+    if router_period in ["today", "yesterday"]:
+        start_iso, end_iso, date_label = get_date_bounds(router_period)
+        query = query.gte("created_at", start_iso).lt("created_at", end_iso)
+    else:
+        s_iso, e_iso, d_lbl = parse_date_range_from_text(f"{recent_ctx}\n{user_message}")
+        if s_iso and e_iso:
+            start_iso, end_iso, date_label = s_iso, e_iso, d_lbl
+            query = query.gte("created_at", start_iso).lt("created_at", end_iso)
+
+    logs_res = query.limit(300).execute()
     all_logs = list(reversed(logs_res.data or []))
 
     if not all_logs:
-        return "ပြီးခဲ့သော ရက် ၃၀ အတွင်း Group log မှတ်တမ်းများ မရှိသေးပါ။"
+        scope_d = f" ({date_label})" if date_label else ""
+        return f"သက်ဆိုင်ရာ ကာလ{scope_d} အတွင်း Group မှတ်တမ်းများ မရှိသေးပါရှင်။"
 
     matched_group = router_group
-    q_lower = user_message.lower()
-    available_groups = list({l.get("group_name") for l in all_logs if l.get("group_name")})
-
     if not matched_group:
+        combined_q = f"{recent_ctx}\n{user_message}".lower()
+        available_groups = list({l.get("group_name") for l in all_logs if l.get("group_name")})
         best_score = 0
         for g_name in available_groups:
             g_lower = g_name.lower()
-            score = 100 if g_lower in q_lower else 0
+            score = 100 if g_lower in combined_q else 0
             for word in re.findall(r"[a-z0-9\u1000-\u109F]+", g_lower):
-                if len(word) >= 2 and word in q_lower:
+                if len(word) >= 2 and word in combined_q:
                     score += len(word) * 2
             if score > best_score:
                 best_score = score
                 matched_group = g_name
 
-    candidate_logs = [l for l in all_logs if l.get("group_name") == matched_group] if matched_group else all_logs
+    selected_logs = [l for l in all_logs if l.get("group_name") == matched_group] if matched_group else all_logs
 
-    # မေးခွန်းထဲက စကားလုံး/နာမည်များနှင့် ကိုက်ညီသော Log များကို ဦးစားပေးစစ်ထုတ်ခြင်း
-    query_tokens = [
-        tok for tok in re.findall(r"[a-z0-9\u1000-\u109F]+", q_lower)
-        if len(tok) >= 2 and tok not in {"ဘာပြော", "ပြော", "မေး", "လဲ", "လား", "ထဲမှာ", "ထဲက", "group", "ဂရု"}
-    ]
-
-    scored_logs = []
-    for log_item in candidate_logs:
-        sender = str(log_item.get("sender_name") or "").lower()
-        summary = str(log_item.get("content_summary") or "").lower()
-        g_name_l = str(log_item.get("group_name") or "").lower()
-        combined = f"{sender} {summary} {g_name_l}"
-        hit_score = sum(1 for tok in query_tokens if tok in combined)
-        scored_logs.append((hit_score, log_item))
-
-    matched_items = [item for score, item in scored_logs if score > 0]
-    selected_logs = matched_items[-120:] if matched_items else candidate_logs[-120:]
-
-    if router_period in ["today", "yesterday"]:
-        start_iso, end_iso, date_label = get_date_bounds(router_period)
-        period_filtered = [
-            l for l in selected_logs
-            if str(l.get("created_at") or "") >= start_iso and str(l.get("created_at") or "") < end_iso
-        ]
-        if period_filtered:
-            selected_logs = period_filtered
-    else:
-        _, _, date_label = parse_date_range_from_text(user_message)
+    if not selected_logs:
+        return f"{matched_group or 'သက်ဆိုင်ရာ Group'} ထဲမှာ မှတ်တမ်း မရှိသေးပါရှင်။"
 
     raw_text = "\n".join(
         [
-            f"[{_format_mm_timestamp(l.get('created_at'))} | Group: {l.get('group_name', '')} | Sender: {l.get('sender_name', 'Unknown')}]: {l.get('content_summary', '')}"
-            for l in selected_logs
+            f"[{_format_mm_timestamp(l.get('created_at'))} | {l.get('group_name', '')} | {l.get('sender_name', 'Unknown')}]: {l.get('content_summary', '')}"
+            for l in selected_logs[-200:]
         ]
     )
 
     now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
-    header_info = f"Group: {matched_group or 'All Groups'} | Period: {date_label or 'All Recent (30d)'}"
 
     prompt = f"""
     လက်ရှိအချိန်: {now_str}
-    {header_info}
 
-    အောက်ပါတို့မှာ Telegram Group များမှ သိမ်းဆည်းထားသော Log မှတ်တမ်းများ ဖြစ်သည်။
-    အသုံးပြုသူ၏ မေးခွန်းနှင့် သက်ဆိုင်သော အချက်အလက် သို့မဟုတ် လူတစ်ဦးချင်းစီ၏ ပြောစကားများကို
-    တိတိကျကျ ရှာဖွေပြီး မြန်မာဘာသာဖြင့် ရှင်းလင်းစွာ ဖြေကြားပေးပါ:
-    - Sender နာမည်ဖြင့် မေးလျှင် ထိုသူ ပြောခဲ့သော မက်ဆေ့ခ်ျများ၊ အချိန်နှင့် Group အမည်ကို တိတိကျကျ ဖော်ပြပါ။
-    - အကြောင်းအရာ/အချက်အလက် မေးလျှင် Log ထဲတွင် တွေ့ရှိသည့် အချက်များကို အချိန်၊ အကြောင်းအရာနှင့်တကွ ဖော်ပြပါ။
-    - Log မှတ်တမ်းများထဲတွင် လုံးဝ မပါဝင်ပါက မတွေ့ရှိကြောင်း ရိုးသားစွာ ဖြေပါ။ ထင်ကြေးဖြင့် မဖြေပါနှင့်။
+    အောက်ပါတို့မှာ Telegram Group ထဲမှ စကားပြောဆိုမှု မှတ်တမ်းများ ဖြစ်သည်။
+    အရှေ့နောက် စကားပြောဆိုမှု (Recent Context) နှင့် လက်ရှိ မေးခွန်းကို နားလည်ပြီး အသုံးပြုသူ မေးထားသည့်
+    အချက် (သို့မဟုတ် သက်ဆိုင်ရာ လူပြောထားသည့် အကြောင်းအရာ) တစ်ခုတည်းကိုသာ Focus ထား၍ ပြန်ပြောပြပေးပါ။
 
-    အသုံးပြုသူ မေးခွန်း: {user_message}
+    ဖြေဆိုရမည့် ပုံစံစည်းမျဉ်းများ:
+    1. စက်ရုပ်လို တစ်ကြောင်းချင်းစီ၏ အချိန် (Timestamp) တွေ ထည့်ရေးစရာ မလိုပါ (အသုံးပြုသူက ဘယ်အချိန်လဲဟု မေးမှသာ အချိန်ကို ထည့်ပြောပါ)။
+    2. လူတစ်ယောက်က လုပ်ဖော်ကိုင်ဖက်ကို ပြန်ရှင်းပြနေသလို သဘာဝကျကျ၊ ချောချောမွေ့မွေ့နှင့် လိုရင်းတိုရှင်း မြန်မာဘာသာဖြင့် ပြောပြပါ။
+    3. အရှေ့မှာ ပြောခဲ့သည့် လူ/အကြောင်းအရာကို ဆက်မေးခြင်း (ဥပမာ - "သူပြောတဲ့ key points အကျဉ်းချုပ်ပေးပါ") ဖြစ်ပါက ထိုသူ၏ ပြောစကားများထဲမှ အဓိက Key Points များကိုသာ Bullet point များဖြင့် ရှင်းရှင်းလင်းလင်း ထုတ်ပေးပါ။
+    4. မေးထားသည့် အချက်/လူနှင့် မသက်ဆိုင်သော အခြားလူများ၏ စကားများကို လုံးဝ ထည့်မပြောပါနှင့်။ မှတ်တမ်းထဲတွင် မပါဝင်ပါက မတွေ့ရှိကြောင်း ရိုးသားစွာ ဖြေပါ။
 
-    Group Log မှတ်တမ်းများ:
+    Recent Context:
+    {recent_ctx or "None"}
+
+    လက်ရှိ မေးခွန်း: {user_message}
+
+    Group မှတ်တမ်းများ:
     {raw_text}
     """
 
-    answer = call_ai_with_3tier_fallback(prompt, use_google_search=False)
-    return f"📌 {header_info}\n\n{answer}"
+    return call_ai_with_3tier_fallback(prompt, use_google_search=False)
 
 
 def get_group_report(user_query: str = "", exact_group_name: str = None, day_mode: str = None) -> str:
@@ -1159,7 +1109,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             available_groups = await asyncio.to_thread(get_available_groups)
-            recent_ctx = await asyncio.to_thread(get_recent_history_for_router, message.from_user.id, 5)
+            recent_ctx = await asyncio.to_thread(get_recent_history_for_router, message.from_user.id, 6)
             route = await asyncio.to_thread(classify_user_intent, user_message, available_groups, recent_ctx)
 
             intent = route.get("intent", "GENERAL_TASK")
@@ -1168,7 +1118,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if intent == "GROUP_QUERY":
                 reply_text = await asyncio.to_thread(
-                    query_specific_group_logs, user_message, target_group, period
+                    query_specific_group_logs, user_message, target_group, period, recent_ctx
                 )
             elif intent == "GROUP_SUMMARY":
                 day_m = period if period in ["today", "yesterday"] else None
@@ -1256,7 +1206,7 @@ async def main_async():
         BotCommand("addtask", "Add a new task"),
     ])
 
-    print("🤖 Self-Improving 6-Intent AI Agent with Calendar & Memory (Maya) started...")
+    print("🤖 Self-Improving 6-Intent AI Agent (Maya) started...")
 
     await application.start()
     await application.updater.start_polling()
