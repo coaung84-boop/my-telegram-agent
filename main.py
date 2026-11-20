@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # AI & Search Clients Initialization
 gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
@@ -55,7 +56,7 @@ MYANMAR_WEEKDAYS = [
 
 STRICT_MYANMAR_SYSTEM = (
     "သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။ "
-    "အမြဲတမ်း မြန်မာဘာသာ (Unicode) ဖြင့်သာ လူတစ်ယောက်ကဲ့သို့ သဘာဝကျကျ၊ ရှင်းလင်းပြတ်သားစွာ ဖြေဆိုပါ။ "
+    "အမြဲတမ်း မြန်မာဘာသာ (Unicode) ဖြင့်သာ လူတစ်ယောက်ကဲ့သို့ သဘာဝကျကျ၊ ရင်းနှီးဖော်ရွေစွာ၊ ရှင်းလင်းပြတ်သားစွာ ဖြေဆိုပါ။ "
     "မလိုအပ်ဘဲ နိုင်ငံခြားစာလုံး/သင်္ကေတများ ရောနှောခြင်းကို လုံးဝ ရှောင်ကြဉ်ပါ။ "
     "အသုံးပြုသူ၏ Profile၊ အတိတ်မှတ်တမ်း၊ အလေ့အထနှင့် မြန်မာပြက္ခဒိန်အချက်အလက်များကို သေချာမှတ်မိပြီး အလိုက်သိသိနှင့် တိုတိုရှင်းရှင်း ဖြေပါ။ "
     "မေးခွန်းနှင့် မသက်ဆိုင်သော Search အချက်အလက်များကို လုံးဝ မသုံးပါနှင့်။ မသေချာပါက မသိကြောင်း ရိုးသားစွာ ဖြေပါ။"
@@ -68,6 +69,9 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Telegram AI Agent (Maya) is running!")
+
+    def log_message(self, format, *args):
+        return
 
 
 def run_health_server():
@@ -386,7 +390,7 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 8
 
 
 # --- Speed-First & Burmese-Safe 3-Tier AI Fallback Helper ---
-# Tier 1: gemini-3.5-flash-lite (1x retry) -> Tier 2: gemini-3.8-flash -> Tier 3: OpenRouter google/gemma-4-31b-it:free + Groq 70B backup
+# Tier 1: gemini-3.5-flash-lite (1x retry) -> Tier 2: gemini-3.8-flash -> Tier 3A: OpenRouter gemma-4-31b-it:free -> Tier 3B: Groq 70B
 def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, use_google_search=False):
     contents = (
         [types.Part.from_bytes(data=bytes(image_bytes), mime_type=mime_type or 'image/jpeg'), prompt_text]
@@ -469,20 +473,15 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
     return "ဟုတ်ကဲ့ရှင်၊ လောလောဆယ် AI ဆာဗာ ခဏအလုပ်များနေပါသည်။ စက္ကန့်အနည်းငယ်နေပြီး ပြန်ပို့ပေးပါနော်။"
 
 
-# --- 6-Intent AI Router (Clear Topic Separation + Follow-Up Persistence) ---
-def classify_user_intent(user_message: str, available_groups: list, recent_ctx: str = "") -> dict:
+# --- Dedicated 3-Bucket Router (WEB_SEARCH / TASK_GROUP / ADVICE_GENERAL) ---
+def classify_dedicated_bucket(user_message: str, available_groups: list, recent_ctx: str = "") -> dict:
+    """Task+Group / Advice+General / Web Search သုံးမျိုးကို သီးသန့် ခွဲခြားပေးသည်။"""
     groups_str = ", ".join(available_groups[:20]) if available_groups else "None"
-    router_prompt = f"""
-Classify the user's latest message into one of 6 intents accurately.
-Pay close attention to whether the user is asking about internal Telegram work groups OR switching to an outside/general topic.
-
-Decision Rules:
-1. `GENERAL_SEARCH`: Use whenever the user asks about outside/live/general topics such as songs/music, entertainment, online/internet trends, news, weather, prices, sports, general facts, or calendar/holidays — EVEN IF Recent Context was about a Telegram group. When switching to `GENERAL_SEARCH`, set `group_name` to `null`.
-2. `GROUP_SUMMARY`: Use when asking for a broad summary/report of unread, today, or yesterday messages across groups or a specified group.
-3. `GROUP_QUERY`: Use when asking about specific facts, updates, or what a specific person/sender said inside Telegram groups, OR when clearly following up on the SAME person/group/topic just discussed in Recent Context (e.g., "သူပြောတဲ့...", "အဲ့ဒါကို key points...", "အဲ့ထဲမှာ...").
-4. `TASK`: Use for personal to-do tasks (add task, list tasks, mark task done).
-5. `ADVICE`: Use when asking for advice, recommendations, or problem-solving options.
-6. `GENERAL_TASK`: Use for drafting messages, translating, coding/tech help, explanations, or private chat requests.
+    prompt = f"""
+Route the latest user message into ONE of 3 dedicated buckets:
+1. `WEB_SEARCH`: Songs/music, entertainment, online trends, news, weather, prices, sports, live info, or outside web questions — EVEN IF Recent Context was about a Telegram group. Set `group_name` to `null`.
+2. `TASK_GROUP`: Personal to-do tasks/reminders (add/list/done task) OR asking/summarizing/following up on messages, people, or operations inside Telegram work groups.
+3. `ADVICE_GENERAL`: Advice, problem-solving, drafting messages, translating, coding/tech help, explanations, recalling private chat/profile, or casual conversation.
 
 Available Groups: [{groups_str}]
 Recent Context:
@@ -490,37 +489,30 @@ Recent Context:
 
 Latest Message: "{user_message}"
 Return ONLY JSON:
-{{"intent":"...","group_name":null,"period":"today|yesterday|recent","task_action":null,"task_title":null,"task_id":null}}
+{{"bucket":"WEB_SEARCH|TASK_GROUP|ADVICE_GENERAL","sub_type":"group_query|group_summary|task|advice|general","group_name":null,"period":"today|yesterday|recent","task_action":null,"task_title":null,"task_id":null}}
 """
     try:
         completion = groq_client.with_options(timeout=4.0).chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": "Output only valid JSON."},
-                {"role": "user", "content": router_prompt}
+                {"role": "user", "content": prompt}
             ],
             temperature=0.0,
-            max_tokens=140,
+            max_tokens=150,
         )
         raw = (completion.choices[0].message.content or "").strip()
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if match:
             parsed = json.loads(match.group(0))
-            if parsed.get("intent") in {
-                "GROUP_QUERY",
-                "GROUP_SUMMARY",
-                "TASK",
-                "ADVICE",
-                "GENERAL_TASK",
-                "GENERAL_SEARCH",
-            }:
-                if parsed.get("intent") == "GENERAL_SEARCH":
+            if parsed.get("bucket") in {"WEB_SEARCH", "TASK_GROUP", "ADVICE_GENERAL"}:
+                if parsed.get("bucket") == "WEB_SEARCH":
                     parsed["group_name"] = None
                 return parsed
     except Exception as e:
-        print(f"Groq router fallback: {e}")
+        print(f"Dedicated router error: {e}")
 
-    return {"intent": "GENERAL_SEARCH", "group_name": None, "period": "recent"}
+    return {"bucket": "ADVICE_GENERAL", "sub_type": "general", "group_name": None, "period": "recent"}
 
 
 # --- Focused Web Search Helpers (Tavily + Google News RSS) ---
@@ -646,7 +638,7 @@ def answer_with_universal_search(user_id: int, user_message: str) -> str:
         f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n"
         f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
         f"အသုံးပြုသူ၏ ရှာဖွေမေးမြန်းချက်အပေါ်သာ တိုက်ရိုက် Focus ထားပြီး Google AI Overview ကဲ့သို့ "
-        f"ရှင်းလင်းပြတ်သားစွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ (Telegram Group မှတ်တမ်းများကို မရောပါနှင့်):\n"
+        f"ရင်းနှီးဖော်ရွေစွာ၊ ရှင်းလင်းပြတ်သားစွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ (Telegram Group မှတ်တမ်းများကို မရောပါနှင့်):\n"
         f"1. **တိုက်ရိုက် အဖြေချုပ် (Direct Answer):** မေးခွန်း၏ အဓိကအဖြေကို စာကြောင်း ၁–၂ ကြောင်းဖြင့် အရင်ဆုံး ရှင်းရှင်းလင်းလင်း ဖြေပါ။\n"
         f"2. **အဓိက အချက်အလက်များ (Key Points):** ရှာဖွေမှုရလဒ်နှင့် Google Search ထဲမှ သက်ဆိုင်ရာ အချက် (၃–၅ ချက်) ကို Bullet point များဖြင့် တိုတိုရှင်းရှင်း ဖော်ပြပါ။\n"
         f"3. မေးခွန်းနှင့် မသက်ဆိုင်သော အချက်အလက်များကို လုံးဝ မထည့်ပါနှင့်။ သေချာမသိပါက မသိကြောင်း ရိုးသားစွာ ဖြေပါ။\n"
@@ -662,7 +654,7 @@ def answer_with_universal_search(user_id: int, user_message: str) -> str:
     return call_ai_with_3tier_fallback(full_prompt, use_google_search=True)
 
 
-# --- Scheduled Daily 9:00 AM MMT Job ---
+# --- Scheduled Jobs (9:00 AM News, Due Reminders, 6:00 PM Pending Digest) ---
 async def scheduled_morning_news_job(context: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_USER_ID:
         return
@@ -675,9 +667,101 @@ async def scheduled_morning_news_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"Error sending scheduled morning news: {e}")
 
 
-# --- 1. Personal Tasks Helpers ---
-def add_task(title: str) -> dict:
-    supabase.table("tasks").insert({"title": title, "status": "pending"}).execute()
+async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
+    """အချိန်ကျရောက်လာသော Task Reminder များကို Quick & Friendly ဟန်ဖြင့် သတိပေးသည်။"""
+    if not ADMIN_USER_ID:
+        return
+    try:
+        now_mm = datetime.now(MM_TZ)
+        res = supabase.table("tasks").select("*").eq("status", "pending").execute()
+        tasks = res.data or []
+
+        for t in tasks:
+            if t.get("reminded") is True:
+                continue
+            r_at = t.get("remind_at")
+            if not r_at:
+                continue
+            try:
+                r_dt = datetime.fromisoformat(str(r_at).replace("Z", "+00:00")).astimezone(MM_TZ)
+                if r_dt <= now_mm:
+                    title = t.get("title", "")
+                    msg = f"ဟိုင်းရှင် — \"{title}\" လုပ်ဖို့ အချိန်ရောက်ပါပြီနော်။"
+                    await context.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
+                    save_chat_message(ADMIN_USER_ID, "assistant", msg)
+                    try:
+                        supabase.table("tasks").update({"reminded": True}).eq("id", t["id"]).execute()
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"Error in check_due_task_reminders_job: {e}")
+
+
+async def scheduled_evening_task_digest_job(context: ContextTypes.DEFAULT_TYPE):
+    """ညနေ ၆ နာရီတိုင်း ပြီးဖို့ ကျန်နေသေးတဲ့ Pending Task များကို Quick & Friendly သတိပေးသည်။"""
+    if not ADMIN_USER_ID:
+        return
+    try:
+        res = supabase.table("tasks").select("*").eq("status", "pending").order("id").execute()
+        pending = res.data or []
+        if not pending:
+            return
+
+        lines = [f"• {t['title']}" for t in pending[:10]]
+        msg = "ဟိုင်းရှင် — ဒီနေ့အတွက် ပြီးဖို့ ကျန်နေသေးတဲ့ Task လေးတွေပါနော်:\n" + "\n".join(lines)
+        await context.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
+        save_chat_message(ADMIN_USER_ID, "assistant", msg)
+    except Exception as e:
+        print(f"Error in scheduled_evening_task_digest_job: {e}")
+
+
+# --- 1. Personal Tasks & Reminder Helpers ---
+def parse_reminder_datetime_mmt(text: str) -> datetime | None:
+    """စာသားထဲက အချိန်/ရက်စွဲ ကို ဖတ်ပြီး MMT datetime ပြန်ပေးသည်။"""
+    now_mm = datetime.now(MM_TZ)
+    target_date = now_mm.date()
+
+    if "မနက်ဖြန်" in text or "tomorrow" in text.lower():
+        target_date = (now_mm + timedelta(days=1)).date()
+
+    hm_match = re.search(r"\b(\d{1,2}):(\d{2})\b", text)
+    hour = None
+    minute = 0
+
+    if hm_match:
+        hour = int(hm_match.group(1))
+        minute = int(hm_match.group(2))
+    else:
+        mm_digits = str.maketrans("၀၁၂၃၄၅၆၇၈၉", "0123456789")
+        norm_text = text.translate(mm_digits)
+        hr_match = re.search(r"(\d{1,2})\s*(?:နာရီ|hour|hr)", norm_text, re.IGNORECASE)
+        if hr_match:
+            hour = int(hr_match.group(1))
+            if ("ညနေ" in text or "ည" in text or "pm" in text.lower()) and hour < 12:
+                hour += 12
+            elif ("မနက်" in text or "am" in text.lower()) and hour == 12:
+                hour = 0
+
+    if hour is None or not (0 <= hour <= 23) or not (0 <= minute <= 59):
+        return None
+
+    candidate = datetime(target_date.year, target_date.month, target_date.day, hour, minute, 0, tzinfo=MM_TZ)
+    if candidate <= now_mm and "မနက်ဖြန်" not in text and "tomorrow" not in text.lower():
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def add_task(title: str, remind_dt: datetime | None = None) -> dict:
+    payload = {"title": title, "status": "pending"}
+    if remind_dt:
+        payload["remind_at"] = remind_dt.isoformat()
+        payload["reminded"] = False
+    try:
+        supabase.table("tasks").insert(payload).execute()
+    except Exception:
+        supabase.table("tasks").insert({"title": title, "status": "pending"}).execute()
     return {"status": "success", "message": f"Task added: {title}"}
 
 
@@ -689,8 +773,19 @@ def list_tasks() -> list:
 def get_formatted_tasks() -> str:
     tasks = list_tasks()
     if not tasks:
-        return "လက်ရှိ မှတ်ထားတဲ့ Task မရှိသေးပါရှင်။"
-    return "လက်ရှိ Task များ:\n" + "\n".join([f"- ID {t['id']}: {t['title']} ({t['status']})" for t in tasks])
+        return "လက်ရှိ Task မရှိသေးပါဘူးရှင်။"
+    lines = []
+    for t in tasks:
+        mark = "✓" if t.get("status") == "done" else "•"
+        r_str = ""
+        if t.get("remind_at") and t.get("status") != "done":
+            try:
+                r_dt = datetime.fromisoformat(str(t["remind_at"]).replace("Z", "+00:00")).astimezone(MM_TZ)
+                r_str = f" (⏰ {r_dt.strftime('%m-%d %H:%M')})"
+            except Exception:
+                pass
+        lines.append(f"{mark} [{t['id']}] {t['title']}{r_str}")
+    return "လက်ရှိ Task စာရင်းလေးပါရှင်:\n" + "\n".join(lines)
 
 
 def handle_task_intent(user_message: str, route: dict) -> str:
@@ -705,7 +800,7 @@ def handle_task_intent(user_message: str, route: dict) -> str:
         try:
             if task_id:
                 supabase.table("tasks").update({"status": "done"}).eq("id", int(task_id)).execute()
-                return f"ဟုတ်ကဲ့ရှင်၊ Task ID {task_id} ကို ပြီးစီးကြောင်း မှတ်သားလိုက်ပါပြီ။"
+                return f"ပြီးသွားပြီနော် — Task #{task_id} ကို Done မှတ်လိုက်ပါပြီရှင်။"
 
             search_key = (task_title or user_message).strip()
             pending_res = (
@@ -723,16 +818,20 @@ def handle_task_intent(user_message: str, route: dict) -> str:
             )
             if matched:
                 supabase.table("tasks").update({"status": "done"}).eq("id", matched["id"]).execute()
-                return f"ဟုတ်ကဲ့ရှင်၊ \"{matched['title']}\" (ID {matched['id']}) ကို ပြီးစီးကြောင်း မှတ်သားလိုက်ပါပြီ။"
+                return f"ပြီးသွားပြီနော် — \"{matched['title']}\" ကို Done မှတ်လိုက်ပါပြီရှင်။"
 
-            return "ပြီးစီးကြောင်း မှတ်သားရမယ့် Pending Task ကို ရှာမတွေ့ပါရှင်။ `/tasks` နဲ့ ID ကို ကြည့်ပြီး ထပ်ပြောပေးပါနော်။"
+            return "ပြီးစီးကြောင်း မှတ်ရမယ့် Pending Task မတွေ့သေးဘူးရှင်။ `/tasks` နဲ့ ကြည့်ပြီး ထပ်ပြောပေးပါနော်။"
         except Exception as e:
             print(f"Task update error: {e}")
-            return "ဟုတ်ကဲ့ရှင်၊ Task အခြေအနေ ပြောင်းလဲရာတွင် အခက်အခဲ ရှိနေပါသည်။"
+            return "Task အခြေအနေ ပြောင်းရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားပါတယ်ရှင်။"
 
     clean_title = task_title or user_message.strip()
-    add_task(clean_title)
-    return f"ဟုတ်ကဲ့ရှင်၊ Task ထည့်သွင်းပြီးပါပြီ — \"{clean_title}\""
+    remind_dt = parse_reminder_datetime_mmt(user_message)
+    add_task(clean_title, remind_dt)
+
+    if remind_dt:
+        return f"မှတ်ထားပါပြီရှင် — \"{clean_title}\" (⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')} မှာ သတိပေးပါ့မယ်နော်)"
+    return f"မှတ်ထားပါပြီရှင် — \"{clean_title}\""
 
 
 # --- 2. Group Summary, Report & Keyword-Free Natural Group Q&A Tools ---
@@ -845,7 +944,7 @@ def query_specific_group_logs(
 
     ဖြေဆိုရမည့် ပုံစံစည်းမျဉ်းများ:
     1. စက်ရုပ်လို တစ်ကြောင်းချင်းစီ၏ အချိန် (Timestamp) တွေ ထည့်ရေးစရာ မလိုပါ (အသုံးပြုသူက ဘယ်အချိန်လဲဟု မေးမှသာ အချိန်ကို ထည့်ပြောပါ)။
-    2. လူတစ်ယောက်က လုပ်ဖော်ကိုင်ဖက်ကို ပြန်ရှင်းပြနေသလို သဘာဝကျကျ၊ ချောချောမွေ့မွေ့နှင့် လိုရင်းတိုရှင်း မြန်မာဘာသာဖြင့် ပြောပြပါ။
+    2. လူတစ်ယောက်က လုပ်ဖော်ကိုင်ဖက်ကို ရင်းနှီးဖော်ရွေစွာ ပြန်ရှင်းပြနေသလို သဘာဝကျကျ၊ ချောချောမွေ့မွေ့နှင့် လိုရင်းတိုရှင်း မြန်မာဘာသာဖြင့် ပြောပြပါ။
     3. အရှေ့မှာ ပြောခဲ့သည့် လူ/အကြောင်းအရာကို ဆက်မေးခြင်း (ဥပမာ - "သူပြောတဲ့ key points အကျဉ်းချုပ်ပေးပါ") ဖြစ်ပါက ထိုသူ၏ ပြောစကားများထဲမှ အဓိက Key Points များကိုသာ Bullet point များဖြင့် ရှင်းရှင်းလင်းလင်း ထုတ်ပေးပါ။
     4. မေးထားသည့် အချက်/လူနှင့် မသက်ဆိုင်သော အခြားလူများ၏ စကားများကို လုံးဝ ထည့်မပြောပါနှင့်။ မှတ်တမ်းထဲတွင် မပါဝင်ပါက မတွေ့ရှိကြောင်း ရိုးသားစွာ ဖြေပါ။
 
@@ -929,6 +1028,56 @@ def get_group_report(user_query: str = "", exact_group_name: str = None, day_mod
     return f"{header_info}\n\n{report_text}"
 
 
+# --- Dedicated Bucket Handlers ---
+def handle_task_and_group(user_id: int, user_message: str, route: dict, recent_ctx: str = "") -> str:
+    """Task/Reminder နှင့် Telegram Group မှတ်တမ်းများကို သီးသန့် ကိုင်တွယ်သည်။"""
+    sub_type = (route.get("sub_type") or "group_query").lower()
+    target_group = route.get("group_name")
+    period = route.get("period", "recent")
+
+    if sub_type == "task":
+        return handle_task_intent(user_message, route)
+
+    if sub_type == "group_summary":
+        day_m = period if period in ["today", "yesterday"] else None
+        return get_group_report(user_message, target_group, day_m)
+
+    return query_specific_group_logs(user_message, target_group, period, recent_ctx)
+
+
+def handle_advice_and_general(user_id: int, user_message: str, route: dict) -> str:
+    """Advice နှင့် General Task/Chat ကို သီးသန့် ကိုင်တွယ်သည်။"""
+    sub_type = (route.get("sub_type") or "general").lower()
+    cal_info = get_myanmar_calendar_context()
+    memory_context = recall_relevant_history(user_id, user_message, recent_limit=8, search_limit=10)
+
+    if sub_type == "advice":
+        prompt = (
+            f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
+            f"အသုံးပြုသူ၏ Profile၊ အတိတ်မှတ်ဉာဏ်နှင့် မေးခွန်းကို သုံးသပ်ပြီး ရင်းနှီးဖော်ရွေစွာ၊ အလိုက်သိသိ မြန်မာဘာသာဖြင့် အကြံပြုပါ:\n"
+            f"1. အခြေအနေ သုံးသပ်ချက်\n"
+            f"2. အကြံပြု လုပ်ဆောင်သင့်သော နည်းလမ်းများ\n"
+            f"3. ချက်ချင်း စတင်နိုင်မည့် Next Step\n\n"
+            f"{memory_context}\n\n"
+            f"အကြံတောင်းသည့် အကြောင်းအရာ: {user_message}"
+        )
+    else:
+        prompt = (
+            f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
+            f"အသုံးပြုသူ၏ Profile၊ အတိတ်စကားပြောဆိုမှုများနှင့် ခိုင်းစေချက်ကို သေချာမှတ်မိပြီး "
+            f"ရင်းနှီးဖော်ရွေစွာ၊ အလိုက်သိသိနှင့် မြန်မာစာ သန့်သန့်ရှင်းရှင်းဖြင့် တိုတိုရှင်းရှင်း ကူညီဆောင်ရွက်ပေးပါ။\n\n"
+            f"{memory_context}\n\n"
+            f"ခိုင်းစေချက်: {user_message}"
+        )
+
+    return call_ai_with_3tier_fallback(prompt, None, None, False)
+
+
+def handle_web_search(user_id: int, user_message: str) -> str:
+    """Web Search အတွက် သီးသန့် ရှာဖွေဖြေကြားသည်။"""
+    return answer_with_universal_search(user_id, user_message)
+
+
 # --- 3. Quick Menu & Command Handlers ---
 def build_main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
@@ -997,8 +1146,9 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not arg:
             await message.reply_text("Usage: /addtask <task description>")
             return
-        add_task(arg)
-        await message.reply_text(f"Task added: {arg}")
+        remind_dt = parse_reminder_datetime_mmt(arg)
+        add_task(arg, remind_dt)
+        await message.reply_text(f"မှတ်ထားပါပြီရှင် — \"{arg}\"")
         return
 
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
@@ -1077,7 +1227,7 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
     await send_long_message(query.message, reply_text)
 
 
-# --- 4. General Telegram Message Handler (Intent-Driven Retrieval + Memory + Calendar) ---
+# --- 4. General Telegram Message Handler (Dedicated Buckets + Memory + Calendar) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
@@ -1142,7 +1292,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 memory_ctx = await asyncio.to_thread(recall_relevant_history, message.from_user.id, user_message, 4, 2)
                 greet_prompt = (
                     f"အသုံးပြုသူက နှုတ်ဆက်/ခေါ်နေပါသည်။ လက်ရှိ လေ့လာမှတ်သားထားသော Profile/Conversation ရှိလျှင် အလိုက်သိသိ "
-                    f"ရင်းနှီးယဉ်ကျေးစွာ နှုတ်ဆက်ပြီး ဘာကူညီပေးနိုင်မလဲ တိုတိုရှင်းရှင်း မြန်မာဘာသာဖြင့် ဖြေပါ။\n\n{memory_ctx}"
+                    f"ရင်းနှီးဖော်ရွေစွာ နှုတ်ဆက်ပြီး ဘာကူညီပေးနိုင်မလဲ တိုတိုရှင်းရှင်း မြန်မာဘာသာဖြင့် ဖြေပါ။\n\n{memory_ctx}"
                 )
                 reply_text = await asyncio.to_thread(call_ai_with_3tier_fallback, greet_prompt, None, None, False)
                 save_chat_message(message.from_user.id, "assistant", reply_text)
@@ -1151,55 +1301,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             available_groups = await asyncio.to_thread(get_available_groups)
             recent_ctx = await asyncio.to_thread(get_recent_history_for_router, message.from_user.id, 6)
-            route = await asyncio.to_thread(classify_user_intent, user_message, available_groups, recent_ctx)
+            route = await asyncio.to_thread(classify_dedicated_bucket, user_message, available_groups, recent_ctx)
 
-            intent = route.get("intent", "GENERAL_SEARCH")
-            target_group = route.get("group_name")
-            period = route.get("period", "recent")
-            print(f"[Intent Route] intent={intent}, group={target_group}, period={period}, msg={user_message[:60]}")
+            bucket = route.get("bucket", "ADVICE_GENERAL")
+            print(f"[Dedicated Route] bucket={bucket}, sub_type={route.get('sub_type')}, group={route.get('group_name')}, period={route.get('period')}")
 
-            if intent == "GROUP_QUERY":
+            if bucket == "WEB_SEARCH":
+                reply_text = await asyncio.to_thread(handle_web_search, message.from_user.id, user_message)
+            elif bucket == "TASK_GROUP":
                 reply_text = await asyncio.to_thread(
-                    query_specific_group_logs, user_message, target_group, period, recent_ctx
+                    handle_task_and_group, message.from_user.id, user_message, route, recent_ctx
                 )
-            elif intent == "GROUP_SUMMARY":
-                day_m = period if period in ["today", "yesterday"] else None
-                reply_text = await asyncio.to_thread(
-                    get_group_report, user_message, target_group, day_m
-                )
-            elif intent == "TASK":
-                reply_text = await asyncio.to_thread(handle_task_intent, user_message, route)
-            elif intent == "ADVICE":
-                cal_info = await asyncio.to_thread(get_myanmar_calendar_context)
-                memory_context = await asyncio.to_thread(
-                    recall_relevant_history, message.from_user.id, user_message, 8, 10
-                )
-                advice_prompt = (
-                    f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
-                    f"အသုံးပြုသူ၏ Profile၊ အတိတ်မှတ်ဉာဏ်နှင့် မေးခွန်းကို သုံးသပ်ပြီး အလိုက်သိသိ မြန်မာဘာသာဖြင့် အကြံပြုပါ:\n"
-                    f"1. အခြေအနေ သုံးသပ်ချက်\n"
-                    f"2. အကြံပြု လုပ်ဆောင်သင့်သော နည်းလမ်းများ\n"
-                    f"3. ချက်ချင်း စတင်နိုင်မည့် Next Step\n\n"
-                    f"{memory_context}\n\n"
-                    f"အကြံတောင်းသည့် အကြောင်းအရာ: {user_message}"
-                )
-                reply_text = await asyncio.to_thread(call_ai_with_3tier_fallback, advice_prompt, None, None, False)
-            elif intent == "GENERAL_TASK":
-                cal_info = await asyncio.to_thread(get_myanmar_calendar_context)
-                memory_context = await asyncio.to_thread(
-                    recall_relevant_history, message.from_user.id, user_message, 8, 10
-                )
-                gen_prompt = (
-                    f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
-                    f"အသုံးပြုသူ၏ Profile၊ အတိတ်စကားပြောဆိုမှုများနှင့် ခိုင်းစေချက်ကို သေချာမှတ်မိပြီး "
-                    f"အလိုက်သိသိနှင့် မြန်မာစာ သန့်သန့်ရှင်းရှင်းဖြင့် တိုတိုရှင်းရှင်း ကူညီဆောင်ရွက်ပေးပါ။\n\n"
-                    f"{memory_context}\n\n"
-                    f"ခိုင်းစေချက်: {user_message}"
-                )
-                reply_text = await asyncio.to_thread(call_ai_with_3tier_fallback, gen_prompt, None, None, False)
             else:
                 reply_text = await asyncio.to_thread(
-                    answer_with_universal_search, message.from_user.id, user_message
+                    handle_advice_and_general, message.from_user.id, user_message, route
                 )
 
             save_chat_message(message.from_user.id, "assistant", reply_text)
@@ -1225,13 +1340,25 @@ async def main_async():
     # Normal Messages
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-    # Daily 9:00 AM MMT News Scheduler
+    # Scheduled Jobs (9:00 AM News, 1-min Due Reminder Watcher, 6:00 PM Pending Digest)
     if application.job_queue:
         morning_9_mmt = dt_time(hour=9, minute=0, second=0, tzinfo=MM_TZ)
         application.job_queue.run_daily(
             scheduled_morning_news_job,
             time=morning_9_mmt,
             name="daily_9am_myanmar_news"
+        )
+        application.job_queue.run_repeating(
+            check_due_task_reminders_job,
+            interval=60,
+            first=15,
+            name="due_task_reminders_watcher"
+        )
+        evening_6_mmt = dt_time(hour=18, minute=0, second=0, tzinfo=MM_TZ)
+        application.job_queue.run_daily(
+            scheduled_evening_task_digest_job,
+            time=evening_6_mmt,
+            name="daily_6pm_pending_task_digest"
         )
 
     await application.initialize()
@@ -1248,7 +1375,7 @@ async def main_async():
         BotCommand("addtask", "Add a new task"),
     ])
 
-    print("🤖 Self-Improving 6-Intent AI Agent with Intent-Driven Retrieval (Maya) started...")
+    print("🤖 Dedicated-Bucket AI Agent with Quick & Friendly Reminders (Maya) started...")
 
     await application.start()
     await application.updater.start_polling()
