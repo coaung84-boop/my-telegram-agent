@@ -277,6 +277,48 @@ def _extract_json_from_text(raw_text: str) -> dict | None:
         return None
 
 
+def _call_json_intelligence(prompt: str) -> dict | None:
+    """စကားပြော system prompt မရောဘဲ သန့်ရှင်းတဲ့ JSON ကိုသာ ထုတ်ယူသည့် Intelligence helper။"""
+    json_sys = "You are a strict JSON intent & entity parser. Return ONLY valid JSON with no markdown or extra text."
+
+    # 1) Gemini with JSON mime type first
+    for model_name in ("gemini-3.5-flash-lite", "gemini-3.8-flash"):
+        try:
+            resp = gemini_client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=json_sys,
+                    response_mime_type="application/json",
+                    temperature=0.0,
+                ),
+            )
+            if resp and resp.text:
+                parsed = _extract_json_from_text(resp.text)
+                if parsed is not None:
+                    return parsed
+        except Exception as e:
+            print(f"[JSON Intel {model_name} Error]: {e}")
+
+    # 2) Groq fallback if Gemini fails
+    try:
+        completion = groq_client.with_options(timeout=4.5).chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": json_sys},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=300,
+        )
+        raw_groq = (completion.choices[0].message.content or "").strip()
+        return _extract_json_from_text(raw_groq)
+    except Exception as e:
+        print(f"[JSON Intel Groq Fallback Error]: {e}")
+
+    return None
+
+
 def evolve_user_profile(user_id: int, user_msg: str, assistant_reply: str):
     """User profile + style/routing preferences နှစ်မျိုးလုံးကို Self-improve လုပ်ပြီး Supabase ထဲ သိမ်းသည်။"""
     try:
@@ -298,34 +340,12 @@ Return ONLY valid JSON with two concise fields in Burmese (max ~150 words each):
 JSON format:
 {{"profile_summary":"...","style_preferences":"..."}}
 """
-        raw = ""
-        try:
-            raw = call_ai_with_3tier_fallback(update_prompt, None, None, False)
-        except Exception:
-            raw = ""
-
-        parsed = _extract_json_from_text(raw)
-        if not parsed:
-            try:
-                completion = groq_client.with_options(timeout=8.0).chat.completions.create(
-                    model="llama-3.1-8b-instant",
-                    messages=[
-                        {"role": "system", "content": "Output only valid JSON in Myanmar Unicode."},
-                        {"role": "user", "content": update_prompt}
-                    ],
-                    temperature=0.1,
-                    max_tokens=360,
-                )
-                raw = (completion.choices[0].message.content or "").strip()
-                parsed = _extract_json_from_text(raw)
-            except Exception as groq_err:
-                print(f"evolve_user_profile Groq fallback error: {groq_err}")
-
+        parsed = _call_json_intelligence(update_prompt)
         if parsed:
             summary = str(parsed.get("profile_summary") or "").strip()
             prefs = str(parsed.get("style_preferences") or "").strip()
         else:
-            summary = (raw or "")[:500].strip()
+            summary = ""
             prefs = ""
 
         if not summary and not prefs:
@@ -523,55 +543,591 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
     return "မောင်ရေ၊ လောလောဆယ် ဆာဗာ ခဏအလုပ်များနေတယ်၊ ခဏနေပြီး ထပ်ပို့ကြည့်နော်"
 
 
-# --- Dedicated 3-Bucket Router (WEB_SEARCH / TASK_GROUP / ADVICE_GENERAL + Learned Preferences) ---
-def classify_dedicated_bucket(
+# --- Single Smart Intelligence Classifier (TASK / GROUP / ADVICE / GENERAL / WEB_SEARCH) ---
+def _extract_weekday_target(text: str) -> int | None:
+    """စာသားထဲက နေ့အမည် (0=Mon .. 6=Sun) ကို ရှာပေးသည်။"""
+    t = text.lower()
+    mapping = {
+        0: ["တနင်္လာ", "monday", "mon"],
+        1: ["အင်္ဂါ", "tuesday", "tue"],
+        2: ["ဗုဒ္ဓဟူး", "wednesday", "wed"],
+        3: ["ကြာသပတေး", "thursday", "thu"],
+        4: ["သောကြာ", "friday", "fri"],
+        5: ["စနေ", "saturday", "sat"],
+        6: ["တနင်္ဂနွေ", "sunday", "sun"],
+    }
+    for idx, keys in mapping.items():
+        if any(k in t for k in keys):
+            return idx
+    return None
+
+
+def _parse_time_parts_mmt(text: str) -> tuple[int, int] | None:
+    """'8နာရီခွဲ', '၈ နာရီခွဲ', '16:30', 'ညနေ 4နာရီ' စသည်တို့မှ (hour, minute) ကို ဖတ်သည်။"""
+    mm_digits = str.maketrans("၀၁၂၃၄၅၆၇၈၉", "0123456789")
+    norm = text.translate(mm_digits)
+    lower = text.lower()
+
+    hm = re.search(r"\b(\d{1,2}):(\d{2})\b", norm)
+    if hm:
+        h, m = int(hm.group(1)), int(hm.group(2))
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return h, m
+
+    hr = re.search(r"(\d{1,2})\s*(?:နာရီ|hour|hr)", norm, re.IGNORECASE)
+    if not hr:
+        return None
+
+    h = int(hr.group(1))
+    after_hr = norm[hr.end():hr.end() + 12]
+    m = 0
+    if "ခွဲ" in after_hr or "half" in after_hr.lower():
+        m = 30
+    else:
+        min_m = re.search(r"(\d{1,2})\s*(?:မိနစ်|min)", after_hr, re.IGNORECASE)
+        if min_m:
+            m = int(min_m.group(1))
+
+    if ("ညနေ" in text or "ည" in text or "pm" in lower) and h < 12:
+        h += 12
+    elif ("မနက်" in text or "am" in lower) and h == 12:
+        h = 0
+
+    if 0 <= h <= 23 and 0 <= m <= 59:
+        return h, m
+    return None
+
+
+def parse_reminder_datetime_mmt(text: str) -> datetime | None:
+    """စာသားထဲက နောက် ... မိနစ်/နာရီ သို့မဟုတ် သတ်မှတ်အချိန်/နေ့ကို ဖတ်ပြီး MMT datetime ပြန်ပေးသည်။"""
+    now_mm = datetime.now(MM_TZ)
+    mm_digits = str.maketrans("၀၁၂၃၄၅၆၇၈၉", "0123456789")
+    norm_text = text.translate(mm_digits)
+
+    rel_min = re.search(r"(?:နောက်\s*)?(\d{1,3})\s*(?:မိနစ်|minute|min)s?", norm_text, re.IGNORECASE)
+    if rel_min and "နာရီ" not in norm_text:
+        mins = int(rel_min.group(1))
+        if 1 <= mins <= 1440:
+            return now_mm + timedelta(minutes=mins)
+
+    parts = _parse_time_parts_mmt(text)
+    if not parts:
+        return None
+    hour, minute = parts
+
+    target_date = now_mm.date()
+    target_wd = _extract_weekday_target(text)
+
+    if target_wd is not None:
+        days_ahead = (target_wd - now_mm.weekday()) % 7
+        candidate_check = datetime(now_mm.year, now_mm.month, now_mm.day, hour, minute, 0, tzinfo=MM_TZ) + timedelta(days=days_ahead)
+        if days_ahead == 0 and candidate_check <= now_mm:
+            days_ahead = 7
+        target_date = (now_mm + timedelta(days=days_ahead)).date()
+    elif "မနက်ဖြန်" in text or "tomorrow" in text.lower():
+        target_date = (now_mm + timedelta(days=1)).date()
+
+    candidate = datetime(target_date.year, target_date.month, target_date.day, hour, minute, 0, tzinfo=MM_TZ)
+    if target_wd is None and candidate < (now_mm - timedelta(minutes=1)) and "မနက်ဖြန်" not in text and "tomorrow" not in text.lower():
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def _clean_task_title_fallback(raw_text: str) -> str:
+    t = raw_text.strip()
+    t = re.sub(r"^(?:မဟုတ်ဘူးလေ|မဟုတ်ဘူး|Task\s*[-–—:]?)", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:အပတ်စဉ်|နေ့စဉ်|ကျောင်းဖွင့်ရက်|မြန်မာ\s*calendar|တိုင်း)", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday|တနင်္လာ|အင်္ဂါ|ဗုဒ္ဓဟူး|ကြာသပတေး|သောကြာ|စနေ|တနင်္ဂနွေ)", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:မနက်|ညနေ|ည|နောက်\s*)?[၀-၉\d]+\s*(?:နာရီ|hour|hr)(?:\s*(?:ခွဲ|[၀-၉\d]+\s*မိနစ်))?", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:နောက်\s*)?[၀-၉\d]+\s*(?:မိနစ်|minute|min)s?\s*(?:မှာ|နေရင်|အကြာမှာ)?", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\b\d{1,2}:\d{2}\b", "", t)
+    t = re.sub(r"(?:remind\s*လုပ်ပေးပါ|remind\s*ပေးပါ|သတိပေးပါ|သတိပေး|remind|ပြောတယ်|မှာ)", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s+", " ", t).strip(" -–—၊။")
+    return t or raw_text.strip()
+
+
+def smart_route_and_parse(
     user_message: str,
     available_groups: list,
     recent_ctx: str = "",
     user_pref_ctx: str = "",
 ) -> dict:
-    """Task+Group / Advice+General / Web Search သုံးမျိုးကို သီးသန့် ခွဲခြားပေးသည်။"""
-    groups_str = ", ".join(available_groups[:20]) if available_groups else "None"
-    prompt = f"""
-Route the latest user message into ONE of 3 dedicated buckets:
-1. `WEB_SEARCH`: Songs/music, entertainment, online trends, news, weather, prices, sports, live info, or outside web questions — EVEN IF Recent Context was about a Telegram group. Set `group_name` to `null`.
-2. `TASK_GROUP`: Personal to-do tasks/reminders (add/list/done task) OR asking/summarizing/following up on messages, people, or operations inside Telegram work groups.
-3. `ADVICE_GENERAL`: Advice, problem-solving, drafting messages, translating, coding/tech help, explanations, recalling private chat/profile, or casual conversation.
+    """
+    Keyword တွေကို အားမကိုးဘဲ Context နဲ့ အဓိပ္ပာယ်အရ
+    TASK / GROUP / ADVICE / GENERAL / WEB_SEARCH ၅ မျိုးကို တစ်ပြိုင်နက် ခွဲခြားပေးသည်။
+    """
+    now_mm = datetime.now(MM_TZ)
+    weekday_mm = MYANMAR_WEEKDAYS[now_mm.weekday()]
+    groups_str = ", ".join(available_groups[:25]) if available_groups else "None"
 
-Learned User Preferences & Corrections:
+    prompt = f"""
+Understand the user's intent naturally from meaning and conversation context (not rigid keywords).
+Current Myanmar Time: {now_mm.strftime('%Y-%m-%d (%A) %H:%M MMT')} ({weekday_mm})
+Available Telegram Groups: [{groups_str}]
+
+User Preferences & Past Corrections:
 {user_pref_ctx[:400] or "None"}
 
-Available Groups: [{groups_str}]
-Recent Context:
+Recent Conversation:
 {recent_ctx or "None"}
 
-Latest Message: "{user_message}"
-Return ONLY JSON:
-{{"bucket":"WEB_SEARCH|TASK_GROUP|ADVICE_GENERAL","sub_type":"group_query|group_summary|task|advice|general","group_name":null,"period":"today|yesterday|recent","task_action":null,"task_title":null,"task_id":null}}
+Latest User Message: "{user_message}"
+
+Classify into ONE primary intent:
+- "TASK": Setting/updating/completing/listing personal reminders or to-dos, or correcting a task entry.
+- "GROUP": Asking about anything discussed/reported/shared in Telegram groups, asking for a group summary/report, or correcting a misrouted group query (e.g., if user says "that's not a task, I asked for group summary report").
+- "ADVICE": Seeking recommendations, options, how-to guidance, or decision support.
+- "GENERAL": Translating, drafting, explaining concepts, recalling personal chat/profile, or casual chat.
+- "WEB_SEARCH": Looking up external/live/current facts, news, weather, prices, entertainment, or web info not from private/group logs.
+
+If intent is "TASK", also extract:
+- "task_action": "add" | "done" | "list" | "cancel_last"
+- "clean_title": pure action in Burmese without time/schedule/reason/filler words
+- "reason": short reason if stated, else null
+- "repeat_type": "once" | "daily" | "weekly" | "school_days"
+- "remind_iso": ISO-8601 datetime with +06:30 offset for the next occurrence in MMT, or null
+
+If intent is "GROUP", also extract:
+- "group_name": exact matching group from Available Groups if clear, else null
+- "group_mode": "summary" | "query"
+- "period": "today" | "yesterday" | "recent"
+
+Return ONLY valid JSON:
+{{
+  "intent": "TASK|GROUP|ADVICE|GENERAL|WEB_SEARCH",
+  "task_action": "add",
+  "clean_title": null,
+  "reason": null,
+  "repeat_type": "once",
+  "remind_iso": null,
+  "group_name": null,
+  "group_mode": "query",
+  "period": "recent"
+}}
 """
+    parsed = _call_json_intelligence(prompt)
+    if not parsed:
+        return {
+            "intent": "GENERAL",
+            "task_action": "add",
+            "clean_title": _clean_task_title_fallback(user_message),
+            "reason": None,
+            "repeat_type": "once",
+            "remind_dt": None,
+            "group_name": None,
+            "group_mode": "query",
+            "period": "recent",
+        }
+
+    intent = str(parsed.get("intent") or "GENERAL").upper().strip()
+    if intent not in {"TASK", "GROUP", "ADVICE", "GENERAL", "WEB_SEARCH"}:
+        intent = "GENERAL"
+
+    target_wd = _extract_weekday_target(user_message)
+    repeat_type = str(parsed.get("repeat_type") or "once").strip()
+    if repeat_type not in {"once", "daily", "weekly", "school_days"}:
+        repeat_type = "once"
+
+    rem_dt = None
+    if parsed.get("remind_iso"):
+        try:
+            dt_obj = datetime.fromisoformat(str(parsed["remind_iso"]))
+            rem_dt = dt_obj.replace(tzinfo=MM_TZ) if dt_obj.tzinfo is None else dt_obj.astimezone(MM_TZ)
+        except Exception:
+            rem_dt = parse_reminder_datetime_mmt(user_message)
+    elif intent == "TASK":
+        rem_dt = parse_reminder_datetime_mmt(user_message)
+
+    if rem_dt:
+        if repeat_type == "school_days":
+            while rem_dt.weekday() >= 5:
+                rem_dt += timedelta(days=1)
+        elif repeat_type == "weekly" and target_wd is not None:
+            days_ahead = (target_wd - rem_dt.weekday()) % 7
+            if days_ahead == 0 and rem_dt <= now_mm:
+                days_ahead = 7
+            rem_dt += timedelta(days=days_ahead)
+
+    raw_title = parsed.get("clean_title")
+    clean_title = (str(raw_title).strip() if raw_title else "") or _clean_task_title_fallback(user_message)
+    clean_title = _clean_task_title_fallback(clean_title) or _clean_task_title_fallback(user_message)
+
+    raw_reason = parsed.get("reason")
+    reason = str(raw_reason).strip() if raw_reason else None
+
+    return {
+        "intent": intent,
+        "task_action": str(parsed.get("task_action") or "add").lower().strip(),
+        "clean_title": clean_title,
+        "reason": reason,
+        "repeat_type": repeat_type,
+        "remind_dt": rem_dt,
+        "group_name": parsed.get("group_name") or None,
+        "group_mode": str(parsed.get("group_mode") or "query").lower().strip(),
+        "period": str(parsed.get("period") or "recent").lower().strip(),
+    }
+
+
+def add_task(
+    title: str,
+    remind_dt: datetime | None = None,
+    reason: str | None = None,
+    repeat_type: str = "once",
+) -> dict:
+    payload = {
+        "title": title,
+        "status": "pending",
+        "repeat_type": repeat_type or "once",
+    }
+    if reason:
+        payload["reason"] = reason
+    if remind_dt:
+        payload["remind_at"] = remind_dt.isoformat()
+        payload["reminded"] = False
     try:
-        raw_gem = call_ai_with_3tier_fallback(prompt, None, None, False)
-        parsed = _extract_json_from_text(raw_gem)
-        if not parsed:
-            completion = groq_client.with_options(timeout=4.0).chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=[
-                    {"role": "system", "content": "Output only valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.0,
-                max_tokens=150,
-            )
-            parsed = _extract_json_from_text((completion.choices[0].message.content or "").strip())
-
-        if parsed and parsed.get("bucket") in {"WEB_SEARCH", "TASK_GROUP", "ADVICE_GENERAL"}:
-            if parsed.get("bucket") == "WEB_SEARCH":
-                parsed["group_name"] = None
-            return parsed
+        res = supabase.table("tasks").insert(payload).execute()
+        print(
+            f"[Task Inserted] rows={len(res.data or [])}, title={title}, "
+            f"repeat={payload.get('repeat_type')}, remind_at={payload.get('remind_at')}"
+        )
     except Exception as e:
-        print(f"Dedicated router error: {e}")
+        print(f"[Task Insert Fallback] error={e}")
+        fallback_payload = {"title": title, "status": "pending"}
+        if remind_dt:
+            fallback_payload["remind_at"] = remind_dt.isoformat()
+            fallback_payload["reminded"] = False
+        res = supabase.table("tasks").insert(fallback_payload).execute()
+        print(f"[Task Inserted Basic] rows={len(res.data or [])}")
+    return {"status": "success", "message": f"Task added: {title}"}
 
-    return {"bucket": "ADVICE_GENERAL", "sub_type": "general", "group_name": None, "period": "recent"}
+
+def list_tasks() -> list:
+    res = supabase.table("tasks").select("*").order("id").execute()
+    return res.data
+
+
+def get_formatted_tasks() -> str:
+    tasks = list_tasks()
+    if not tasks:
+        return "မောင်ရေ၊ လက်ရှိ Task မရှိသေးဘူးနော်"
+    lines = []
+    for t in tasks:
+        mark = "✓" if t.get("status") == "done" else "•"
+        r_str = ""
+        if t.get("remind_at") and t.get("status") != "done":
+            try:
+                r_dt = datetime.fromisoformat(str(t["remind_at"]).replace("Z", "+00:00")).astimezone(MM_TZ)
+                r_str = f" (⏰ {r_dt.strftime('%m-%d %H:%M')})"
+            except Exception:
+                pass
+        lines.append(f"{mark} {t['title']}{r_str}")
+    return "မောင်ရေ — လက်ရှိ Task စာရင်းလေးနော်\n" + "\n".join(lines)
+
+
+def delete_latest_pending_task() -> str | None:
+    """ရှေ့မှာ မှားမှတ်ထားမိတဲ့ နောက်ဆုံး Pending Task ကို ဖျက်ပေးသည်။"""
+    try:
+        last_res = (
+            supabase.table("tasks")
+            .select("id, title")
+            .eq("status", "pending")
+            .order("id", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = last_res.data or []
+        if rows:
+            t_id = rows[0]["id"]
+            t_title = rows[0].get("title", "")
+            supabase.table("tasks").delete().eq("id", t_id).execute()
+            return t_title
+    except Exception as e:
+        print(f"Error deleting latest pending task: {e}")
+    return None
+
+
+def handle_task_intent(user_message: str, route: dict) -> str:
+    action = (route.get("task_action") or "add").lower().strip()
+    task_title = (route.get("clean_title") or "").strip()
+
+    if action == "list":
+        return get_formatted_tasks()
+
+    if action == "cancel_last":
+        removed = delete_latest_pending_task()
+        if removed:
+            return f"မောင်ရေ — \"{removed}\" ကို Task ထဲက ပြန်ဖျက်ပေးလိုက်ပြီနော်"
+        return "မောင်ရေ — ပြန်ဖျက်စရာ Task မတွေ့ဘူးနော်"
+
+    if action == "done":
+        try:
+            search_key = (task_title or user_message).strip()
+            pending_res = (
+                supabase.table("tasks")
+                .select("*")
+                .eq("status", "pending")
+                .order("id", desc=True)
+                .limit(20)
+                .execute()
+            )
+            pending_tasks = pending_res.data or []
+            matched = next(
+                (t for t in pending_tasks if search_key.lower() in str(t.get("title", "")).lower()),
+                pending_tasks[0] if pending_tasks else None
+            )
+            if matched:
+                supabase.table("tasks").update({"status": "done"}).eq("id", matched["id"]).execute()
+                return f"မောင်ရေ — \"{matched['title']}\" ပြီးသွားပြီနော်၊ Done မှတ်လိုက်ပြီနော်"
+
+            return "မောင်ရေ — ပြီးစီးကြောင်း မှတ်ရမယ့် Pending Task မတွေ့သေးဘူးနော်"
+        except Exception as e:
+            print(f"Task update error: {e}")
+            return "မောင်ရေ — Task အခြေအနေ ပြောင်းရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားတယ်၊ ထပ်စမ်းကြည့်နော်"
+
+    clean_title = task_title or _clean_task_title_fallback(user_message)
+    remind_dt = route.get("remind_dt")
+    repeat_mode = route.get("repeat_type", "once")
+    reason = route.get("reason")
+
+    is_correction = any(w in user_message for w in ["မဟုတ်ဘူး", "ပြောတယ်", "ပြင်"])
+    if is_correction:
+        try:
+            latest_res = (
+                supabase.table("tasks")
+                .select("*")
+                .eq("status", "pending")
+                .order("id", desc=True)
+                .limit(1)
+                .execute()
+            )
+            latest_rows = latest_res.data or []
+            if latest_rows:
+                last_id = latest_rows[0]["id"]
+                upd = {"title": clean_title, "repeat_type": repeat_mode or "once"}
+                if reason:
+                    upd["reason"] = reason
+                if remind_dt:
+                    upd["remind_at"] = remind_dt.isoformat()
+                    upd["reminded"] = False
+                try:
+                    supabase.table("tasks").update(upd).eq("id", last_id).execute()
+                except Exception:
+                    supabase.table("tasks").update({"title": clean_title}).eq("id", last_id).execute()
+            else:
+                add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
+        except Exception:
+            add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
+    else:
+        add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
+
+    reply_line = f"မောင်ရေ — \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်"
+    if remind_dt:
+        reply_line += f"\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[remind_dt.weekday()]})"
+    if repeat_mode == "school_days":
+        reply_line += " · ကျောင်းဖွင့်ရက်"
+    elif repeat_mode == "weekly":
+        reply_line += " · အပတ်စဉ်"
+    elif repeat_mode == "daily":
+        reply_line += " · နေ့စဉ်"
+    if reason:
+        reply_line += f"\n📝 {reason}"
+    return reply_line
+
+
+# --- 2. Group Summary, Report & Keyword-Free Natural Group Q&A Tools ---
+def get_available_groups() -> list:
+    cleanup_old_raw_logs()
+    thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
+    res = supabase.table("raw_logs").select("group_name").gte("created_at", thirty_days_ago_iso).execute()
+    groups = sorted(list({r["group_name"] for r in (res.data or []) if r.get("group_name")}))
+    return groups
+
+
+def get_date_bounds(day_mode: str):
+    now_mm = datetime.now(MM_TZ)
+    if day_mode == "yesterday":
+        target_date = (now_mm - timedelta(days=1)).date()
+        label = f"Yesterday ({target_date})"
+    else:
+        target_date = now_mm.date()
+        label = f"Today ({target_date})"
+
+    start_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=MM_TZ)
+    end_dt = start_dt + timedelta(days=1)
+    return start_dt.isoformat(), end_dt.isoformat(), label
+
+
+def parse_date_range_from_text(text: str):
+    text_lower = text.lower()
+    if "မနေ့" in text_lower or "yesterday" in text_lower:
+        return get_date_bounds("yesterday")
+    if "ဒီနေ့" in text_lower or "today" in text_lower or "ယနေ့" in text_lower:
+        return get_date_bounds("today")
+
+    match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text_lower)
+    if match:
+        try:
+            target_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
+            start_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=MM_TZ)
+            end_dt = start_dt + timedelta(days=1)
+            return start_dt.isoformat(), end_dt.isoformat(), f"{target_date}"
+        except ValueError:
+            pass
+
+    return None, None, None
+
+
+def query_specific_group_logs(
+    user_message: str,
+    router_group: str = None,
+    router_period: str = "recent",
+    recent_ctx: str = "",
+) -> str:
+    """Keyword filter မသုံးဘဲ Group logs များကို တိုက်ရိုက်ဖတ်ပြီး မေးသည့်အချက်ကိုသာ လူတစ်ယောက်လို သဘာဝကျကျ ဖြေပေးသည်။"""
+    cleanup_old_raw_logs()
+
+    thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
+    query = supabase.table("raw_logs").select("*").gte("created_at", thirty_days_ago_iso).order("id", desc=True)
+
+    date_label = None
+    if router_period in ["today", "yesterday"]:
+        start_iso, end_iso, date_label = get_date_bounds(router_period)
+        query = query.gte("created_at", start_iso).lt("created_at", end_iso)
+    else:
+        s_iso, e_iso, d_lbl = parse_date_range_from_text(f"{recent_ctx}\n{user_message}")
+        if s_iso and e_iso:
+            start_iso, end_iso, date_label = s_iso, e_iso, d_lbl
+            query = query.gte("created_at", start_iso).lt("created_at", end_iso)
+
+    logs_res = query.limit(300).execute()
+    all_logs = list(reversed(logs_res.data or []))
+
+    if not all_logs:
+        scope_d = f" ({date_label})" if date_label else ""
+        return f"မောင်ရေ — သက်ဆိုင်ရာ ကာလ{scope_d} အတွင်း Group မှတ်တမ်းတွေ မရှိသေးဘူးနော်"
+
+    matched_group = router_group
+    if not matched_group:
+        combined_q = f"{recent_ctx}\n{user_message}".lower()
+        available_groups = list({l.get("group_name") for l in all_logs if l.get("group_name")})
+        best_score = 0
+        for g_name in available_groups:
+            g_lower = g_name.lower()
+            score = 100 if g_lower in combined_q else 0
+            for word in re.findall(r"[a-z0-9\u1000-\u109F]+", g_lower):
+                if len(word) >= 2 and word in combined_q:
+                    score += len(word) * 2
+            if score > best_score:
+                best_score = score
+                matched_group = g_name
+
+    selected_logs = [l for l in all_logs if l.get("group_name") == matched_group] if matched_group else all_logs
+
+    if not selected_logs:
+        return f"မောင်ရေ — {matched_group or 'သက်ဆိုင်ရာ Group'} ထဲမှာ မှတ်တမ်း မရှိသေးဘူးနော်"
+
+    raw_text = "\n".join(
+        [
+            f"[{_format_mm_timestamp(l.get('created_at'))} | {l.get('group_name', '')} | {l.get('sender_name', 'Unknown')}]: {l.get('content_summary', '')}"
+            for l in selected_logs[-200:]
+        ]
+    )
+
+    now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
+
+    prompt = f"""
+    လက်ရှိအချိန်: {now_str}
+
+    အောက်ပါတို့မှာ Telegram Group ထဲမှ စကားပြောဆိုမှု မှတ်တမ်းများ ဖြစ်သည်။
+    အရှေ့နောက် စကားပြောဆိုမှု (Recent Context) နှင့် လက်ရှိ မေးခွန်းကို နားလည်ပြီး အသုံးပြုသူ မေးထားသည့်
+    အချက် (သို့မဟုတ် သက်ဆိုင်ရာ လူပြောထားသည့် အကြောင်းအရာ) တစ်ခုတည်းကိုသာ Focus ထား၍ ပြန်ပြောပြပေးပါ။
+
+    ဖြေဆိုရမည့် ပုံစံစည်းမျဉ်းများ:
+    1. အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ။
+    2. စက်ရုပ်လို တစ်ကြောင်းချင်းစီ၏ အချိန် (Timestamp) တွေ ထည့်ရေးစရာ မလိုပါ (အသုံးပြုသူက ဘယ်အချိန်လဲဟု မေးမှသာ အချိန်ကို ထည့်ပြောပါ)။
+    3. လူတစ်ယောက်က လုပ်ဖော်ကိုင်ဖက်ကို ရင်းနှီးဖော်ရွေစွာ ပြန်ရှင်းပြနေသလို သဘာဝကျကျ၊ ချောချောမွေ့မွေ့နှင့် လိုရင်းတိုရှင်း မြန်မာဘာသာဖြင့် ပြောပြပါ။
+    4. အရှေ့မှာ ပြောခဲ့သည့် လူ/အကြောင်းအရာကို ဆက်မေးခြင်း (ဥပမာ - "သူပြောတဲ့ key points အကျဉ်းချုပ်ပေးပါ") ဖြစ်ပါက ထိုသူ၏ ပြောစကားများထဲမှ အဓိက Key Points များကိုသာ Bullet point များဖြင့် ရှင်းရှင်းလင်းလင်း ထုတ်ပေးပါ။
+    5. မေးထားသည့် အချက်/လူနှင့် မသက်ဆိုင်သော အခြားလူများ၏ စကားများကို လုံးဝ ထည့်မပြောပါနှင့်။ မှတ်တမ်းထဲတွင် မပါဝင်ပါက မတွေ့ရှိကြောင်း ရိုးသားစွာ ဖြေပါ။
+
+    Recent Context:
+    {recent_ctx or "None"}
+
+    လက်ရှိ မေးခွန်း: {user_message}
+
+    Group မှတ်တမ်းများ:
+    {raw_text}
+    """
+
+    return call_ai_with_3tier_fallback(prompt, use_google_search=False)
+
+
+def get_group_report(user_query: str = "", exact_group_name: str = None, day_mode: str = None) -> str:
+    cleanup_old_raw_logs()
+
+    if day_mode in ["today", "yesterday"]:
+        start_iso, end_iso, date_label = get_date_bounds(day_mode)
+    else:
+        start_iso, end_iso, date_label = parse_date_range_from_text(user_query)
+
+    thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
+    query = supabase.table("raw_logs").select("*").gte("created_at", thirty_days_ago_iso).order("id")
+
+    if start_iso and end_iso:
+        query = query.gte("created_at", start_iso).lt("created_at", end_iso)
+    elif not exact_group_name:
+        query = query.eq("is_read", False)
+
+    logs_res = query.execute()
+    logs = logs_res.data or []
+
+    matched_group_name = exact_group_name
+    if exact_group_name:
+        logs = [l for l in logs if l.get("group_name") == exact_group_name]
+    elif logs:
+        all_groups = list({l.get("group_name") for l in logs if l.get("group_name")})
+        q_lower = user_query.lower()
+        for g_name in all_groups:
+            g_words = [w for w in g_name.lower().split() if len(w) >= 3]
+            if g_name.lower() in q_lower or any(w in q_lower for w in g_words):
+                matched_group_name = g_name
+                logs = [l for l in logs if l.get("group_name") == g_name]
+                break
+
+    if not logs:
+        scope_desc = f" [{matched_group_name}]" if matched_group_name else ""
+        if date_label:
+            return f"မောင်ရေ — {date_label}{scope_desc} အတွက် မှတ်တမ်း မရှိသေးဘူးနော်"
+        return f"မောင်ရေ — ဖတ်ရမယ့် မက်ဆေ့ခ်ျအသစ် မရှိသေးဘူး{scope_desc} နော်"
+
+    raw_text = "\n".join(
+        [f"[{l['group_name']} | {l['sender_name']} | {str(l.get('created_at', ''))[:16]}]: {l['content_summary']}" for l in logs]
+    )
+
+    header_info = f"Group: {matched_group_name or 'All Groups'} | Period: {date_label or 'Unread'}"
+
+    prompt = f"""
+    အောက်ပါတို့မှာ Telegram Group များမှ ရရှိထားသော မက်ဆေ့ခ်ျများနှင့် ပုံ/ဖိုင် အနှစ်ချုပ်များ ဖြစ်သည်။
+    ({header_info})
+    အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ။
+    နေ့စဉ် တွေ့နေကျ ရိုးရိုးနှုတ်ဆက်စကားများ၊ အရေးမပါသော စကားပြောဆိုမှုများကို လုံးဝ ဖယ်ထုတ်ပါ။
+    အောက်ပါ အချက်များကိုသာ ဦးစားပေး၍ အနှစ်ချုပ် Report တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ထုတ်ပေးပါ:
+    1. ပုံမှန်မဟုတ်သော ပြဿနာများ (Issues / Blockers)
+    2. ဆုံးဖြတ်ချက် အသစ်များနှင့် ညွှန်ကြားချက်များ
+    3. အရေးကြီးသော လုပ်ငန်းတာဝန်များ (Action Items)
+
+    ဒေတာများ:
+    {raw_text}
+    """
+
+    report_text = call_ai_with_3tier_fallback(prompt, use_google_search=False)
+
+    supabase.table("daily_reports").insert({"report_content": f"[{header_info}]\n{report_text}"}).execute()
+
+    if not date_label and not exact_group_name:
+        for l in logs:
+            supabase.table("raw_logs").update({"is_read": True}).eq("id", l["id"]).execute()
+
+    return f"{header_info}\n\n{report_text}"
 
 
 # --- Supabase Pending Follow-ups Queue ("ရရင် ပြန်ပြောပေးမယ်") ---
@@ -581,7 +1137,7 @@ def queue_pending_followup(user_id: int, followup_type: str, question: str, targ
         retry_dt = now_mm + timedelta(seconds=delay_seconds)
         supabase.table("pending_followups").insert({
             "user_id": user_id,
-            "followup_type": followup_type,  # "group_query" | "web_search"
+            "followup_type": followup_type,
             "question": question,
             "target_group": target_group,
             "status": "pending",
@@ -891,622 +1447,14 @@ async def scheduled_evening_task_digest_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"Error in scheduled_evening_task_digest_job: {e}")
 
 
-# --- 1. Personal Tasks & Smart Intelligence Helpers (Gemini First -> Groq Fallback) ---
-def _extract_weekday_target(text: str) -> int | None:
-    """စာသားထဲက နေ့အမည် (0=Mon .. 6=Sun) ကို ရှာပေးသည်။"""
-    t = text.lower()
-    mapping = {
-        0: ["တနင်္လာ", "monday", "mon"],
-        1: ["အင်္ဂါ", "tuesday", "tue"],
-        2: ["ဗုဒ္ဓဟူး", "wednesday", "wed"],
-        3: ["ကြာသပတေး", "thursday", "thu"],
-        4: ["သောကြာ", "friday", "fri"],
-        5: ["စနေ", "saturday", "sat"],
-        6: ["တနင်္ဂနွေ", "sunday", "sun"],
-    }
-    for idx, keys in mapping.items():
-        if any(k in t for k in keys):
-            return idx
-    return None
-
-
-def _parse_time_parts_mmt(text: str) -> tuple[int, int] | None:
-    """'8နာရီခွဲ', '၈ နာရီခွဲ', '16:30', 'ညနေ 4နာရီ' စသည်တို့မှ (hour, minute) ကို ဖတ်သည်။"""
-    mm_digits = str.maketrans("၀၁၂၃၄၅၆၇၈၉", "0123456789")
-    norm = text.translate(mm_digits)
-    lower = text.lower()
-
-    hm = re.search(r"\b(\d{1,2}):(\d{2})\b", norm)
-    if hm:
-        h, m = int(hm.group(1)), int(hm.group(2))
-        if 0 <= h <= 23 and 0 <= m <= 59:
-            return h, m
-
-    hr = re.search(r"(\d{1,2})\s*(?:နာရီ|hour|hr)", norm, re.IGNORECASE)
-    if not hr:
-        return None
-
-    h = int(hr.group(1))
-    after_hr = norm[hr.end():hr.end() + 12]
-    m = 0
-    if "ခွဲ" in after_hr or "half" in after_hr.lower():
-        m = 30
-    else:
-        min_m = re.search(r"(\d{1,2})\s*(?:မိနစ်|min)", after_hr, re.IGNORECASE)
-        if min_m:
-            m = int(min_m.group(1))
-
-    if ("ညနေ" in text or "ည" in text or "pm" in lower) and h < 12:
-        h += 12
-    elif ("မနက်" in text or "am" in lower) and h == 12:
-        h = 0
-
-    if 0 <= h <= 23 and 0 <= m <= 59:
-        return h, m
-    return None
-
-
-def parse_reminder_datetime_mmt(text: str) -> datetime | None:
-    """စာသားထဲက နောက် ... မိနစ်/နာရီ သို့မဟုတ် သတ်မှတ်အချိန်/နေ့ကို ဖတ်ပြီး MMT datetime ပြန်ပေးသည်။"""
-    now_mm = datetime.now(MM_TZ)
-    mm_digits = str.maketrans("၀၁၂၃၄၅၆၇၈၉", "0123456789")
-    norm_text = text.translate(mm_digits)
-
-    rel_min = re.search(r"(?:နောက်\s*)?(\d{1,3})\s*(?:မိနစ်|minute|min)s?", norm_text, re.IGNORECASE)
-    if rel_min and "နာရီ" not in norm_text:
-        mins = int(rel_min.group(1))
-        if 1 <= mins <= 1440:
-            return now_mm + timedelta(minutes=mins)
-
-    parts = _parse_time_parts_mmt(text)
-    if not parts:
-        return None
-    hour, minute = parts
-
-    target_date = now_mm.date()
-    target_wd = _extract_weekday_target(text)
-
-    if target_wd is not None:
-        days_ahead = (target_wd - now_mm.weekday()) % 7
-        candidate_check = datetime(now_mm.year, now_mm.month, now_mm.day, hour, minute, 0, tzinfo=MM_TZ) + timedelta(days=days_ahead)
-        if days_ahead == 0 and candidate_check <= now_mm:
-            days_ahead = 7
-        target_date = (now_mm + timedelta(days=days_ahead)).date()
-    elif "မနက်ဖြန်" in text or "tomorrow" in text.lower():
-        target_date = (now_mm + timedelta(days=1)).date()
-
-    candidate = datetime(target_date.year, target_date.month, target_date.day, hour, minute, 0, tzinfo=MM_TZ)
-    if target_wd is None and candidate < (now_mm - timedelta(minutes=1)) and "မနက်ဖြန်" not in text and "tomorrow" not in text.lower():
-        candidate += timedelta(days=1)
-    return candidate
-
-
-def _clean_task_title_fallback(raw_text: str) -> str:
-    t = raw_text.strip()
-    t = re.sub(r"^(?:မဟုတ်ဘူးလေ|မဟုတ်ဘူး|Task\s*[-–—:]?)", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"(?:အပတ်စဉ်|နေ့စဉ်|ကျောင်းဖွင့်ရက်|မြန်မာ\s*calendar|တိုင်း)", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday|တနင်္လာ|အင်္ဂါ|ဗုဒ္ဓဟူး|ကြာသပတေး|သောကြာ|စနေ|တနင်္ဂနွေ)", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"(?:မနက်|ညနေ|ည|နောက်\s*)?[၀-၉\d]+\s*(?:နာရီ|hour|hr)(?:\s*(?:ခွဲ|[၀-၉\d]+\s*မိနစ်))?", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"(?:နောက်\s*)?[၀-၉\d]+\s*(?:မိနစ်|minute|min)s?\s*(?:မှာ|နေရင်|အကြာမှာ)?", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"\b\d{1,2}:\d{2}\b", "", t)
-    t = re.sub(r"(?:remind\s*လုပ်ပေးပါ|remind\s*ပေးပါ|သတိပေးပါ|သတိပေး|remind|ပြောတယ်|မှာ)", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"\s+", " ", t).strip(" -–—၊။")
-    return t or raw_text.strip()
-
-
-def _call_task_parser_llm(prompt: str) -> dict | None:
-    """JSON ခွဲတာကို Gemini နဲ့ အရင်သွားပြီး error/JSON မမှန်မှ Groq fallback သုံးသည်။"""
-    # 1) Gemini first
-    try:
-        raw_gemini = call_ai_with_3tier_fallback(prompt, None, None, False)
-        parsed_gemini = _extract_json_from_text(raw_gemini)
-        if parsed_gemini is not None:
-            return parsed_gemini
-    except Exception as e:
-        print(f"[Task Parser Gemini Error]: {e}")
-
-    # 2) Groq fallback only if Gemini fails or returns non-JSON
-    try:
-        completion = groq_client.with_options(timeout=4.5).chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "Output only valid JSON."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.0,
-            max_tokens=240,
-        )
-        raw_groq = (completion.choices[0].message.content or "").strip()
-        parsed_groq = _extract_json_from_text(raw_groq)
-        if parsed_groq is not None:
-            return parsed_groq
-    except Exception as e:
-        print(f"[Task Parser Groq Fallback Error]: {e}")
-
-    return None
-
-
-def looks_like_task_or_reminder(text: str) -> bool:
-    """LLM နှစ်ခုလုံး fail ဖြစ်မှသာ သုံးမယ့် Safety Net keyword check"""
-    t = text.strip().lower()
-    keywords = [
-        "သတိပေး", "remind", "reminder", "task",
-        "မိနစ်နေရင်", "မိနစ်မှာ", "နာရီနေရင်", "မှတ်ထား", "ထည့်ထား"
-    ]
-    return any(k in t for k in keywords)
-
-
-def smart_classify_and_parse_task(user_message: str, recent_ctx: str = "") -> dict:
-    """
-    လူတစ်ယောက်လို အဓိပ္ပာယ်ကို နားလည်ပြီး Task ဟုတ်/မဟုတ်၊ action (add/done/list)၊
-    သန့်ရှင်းတဲ့ title၊ reason၊ remind_at (MMT) နဲ့ repeat_type ကို ခွဲထုတ်ပေးသည်။
-    """
-    now_mm = datetime.now(MM_TZ)
-    weekday_mm = MYANMAR_WEEKDAYS[now_mm.weekday()]
-    target_wd = _extract_weekday_target(user_message)
-    fallback_dt = parse_reminder_datetime_mmt(user_message)
-    fallback_title = _clean_task_title_fallback(user_message)
-
-    prompt = f"""
-You are a smart Burmese personal assistant parsing a task/reminder request like a human.
-Current Time: {now_mm.strftime('%Y-%m-%d (%A) %H:%M MMT')} ({weekday_mm})
-
-Recent Context:
-{recent_ctx or "None"}
-
-User Message: "{user_message}"
-
-Analyze carefully:
-1. "is_task": true if adding/updating a task or reminder, marking done, or listing tasks. false if just chatting/asking questions/advice.
-2. "action": "add" | "done" | "list" | "none"
-3. "clean_title": ONLY the pure task to do in natural Burmese (e.g. "ဆေးသောက်ဖို့", "ကလေးတွေကို ဖုန်းဆက်ရန်").
-   Remove all filler words like "မဟုတ်ဘူးလေ", "ပြောတယ်", "remind လုပ်ပေးပါ", "သတိပေးပါ", "Task-", "အပတ်စဉ်", "Sunday", "မနက် ၈ နာရီခွဲမှာ", etc.
-4. "reason": Short reason if given (e.g. "ကျောင်းကပြန်ရောက် မရောက် သိချင်လို့"), else null.
-5. "repeat_type":
-   - "weekly" if repeating on a specific weekday / "အပတ်စဉ်" (like Sunday / တနင်္ဂနွေ)
-   - "school_days" if "ကျောင်းဖွင့်ရက်"
-   - "daily" if daily ("နေ့စဉ်" / every day without specific weekday/school_days)
-   - "once" otherwise
-6. "remind_iso": Exact ISO-8601 datetime with +06:30 offset for the next occurrence in Myanmar Time (e.g. "8နာရီခွဲ" -> 08:30, if today is Saturday 2026-11-21 and user says "Sunday မနက် 8နာရီခွဲ", next Sunday is 2026-11-22T08:30:00+06:30), or null if no time is specified.
-
-Return ONLY valid JSON:
-{{
-  "is_task": true,
-  "action": "add",
-  "clean_title": "...",
-  "reason": null,
-  "repeat_type": "once",
-  "remind_iso": null
-}}
-"""
-    parsed = _call_task_parser_llm(prompt)
-    if parsed is not None:
-        try:
-            is_task = bool(parsed.get("is_task", False))
-            action = str(parsed.get("action") or "none").lower().strip()
-            if action not in {"add", "done", "list", "none"}:
-                action = "add" if is_task else "none"
-
-            clean_title = str(parsed.get("clean_title") or "").strip()
-            if not clean_title or len(clean_title) > len(user_message) + 5:
-                clean_title = fallback_title
-            else:
-                clean_title = _clean_task_title_fallback(clean_title) or fallback_title
-
-            reason = str(parsed.get("reason") or "").strip() or None
-
-            repeat_type = str(parsed.get("repeat_type") or "once").strip()
-            if repeat_type not in {"once", "daily", "weekly", "school_days"}:
-                if "ကျောင်းဖွင့်ရက်" in user_message:
-                    repeat_type = "school_days"
-                elif target_wd is not None or "အပတ်စဉ်" in user_message:
-                    repeat_type = "weekly"
-                elif "နေ့စဉ်" in user_message:
-                    repeat_type = "daily"
-                else:
-                    repeat_type = "once"
-
-            rem_dt = fallback_dt
-            r_iso = parsed.get("remind_iso")
-            if r_iso:
-                try:
-                    dt_from_llm = datetime.fromisoformat(str(r_iso))
-                    if dt_from_llm.tzinfo is None:
-                        dt_from_llm = dt_from_llm.replace(tzinfo=MM_TZ)
-                    else:
-                        dt_from_llm = dt_from_llm.astimezone(MM_TZ)
-                    rem_dt = dt_from_llm
-                except Exception:
-                    rem_dt = fallback_dt
-
-            if rem_dt:
-                if repeat_type == "school_days":
-                    while rem_dt.weekday() >= 5:
-                        rem_dt += timedelta(days=1)
-                elif repeat_type == "weekly" and target_wd is not None:
-                    days_ahead = (target_wd - rem_dt.weekday()) % 7
-                    if days_ahead == 0 and rem_dt <= now_mm:
-                        days_ahead = 7
-                    rem_dt += timedelta(days=days_ahead)
-
-            return {
-                "is_task": is_task and action != "none",
-                "action": action if is_task else "none",
-                "title": clean_title,
-                "reason": reason,
-                "remind_dt": rem_dt,
-                "repeat": repeat_type,
-            }
-        except Exception as e:
-            print(f"smart_classify_and_parse_task field error: {e}")
-
-    if looks_like_task_or_reminder(user_message):
-        rep = (
-            "school_days" if "ကျောင်းဖွင့်ရက်" in user_message
-            else ("weekly" if (target_wd is not None or "အပတ်စဉ်" in user_message)
-                  else ("daily" if "နေ့စဉ်" in user_message else "once"))
-        )
-        return {
-            "is_task": True,
-            "action": "add",
-            "title": fallback_title,
-            "reason": None,
-            "remind_dt": fallback_dt,
-            "repeat": rep,
-        }
-
-    return {"is_task": False, "action": "none", "title": "", "reason": None, "remind_dt": None, "repeat": "once"}
-
-
-def add_task(
-    title: str,
-    remind_dt: datetime | None = None,
-    reason: str | None = None,
-    repeat_type: str = "once",
-) -> dict:
-    payload = {
-        "title": title,
-        "status": "pending",
-        "repeat_type": repeat_type or "once",
-    }
-    if reason:
-        payload["reason"] = reason
-    if remind_dt:
-        payload["remind_at"] = remind_dt.isoformat()
-        payload["reminded"] = False
-    try:
-        res = supabase.table("tasks").insert(payload).execute()
-        print(
-            f"[Task Inserted] rows={len(res.data or [])}, title={title}, "
-            f"repeat={payload.get('repeat_type')}, remind_at={payload.get('remind_at')}"
-        )
-    except Exception as e:
-        print(f"[Task Insert Fallback] error={e}")
-        fallback_payload = {"title": title, "status": "pending"}
-        if remind_dt:
-            fallback_payload["remind_at"] = remind_dt.isoformat()
-            fallback_payload["reminded"] = False
-        res = supabase.table("tasks").insert(fallback_payload).execute()
-        print(f"[Task Inserted Basic] rows={len(res.data or [])}")
-    return {"status": "success", "message": f"Task added: {title}"}
-
-
-def list_tasks() -> list:
-    res = supabase.table("tasks").select("*").order("id").execute()
-    return res.data
-
-
-def get_formatted_tasks() -> str:
-    tasks = list_tasks()
-    if not tasks:
-        return "မောင်ရေ၊ လက်ရှိ Task မရှိသေးဘူးနော်"
-    lines = []
-    for t in tasks:
-        mark = "✓" if t.get("status") == "done" else "•"
-        r_str = ""
-        if t.get("remind_at") and t.get("status") != "done":
-            try:
-                r_dt = datetime.fromisoformat(str(t["remind_at"]).replace("Z", "+00:00")).astimezone(MM_TZ)
-                r_str = f" (⏰ {r_dt.strftime('%m-%d %H:%M')})"
-            except Exception:
-                pass
-        lines.append(f"{mark} {t['title']}{r_str}")
-    return "မောင်ရေ — လက်ရှိ Task စာရင်းလေးနော်\n" + "\n".join(lines)
-
-
-def handle_task_intent(user_message: str, route: dict) -> str:
-    action = (route.get("task_action") or "").lower().strip()
-    task_title = (route.get("task_title") or "").strip()
-    task_id = route.get("task_id")
-
-    if action == "list":
-        return get_formatted_tasks()
-
-    if action == "done":
-        try:
-            if task_id:
-                supabase.table("tasks").update({"status": "done"}).eq("id", int(task_id)).execute()
-                return "မောင်ရေ — ပြီးသွားပြီနော်၊ Done မှတ်လိုက်ပြီနော်"
-
-            search_key = (task_title or user_message).strip()
-            pending_res = (
-                supabase.table("tasks")
-                .select("*")
-                .eq("status", "pending")
-                .order("id", desc=True)
-                .limit(20)
-                .execute()
-            )
-            pending_tasks = pending_res.data or []
-            matched = next(
-                (t for t in pending_tasks if search_key.lower() in str(t.get("title", "")).lower()),
-                None
-            )
-            if matched:
-                supabase.table("tasks").update({"status": "done"}).eq("id", matched["id"]).execute()
-                return f"မောင်ရေ — \"{matched['title']}\" ပြီးသွားပြီနော်၊ Done မှတ်လိုက်ပြီနော်"
-
-            return "မောင်ရေ — ပြီးစီးကြောင်း မှတ်ရမယ့် Pending Task မတွေ့သေးဘူး၊ `/tasks` နဲ့ ကြည့်ပြီး ပြောဦးနော်"
-        except Exception as e:
-            print(f"Task update error: {e}")
-            return "မောင်ရေ — Task အခြေအနေ ပြောင်းရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားတယ်၊ ထပ်စမ်းကြည့်နော်"
-
-    clean_title = task_title or _clean_task_title_fallback(user_message)
-    remind_dt = route.get("remind_dt")
-    repeat_mode = route.get("repeat", "once")
-    reason = route.get("reason")
-
-    is_correction = any(w in user_message for w in ["မဟုတ်ဘူး", "ပြောတယ်", "ပြင်"])
-    if is_correction and action == "add":
-        try:
-            latest_res = (
-                supabase.table("tasks")
-                .select("*")
-                .eq("status", "pending")
-                .order("id", desc=True)
-                .limit(1)
-                .execute()
-            )
-            latest_rows = latest_res.data or []
-            if latest_rows:
-                last_id = latest_rows[0]["id"]
-                upd = {"title": clean_title, "repeat_type": repeat_mode or "once"}
-                if reason:
-                    upd["reason"] = reason
-                if remind_dt:
-                    upd["remind_at"] = remind_dt.isoformat()
-                    upd["reminded"] = False
-                try:
-                    supabase.table("tasks").update(upd).eq("id", last_id).execute()
-                except Exception:
-                    supabase.table("tasks").update({"title": clean_title}).eq("id", last_id).execute()
-            else:
-                add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
-        except Exception:
-            add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
-    else:
-        add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
-
-    reply_line = f"မောင်ရေ — \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်"
-    if remind_dt:
-        reply_line += f"\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[remind_dt.weekday()]})"
-    if repeat_mode == "school_days":
-        reply_line += " · ကျောင်းဖွင့်ရက်"
-    elif repeat_mode == "weekly":
-        reply_line += " · အပတ်စဉ်"
-    elif repeat_mode == "daily":
-        reply_line += " · နေ့စဉ်"
-    if reason:
-        reply_line += f"\n📝 {reason}"
-    return reply_line
-
-
-# --- 2. Group Summary, Report & Keyword-Free Natural Group Q&A Tools ---
-def get_available_groups() -> list:
-    cleanup_old_raw_logs()
-    thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
-    res = supabase.table("raw_logs").select("group_name").gte("created_at", thirty_days_ago_iso).execute()
-    groups = sorted(list({r["group_name"] for r in (res.data or []) if r.get("group_name")}))
-    return groups
-
-
-def get_date_bounds(day_mode: str):
-    now_mm = datetime.now(MM_TZ)
-    if day_mode == "yesterday":
-        target_date = (now_mm - timedelta(days=1)).date()
-        label = f"Yesterday ({target_date})"
-    else:
-        target_date = now_mm.date()
-        label = f"Today ({target_date})"
-
-    start_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=MM_TZ)
-    end_dt = start_dt + timedelta(days=1)
-    return start_dt.isoformat(), end_dt.isoformat(), label
-
-
-def parse_date_range_from_text(text: str):
-    text_lower = text.lower()
-    if "မနေ့" in text_lower or "yesterday" in text_lower:
-        return get_date_bounds("yesterday")
-    if "ဒီနေ့" in text_lower or "today" in text_lower or "ယနေ့" in text_lower:
-        return get_date_bounds("today")
-
-    match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text_lower)
-    if match:
-        try:
-            target_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
-            start_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=MM_TZ)
-            end_dt = start_dt + timedelta(days=1)
-            return start_dt.isoformat(), end_dt.isoformat(), f"{target_date}"
-        except ValueError:
-            pass
-
-    return None, None, None
-
-
-def query_specific_group_logs(
-    user_message: str,
-    router_group: str = None,
-    router_period: str = "recent",
-    recent_ctx: str = "",
-) -> str:
-    """Keyword filter မသုံးဘဲ Group logs များကို တိုက်ရိုက်ဖတ်ပြီး မေးသည့်အချက်ကိုသာ လူတစ်ယောက်လို သဘာဝကျကျ ဖြေပေးသည်။"""
-    cleanup_old_raw_logs()
-
-    thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
-    query = supabase.table("raw_logs").select("*").gte("created_at", thirty_days_ago_iso).order("id", desc=True)
-
-    date_label = None
-    if router_period in ["today", "yesterday"]:
-        start_iso, end_iso, date_label = get_date_bounds(router_period)
-        query = query.gte("created_at", start_iso).lt("created_at", end_iso)
-    else:
-        s_iso, e_iso, d_lbl = parse_date_range_from_text(f"{recent_ctx}\n{user_message}")
-        if s_iso and e_iso:
-            start_iso, end_iso, date_label = s_iso, e_iso, d_lbl
-            query = query.gte("created_at", start_iso).lt("created_at", end_iso)
-
-    logs_res = query.limit(300).execute()
-    all_logs = list(reversed(logs_res.data or []))
-
-    if not all_logs:
-        scope_d = f" ({date_label})" if date_label else ""
-        return f"မောင်ရေ — သက်ဆိုင်ရာ ကာလ{scope_d} အတွင်း Group မှတ်တမ်းတွေ မရှိသေးဘူးနော်"
-
-    matched_group = router_group
-    if not matched_group:
-        combined_q = f"{recent_ctx}\n{user_message}".lower()
-        available_groups = list({l.get("group_name") for l in all_logs if l.get("group_name")})
-        best_score = 0
-        for g_name in available_groups:
-            g_lower = g_name.lower()
-            score = 100 if g_lower in combined_q else 0
-            for word in re.findall(r"[a-z0-9\u1000-\u109F]+", g_lower):
-                if len(word) >= 2 and word in combined_q:
-                    score += len(word) * 2
-            if score > best_score:
-                best_score = score
-                matched_group = g_name
-
-    selected_logs = [l for l in all_logs if l.get("group_name") == matched_group] if matched_group else all_logs
-
-    if not selected_logs:
-        return f"မောင်ရေ — {matched_group or 'သက်ဆိုင်ရာ Group'} ထဲမှာ မှတ်တမ်း မရှိသေးဘူးနော်"
-
-    raw_text = "\n".join(
-        [
-            f"[{_format_mm_timestamp(l.get('created_at'))} | {l.get('group_name', '')} | {l.get('sender_name', 'Unknown')}]: {l.get('content_summary', '')}"
-            for l in selected_logs[-200:]
-        ]
-    )
-
-    now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
-
-    prompt = f"""
-    လက်ရှိအချိန်: {now_str}
-
-    အောက်ပါတို့မှာ Telegram Group ထဲမှ စကားပြောဆိုမှု မှတ်တမ်းများ ဖြစ်သည်။
-    အရှေ့နောက် စကားပြောဆိုမှု (Recent Context) နှင့် လက်ရှိ မေးခွန်းကို နားလည်ပြီး အသုံးပြုသူ မေးထားသည့်
-    အချက် (သို့မဟုတ် သက်ဆိုင်ရာ လူပြောထားသည့် အကြောင်းအရာ) တစ်ခုတည်းကိုသာ Focus ထား၍ ပြန်ပြောပြပေးပါ။
-
-    ဖြေဆိုရမည့် ပုံစံစည်းမျဉ်းများ:
-    1. အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ။
-    2. စက်ရုပ်လို တစ်ကြောင်းချင်းစီ၏ အချိန် (Timestamp) တွေ ထည့်ရေးစရာ မလိုပါ (အသုံးပြုသူက ဘယ်အချိန်လဲဟု မေးမှသာ အချိန်ကို ထည့်ပြောပါ)။
-    3. လူတစ်ယောက်က လုပ်ဖော်ကိုင်ဖက်ကို ရင်းနှီးဖော်ရွေစွာ ပြန်ရှင်းပြနေသလို သဘာဝကျကျ၊ ချောချောမွေ့မွေ့နှင့် လိုရင်းတိုရှင်း မြန်မာဘာသာဖြင့် ပြောပြပါ။
-    4. အရှေ့မှာ ပြောခဲ့သည့် လူ/အကြောင်းအရာကို ဆက်မေးခြင်း (ဥပမာ - "သူပြောတဲ့ key points အကျဉ်းချုပ်ပေးပါ") ဖြစ်ပါက ထိုသူ၏ ပြောစကားများထဲမှ အဓိက Key Points များကိုသာ Bullet point များဖြင့် ရှင်းရှင်းလင်းလင်း ထုတ်ပေးပါ။
-    5. မေးထားသည့် အချက်/လူနှင့် မသက်ဆိုင်သော အခြားလူများ၏ စကားများကို လုံးဝ ထည့်မပြောပါနှင့်။ မှတ်တမ်းထဲတွင် မပါဝင်ပါက မတွေ့ရှိကြောင်း ရိုးသားစွာ ဖြေပါ။
-
-    Recent Context:
-    {recent_ctx or "None"}
-
-    လက်ရှိ မေးခွန်း: {user_message}
-
-    Group မှတ်တမ်းများ:
-    {raw_text}
-    """
-
-    return call_ai_with_3tier_fallback(prompt, use_google_search=False)
-
-
-def get_group_report(user_query: str = "", exact_group_name: str = None, day_mode: str = None) -> str:
-    cleanup_old_raw_logs()
-
-    if day_mode in ["today", "yesterday"]:
-        start_iso, end_iso, date_label = get_date_bounds(day_mode)
-    else:
-        start_iso, end_iso, date_label = parse_date_range_from_text(user_query)
-
-    thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
-    query = supabase.table("raw_logs").select("*").gte("created_at", thirty_days_ago_iso).order("id")
-
-    if start_iso and end_iso:
-        query = query.gte("created_at", start_iso).lt("created_at", end_iso)
-    elif not exact_group_name:
-        query = query.eq("is_read", False)
-
-    logs_res = query.execute()
-    logs = logs_res.data or []
-
-    matched_group_name = exact_group_name
-    if exact_group_name:
-        logs = [l for l in logs if l.get("group_name") == exact_group_name]
-    elif logs:
-        all_groups = list({l.get("group_name") for l in logs if l.get("group_name")})
-        q_lower = user_query.lower()
-        for g_name in all_groups:
-            g_words = [w for w in g_name.lower().split() if len(w) >= 3]
-            if g_name.lower() in q_lower or any(w in q_lower for w in g_words):
-                matched_group_name = g_name
-                logs = [l for l in logs if l.get("group_name") == g_name]
-                break
-
-    if not logs:
-        scope_desc = f" [{matched_group_name}]" if matched_group_name else ""
-        if date_label:
-            return f"မောင်ရေ — {date_label}{scope_desc} အတွက် မှတ်တမ်း မရှိသေးဘူးနော်"
-        return f"မောင်ရေ — ဖတ်ရမယ့် မက်ဆေ့ခ်ျအသစ် မရှိသေးဘူး{scope_desc} နော်"
-
-    raw_text = "\n".join(
-        [f"[{l['group_name']} | {l['sender_name']} | {str(l.get('created_at', ''))[:16]}]: {l['content_summary']}" for l in logs]
-    )
-
-    header_info = f"Group: {matched_group_name or 'All Groups'} | Period: {date_label or 'Unread'}"
-
-    prompt = f"""
-    အောက်ပါတို့မှာ Telegram Group များမှ ရရှိထားသော မက်ဆေ့ခ်ျများနှင့် ပုံ/ဖိုင် အနှစ်ချုပ်များ ဖြစ်သည်။
-    ({header_info})
-    နေ့စဉ် တွေ့နေကျ ရိုးရိုးနှုတ်ဆက်စကားများ၊ အရေးမပါသော စကားပြောဆိုမှုများကို လုံးဝ ဖယ်ထုတ်ပါ။
-    အောက်ပါ အချက်များကိုသာ ဦးစားပေး၍ အနှစ်ချုပ် Report တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ထုတ်ပေးပါ:
-    1. ပုံမှန်မဟုတ်သော ပြဿနာများ (Issues / Blockers)
-    2. ဆုံးဖြတ်ချက် အသစ်များနှင့် ညွှန်ကြားချက်များ
-    3. အရေးကြီးသော လုပ်ငန်းတာဝန်များ (Action Items)
-
-    ဒေတာများ:
-    {raw_text}
-    """
-
-    report_text = call_ai_with_3tier_fallback(prompt, use_google_search=False)
-
-    supabase.table("daily_reports").insert({"report_content": f"[{header_info}]\n{report_text}"}).execute()
-
-    if not date_label and not exact_group_name:
-        for l in logs:
-            supabase.table("raw_logs").update({"is_read": True}).eq("id", l["id"]).execute()
-
-    return f"{header_info}\n\n{report_text}"
-
-
-# --- Dedicated Bucket Handlers ---
-def handle_task_and_group(user_id: int, user_message: str, route: dict, recent_ctx: str = "") -> str:
-    """Task/Reminder နှင့် Telegram Group မှတ်တမ်းများကို သီးသန့် ကိုင်တွယ်သည်။"""
-    sub_type = (route.get("sub_type") or "group_query").lower()
+# --- Dedicated 5-Intent Handlers (TASK / GROUP / ADVICE / GENERAL / WEB_SEARCH) ---
+def handle_group_intent(user_id: int, user_message: str, route: dict, recent_ctx: str = "") -> str:
+    """GROUP intent (summary / query) ကို ကိုင်တွယ်သည်။"""
     target_group = route.get("group_name")
     period = route.get("period", "recent")
+    mode = route.get("group_mode", "query")
 
-    if sub_type == "task":
-        return handle_task_intent(user_message, route)
-
-    if sub_type == "group_summary":
+    if mode == "summary":
         day_m = period if period in ["today", "yesterday"] else None
         return get_group_report(user_message, target_group, day_m)
 
@@ -1518,13 +1466,12 @@ def handle_task_and_group(user_id: int, user_message: str, route: dict, recent_c
     return ans
 
 
-def handle_advice_and_general(user_id: int, user_message: str, route: dict) -> str:
-    """Advice နှင့် General Task/Chat ကို သီးသန့် ကိုင်တွယ်သည်။"""
-    sub_type = (route.get("sub_type") or "general").lower()
+def handle_advice_or_general_intent(user_id: int, user_message: str, intent_mode: str = "GENERAL") -> str:
+    """ADVICE နှင့် GENERAL intent နှစ်မျိုးကို ကိုင်တွယ်သည်။"""
     cal_info = get_myanmar_calendar_context()
     memory_context = recall_relevant_history(user_id, user_message, recent_limit=8, search_limit=10)
 
-    if sub_type == "advice":
+    if intent_mode == "ADVICE":
         prompt = (
             f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
             f"အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ။\n"
@@ -1549,12 +1496,7 @@ def handle_advice_and_general(user_id: int, user_message: str, route: dict) -> s
     return call_ai_with_3tier_fallback(prompt, None, None, False)
 
 
-def handle_web_search(user_id: int, user_message: str) -> str:
-    """Web Search အတွက် သီးသန့် ရှာဖွေဖြေကြားသည်။"""
-    return answer_with_universal_search(user_id, user_message)
-
-
-# --- 3. Quick Menu & Command Handlers ---
+# --- Quick Menu & Command Handlers ---
 def build_main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
@@ -1622,11 +1564,11 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not arg:
             await message.reply_text("မောင်ရေ — /addtask <task description> လို့ ရေးပေးနော်")
             return
-        parsed = smart_classify_and_parse_task(arg)
-        clean_title = parsed.get("title") or _clean_task_title_fallback(arg)
+        parsed = smart_route_and_parse(arg, [])
+        clean_title = parsed.get("clean_title") or _clean_task_title_fallback(arg)
         remind_dt = parsed.get("remind_dt")
         reason = parsed.get("reason")
-        repeat_mode = parsed.get("repeat", "once")
+        repeat_mode = parsed.get("repeat_type", "once")
         add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
         if remind_dt:
             await message.reply_text(f"မောင်ရေ — \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')}")
@@ -1710,7 +1652,7 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
     await send_long_message(query.message, reply_text)
 
 
-# --- 4. General Telegram Message Handler (Smart Task Intelligence + Dedicated Buckets + Self-Improve + Calendar) ---
+# --- General Telegram Message Handler (Single Smart 5-Intent Intelligence) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
@@ -1784,43 +1726,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             recent_ctx = await asyncio.to_thread(get_recent_history_for_router, message.from_user.id, 6)
-            smart_task = await asyncio.to_thread(smart_classify_and_parse_task, user_message, recent_ctx)
-
-            if smart_task.get("is_task"):
-                forced_route = {
-                    "bucket": "TASK_GROUP",
-                    "sub_type": "task",
-                    "task_action": smart_task.get("action", "add"),
-                    "task_title": smart_task.get("title", user_message.strip()),
-                    "task_id": None,
-                    "remind_dt": smart_task.get("remind_dt"),
-                    "repeat": smart_task.get("repeat", "once"),
-                    "reason": smart_task.get("reason"),
-                }
-                reply_text = await asyncio.to_thread(handle_task_intent, user_message, forced_route)
-                save_chat_message(message.from_user.id, "assistant", reply_text)
-                asyncio.create_task(asyncio.to_thread(evolve_user_profile, message.from_user.id, user_message, reply_text))
-                await send_long_message(message, reply_text)
-                return
-
             available_groups = await asyncio.to_thread(get_available_groups)
             user_pref_ctx = await asyncio.to_thread(get_user_profile, message.from_user.id)
+
             route = await asyncio.to_thread(
-                classify_dedicated_bucket, user_message, available_groups, recent_ctx, user_pref_ctx
+                smart_route_and_parse, user_message, available_groups, recent_ctx, user_pref_ctx
             )
+            intent = route.get("intent", "GENERAL")
+            print(f"[Smart Route] intent={intent}, mode={route.get('group_mode')}, action={route.get('task_action')}, group={route.get('group_name')}")
 
-            bucket = route.get("bucket", "ADVICE_GENERAL")
-            print(f"[Dedicated Route] bucket={bucket}, sub_type={route.get('sub_type')}, group={route.get('group_name')}, period={route.get('period')}")
-
-            if bucket == "WEB_SEARCH":
-                reply_text = await asyncio.to_thread(handle_web_search, message.from_user.id, user_message)
-            elif bucket == "TASK_GROUP":
+            if intent == "TASK":
+                reply_text = await asyncio.to_thread(handle_task_intent, user_message, route)
+            elif intent == "GROUP":
+                # အကယ်၍ ရှေ့မှာ group report/query ကို task အဖြစ် မှားမှတ်ထားမိတာ ရှိရင် ပြန်ဖျက်ပေးမယ်
+                if any(w in user_message for w in ["task မဟုတ်ဘူး", "မဟုတ်ဘူးလေ"]):
+                    await asyncio.to_thread(delete_latest_pending_task)
                 reply_text = await asyncio.to_thread(
-                    handle_task_and_group, message.from_user.id, user_message, route, recent_ctx
+                    handle_group_intent, message.from_user.id, user_message, route, recent_ctx
+                )
+            elif intent == "WEB_SEARCH":
+                reply_text = await asyncio.to_thread(answer_with_universal_search, message.from_user.id, user_message)
+            elif intent == "ADVICE":
+                reply_text = await asyncio.to_thread(
+                    handle_advice_or_general_intent, message.from_user.id, user_message, "ADVICE"
                 )
             else:
                 reply_text = await asyncio.to_thread(
-                    handle_advice_and_general, message.from_user.id, user_message, route
+                    handle_advice_or_general_intent, message.from_user.id, user_message, "GENERAL"
                 )
 
             save_chat_message(message.from_user.id, "assistant", reply_text)
