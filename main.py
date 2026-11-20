@@ -456,17 +456,20 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
 def classify_user_intent(user_message: str, available_groups: list, recent_ctx: str = "") -> dict:
     groups_str = ", ".join(available_groups[:20]) if available_groups else "None"
     router_prompt = f"""
-Classify the user's latest message using Recent Context carefully.
-Rules for follow-up messages:
-- If Recent Context was discussing a specific group or a specific person's messages in a group, and the latest message is a follow-up referring to them ("သူပြောတဲ့...", "အဲ့ဒါကို...", "key points...", "အကျဉ်းချုပ်ပေးပါ" about what they said), KEEP that same `group_name` and classify as `GROUP_QUERY` (do NOT reset `group_name` to null or route to `GROUP_SUMMARY`).
+Classify the user's latest message into one of 6 intents.
+Be careful NOT to force `GROUP_QUERY` when the user switches to a completely new outside topic (such as songs/music, entertainment, online trends, weather, news, prices, sports, general facts).
+
+Rules:
+1. If the latest message asks about outside/general/live topics (songs, music, movies, online/internet trends, news, weather, prices, sports, general knowledge) — EVEN IF Recent Context was about a Telegram group — classify as `GENERAL_SEARCH` and set `group_name` to `null`.
+2. Only use `GROUP_QUERY` when the user is asking about internal group messages/operations/people OR is clearly following up on the SAME group/person/topic just discussed in Recent Context (e.g., "သူပြောတဲ့...", "အဲ့ဒါကို key points...", "အဲ့ထဲမှာ...").
 
 Intents:
-1. GROUP_QUERY: Asking about specific facts, updates, details, or summarizing/key-pointing what a specific person or group said in Telegram groups (including follow-ups about them).
-2. GROUP_SUMMARY: Requesting a general unread/today/yesterday report across groups when not following up on a specific person's already-discussed messages.
-3. TASK: Managing personal to-do tasks (adding, listing, marking done).
-4. ADVICE: Asking for advice, recommendations, or how to solve a problem/decision.
+1. GROUP_QUERY: Specific question or follow-up about messages, people, or operations inside Telegram groups.
+2. GROUP_SUMMARY: Summary/report of unread, today, or yesterday messages across Telegram groups.
+3. TASK: Personal to-do tasks (add, list, mark done).
+4. ADVICE: Advice, recommendations, or problem-solving options.
 5. GENERAL_TASK: Drafting messages, translating, coding/tech help, explanations, or private chat tasks.
-6. GENERAL_SEARCH: Asking for external/live information outside Telegram groups (weather, news, prices, sports, calendar).
+6. GENERAL_SEARCH: External/live info, songs/music, online/internet topics, weather, news, prices, sports, calendar.
 
 Available Groups: [{groups_str}]
 Recent Context:
@@ -502,7 +505,7 @@ Return ONLY JSON:
     except Exception as e:
         print(f"Groq router fallback: {e}")
 
-    return {"intent": "GROUP_QUERY", "group_name": None, "period": "recent"}
+    return {"intent": "GENERAL_SEARCH", "group_name": None, "period": "recent"}
 
 
 # --- Keyword-Free Parallel Web Search Helpers (Tavily + Google News RSS) ---
@@ -675,23 +678,46 @@ def get_formatted_tasks() -> str:
 
 
 def handle_task_intent(user_message: str, route: dict) -> str:
-    action = (route.get("task_action") or "").lower()
+    action = (route.get("task_action") or "").lower().strip()
     task_title = (route.get("task_title") or "").strip()
     task_id = route.get("task_id")
 
     if action == "list":
         return get_formatted_tasks()
 
-    if action == "done" and task_id:
+    if action == "done":
         try:
-            supabase.table("tasks").update({"status": "done"}).eq("id", int(task_id)).execute()
-            return f"Task ID {task_id} ကို ပြီးစီးကြောင်း မှတ်သားလိုက်ပါပြီ။"
+            if task_id:
+                supabase.table("tasks").update({"status": "done"}).eq("id", int(task_id)).execute()
+                return f"ဟုတ်ကဲ့ရှင်၊ Task ID {task_id} ကို ပြီးစီးကြောင်း မှတ်သားလိုက်ပါပြီ။"
+
+            # ID မပါဘဲ task_title သို့မဟုတ် message ထဲက စကားလုံးနဲ့ ကိုက်ညီတဲ့ pending task ကို ရှာပြီး done လုပ်ခြင်း
+            search_key = (task_title or user_message).strip()
+            pending_res = (
+                supabase.table("tasks")
+                .select("*")
+                .eq("status", "pending")
+                .order("id", desc=True)
+                .limit(20)
+                .execute()
+            )
+            pending_tasks = pending_res.data or []
+            matched = next(
+                (t for t in pending_tasks if search_key.lower() in str(t.get("title", "")).lower()),
+                None
+            )
+            if matched:
+                supabase.table("tasks").update({"status": "done"}).eq("id", matched["id"]).execute()
+                return f"ဟုတ်ကဲ့ရှင်၊ \"{matched['title']}\" (ID {matched['id']}) ကို ပြီးစီးကြောင်း မှတ်သားလိုက်ပါပြီ။"
+
+            return "ပြီးစီးကြောင်း မှတ်သားရမယ့် Pending Task ကို ရှာမတွေ့ပါရှင်။ `/tasks` နဲ့ ID ကို ကြည့်ပြီး ထပ်ပြောပေးပါနော်။"
         except Exception as e:
-            return f"Task update error: {e}"
+            print(f"Task update error: {e}")
+            return "ဟုတ်ကဲ့ရှင်၊ Task အခြေအနေ ပြောင်းလဲရာတွင် အခက်အခဲ ရှိနေပါသည်။"
 
     clean_title = task_title or user_message.strip()
     add_task(clean_title)
-    return f"Task added: {clean_title}"
+    return f"ဟုတ်ကဲ့ရှင်၊ Task ထည့်သွင်းပြီးပါပြီ — \"{clean_title}\""
 
 
 # --- 2. Group Summary, Report & Keyword-Free Natural Group Q&A Tools ---
