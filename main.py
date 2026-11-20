@@ -390,7 +390,6 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 8
 
 
 # --- Speed-First & Burmese-Safe 3-Tier AI Fallback Helper ---
-# Tier 1: gemini-3.5-flash-lite (1x retry) -> Tier 2: gemini-3.8-flash -> Tier 3A: OpenRouter gemma-4-31b-it:free -> Tier 3B: Groq 70B
 def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, use_google_search=False):
     contents = (
         [types.Part.from_bytes(data=bytes(image_bytes), mime_type=mime_type or 'image/jpeg'), prompt_text]
@@ -513,6 +512,106 @@ Return ONLY JSON:
         print(f"Dedicated router error: {e}")
 
     return {"bucket": "ADVICE_GENERAL", "sub_type": "general", "group_name": None, "period": "recent"}
+
+
+# --- Supabase Pending Follow-ups Queue ("ရရင် ပြန်ပြောပေးမယ်") ---
+def queue_pending_followup(user_id: int, followup_type: str, question: str, target_group: str = None, delay_seconds: int = 120):
+    try:
+        now_mm = datetime.now(MM_TZ)
+        retry_dt = now_mm + timedelta(seconds=delay_seconds)
+        supabase.table("pending_followups").insert({
+            "user_id": user_id,
+            "followup_type": followup_type,  # "group_query" | "web_search"
+            "question": question,
+            "target_group": target_group,
+            "status": "pending",
+            "attempts": 0,
+            "retry_at": retry_dt.isoformat(),
+            "created_at": now_mm.isoformat(),
+        }).execute()
+    except Exception as e:
+        print(f"Error queuing pending_followup: {e}")
+
+
+async def check_pending_followups_job(context: ContextTypes.DEFAULT_TYPE):
+    """Supabase pending_followups ထဲမှ အချက်အလက်ရလာပြီဖြစ်သော Group / Web Search များကို အလိုအလျောက် ပြန်ပို့ပေးသည်။"""
+    try:
+        res = (
+            supabase.table("pending_followups")
+            .select("*")
+            .eq("status", "pending")
+            .order("id")
+            .limit(30)
+            .execute()
+        )
+        rows = res.data or []
+        if not rows:
+            return
+
+        now_mm = datetime.now(MM_TZ)
+        groups = await asyncio.to_thread(get_available_groups)
+
+        for item in rows:
+            item_id = item.get("id")
+            user_id = item.get("user_id") or ADMIN_USER_ID
+            f_type = item.get("followup_type")
+            question = item.get("question", "")
+            target_group = item.get("target_group")
+            attempts = int(item.get("attempts") or 0)
+
+            try:
+                created_dt = datetime.fromisoformat(str(item.get("created_at")).replace("Z", "+00:00")).astimezone(MM_TZ)
+                if (now_mm - created_dt).total_seconds() > 86400:
+                    supabase.table("pending_followups").update({"status": "expired"}).eq("id", item_id).execute()
+                    continue
+            except Exception:
+                pass
+
+            if f_type == "group_query":
+                has_group_data = (
+                    any(target_group.lower() in g.lower() for g in groups)
+                    if target_group else len(groups) > 0
+                )
+                if has_group_data:
+                    ans = await asyncio.to_thread(
+                        query_specific_group_logs, question, target_group, "recent", ""
+                    )
+                    if ans and "မရှိသေးပါ" not in ans:
+                        msg = f"ဟိုင်းရှင် — ခုဏက စောင့်ခိုင်းထားတဲ့ Group အချက်အလက် ရလာပါပြီနော်:\n\n{ans}"
+                        await context.bot.send_message(chat_id=user_id, text=msg[:3500])
+                        save_chat_message(user_id, "assistant", msg)
+                        supabase.table("pending_followups").update({"status": "completed"}).eq("id", item_id).execute()
+
+            elif f_type == "web_search":
+                try:
+                    retry_dt = datetime.fromisoformat(str(item.get("retry_at")).replace("Z", "+00:00")).astimezone(MM_TZ)
+                    if now_mm < retry_dt:
+                        continue
+                except Exception:
+                    pass
+
+                if attempts >= 6:
+                    supabase.table("pending_followups").update({"status": "expired"}).eq("id", item_id).execute()
+                    continue
+
+                ans = await asyncio.to_thread(answer_with_universal_search, user_id, question)
+                if ans and "ခဏအလုပ်များနေပါသည်" not in ans and "429" not in ans:
+                    msg = f"ဟိုင်းရှင် — ခုဏက ဆွဲလို့မရသေးတဲ့ အချက်အလက် ရလာလို့ ပြန်ပြောပေးတာပါနော်:\n\n{ans}"
+                    await context.bot.send_message(chat_id=user_id, text=msg[:3500])
+                    save_chat_message(user_id, "assistant", msg)
+                    supabase.table("pending_followups").update({
+                        "status": "completed",
+                        "attempts": attempts + 1
+                    }).eq("id", item_id).execute()
+                else:
+                    next_retry = (now_mm + timedelta(seconds=180)).isoformat()
+                    supabase.table("pending_followups").update({
+                        "attempts": attempts + 1,
+                        "retry_at": next_retry
+                    }).eq("id", item_id).execute()
+
+    except Exception as e:
+        print(f"Error in check_pending_followups_job: {e}")
 
 
 # --- Focused Web Search Helpers (Tavily + Google News RSS) ---
@@ -651,10 +750,14 @@ def answer_with_universal_search(user_id: int, user_message: str) -> str:
         f"ရှာဖွေမေးမြန်းချက်: {user_message}"
     )
 
-    return call_ai_with_3tier_fallback(full_prompt, use_google_search=True)
+    reply = call_ai_with_3tier_fallback(full_prompt, use_google_search=True)
+    if "ခဏအလုပ်များနေပါသည်" in reply:
+        queue_pending_followup(user_id, "web_search", user_message, target_group=None, delay_seconds=120)
+        return "ဟိုင်းရှင် — ခုဏက ဆာဗာ ခဏအလုပ်များနေလို့ အဖြေမထွက်သေးဘူးရှင်။ ပြန်ရတာနဲ့ ချက်ချင်း ပြန်ပြောပေးပါ့မယ်နော်။"
+    return reply
 
 
-# --- Scheduled Jobs (9:00 AM News, Due Reminders, 6:00 PM Pending Digest) ---
+# --- Scheduled Jobs (9:00 AM News, Due Reminders, 6:00 PM Pending Digest, 30s Follow-up Watcher) ---
 async def scheduled_morning_news_job(context: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_USER_ID:
         return
@@ -1042,7 +1145,12 @@ def handle_task_and_group(user_id: int, user_message: str, route: dict, recent_c
         day_m = period if period in ["today", "yesterday"] else None
         return get_group_report(user_message, target_group, day_m)
 
-    return query_specific_group_logs(user_message, target_group, period, recent_ctx)
+    ans = query_specific_group_logs(user_message, target_group, period, recent_ctx)
+    if ans and "မရှိသေးပါ" in ans:
+        queue_pending_followup(user_id, "group_query", user_message, target_group=target_group, delay_seconds=30)
+        g_label = f"\"{target_group}\"" if target_group else "သက်ဆိုင်ရာ Group"
+        return f"ဟိုင်းရှင် — {g_label} ရဲ့ မက်ဆေ့ခ်ျအချက်အလက်တွေ အခုထိ မရောက်သေးဘူးရှင်။ ရောက်လာတာနဲ့ ချက်ချင်း ပြန်ပြောပေးပါ့မယ်နော်။"
+    return ans
 
 
 def handle_advice_and_general(user_id: int, user_message: str, route: dict) -> str:
@@ -1340,7 +1448,7 @@ async def main_async():
     # Normal Messages
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-    # Scheduled Jobs (9:00 AM News, 1-min Due Reminder Watcher, 6:00 PM Pending Digest)
+    # Scheduled Jobs (9:00 AM News, 1-min Due Reminder Watcher, 6:00 PM Pending Digest, 30s Follow-up Watcher)
     if application.job_queue:
         morning_9_mmt = dt_time(hour=9, minute=0, second=0, tzinfo=MM_TZ)
         application.job_queue.run_daily(
@@ -1360,6 +1468,12 @@ async def main_async():
             time=evening_6_mmt,
             name="daily_6pm_pending_task_digest"
         )
+        application.job_queue.run_repeating(
+            check_pending_followups_job,
+            interval=30,
+            first=20,
+            name="pending_followups_watcher"
+        )
 
     await application.initialize()
 
@@ -1375,7 +1489,7 @@ async def main_async():
         BotCommand("addtask", "Add a new task"),
     ])
 
-    print("🤖 Dedicated-Bucket AI Agent with Quick & Friendly Reminders (Maya) started...")
+    print("🤖 Dedicated-Bucket AI Agent with Supabase Follow-ups & Reminders (Maya) started...")
 
     await application.start()
     await application.updater.start_polling()
