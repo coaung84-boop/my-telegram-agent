@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import logging
 import threading
 import asyncio
@@ -43,10 +44,10 @@ MM_TZ = timezone(timedelta(hours=6, minutes=30))
 RETENTION_DAYS = 30
 
 STRICT_MYANMAR_SYSTEM = (
-    "သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။ "
+    "သင်သည် 'မာယာ' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။ "
     "အမြဲတမ်း မြန်မာဘာသာ (Unicode) ဖြင့်သာ သဘာဝကျကျ၊ ရှင်းလင်းပြတ်သားစွာ ဖြေဆိုပါ။ "
-    "စာလုံးပေါင်းနှင့် စာလုံးအကူးအပြောင်းများ (ဥပမာ - နိုင်ငံခြားစာလုံး/သင်္ကေတများ မလိုအပ်ဘဲ ရောနှောခြင်း) ကို လုံးဝ ရှောင်ကြဉ်ပါ။ "
-    "အသုံးပြုသူ၏ Profile၊ အတိတ်မှတ်တမ်းနှင့် အလေ့အထများကို နားလည်ပြီး အလိုက်သိသိနှင့် တိုတိုရှင်းရှင်း ဖြေပါ။ "
+    "မလိုအပ်ဘဲ နိုင်ငံခြားစာလုံး/သင်္ကေတများ ရောနှောခြင်းကို လုံးဝ ရှောင်ကြဉ်ပါ။ "
+    "အသုံးပြုသူ၏ Profile၊ အတိတ်မှတ်တမ်းနှင့် အလေ့အထများကို သေချာမှတ်မိပြီး အလိုက်သိသိနှင့် တိုတိုရှင်းရှင်း ဖြေပါ။ "
     "မေးခွန်းနှင့် မသက်ဆိုင်သော Search အချက်အလက်များကို လုံးဝ မသုံးပါနှင့်။ မသေချာပါက မသိကြောင်း ရိုးသားစွာ ဖြေပါ။"
 )
 
@@ -90,7 +91,7 @@ def cleanup_old_raw_logs():
         print(f"Error cleaning up old raw_logs: {e}")
 
 
-# --- Timestamp & Chat Memory Helpers ---
+# --- Timestamp, Chat Memory & Self-Improving User Profile Helpers ---
 def _format_mm_timestamp(ts_str: str) -> str:
     if not ts_str:
         return ""
@@ -113,7 +114,6 @@ def save_chat_message(user_id: int, role: str, content: str):
 
 
 def get_user_profile(user_id: int) -> str:
-    """အသုံးပြုသူအကြောင်း တဖြည်းဖြည်း လေ့လာမှတ်သားထားသော Profile ကို ပြန်ယူသည်။"""
     try:
         res = (
             supabase.table("user_profile")
@@ -131,7 +131,6 @@ def get_user_profile(user_id: int) -> str:
 
 
 def evolve_user_profile(user_id: int, user_msg: str, assistant_reply: str):
-    """ပြောခဲ့/မေးခဲ့သမျှထဲမှ အသုံးပြုသူ၏ အကြောင်းအရာ၊ ကြိုက်နှစ်သက်မှုနှင့် အလုပ်/လူနေမှုပုံစံကို တဖြည်းဖြည်း Update လုပ်သည်။"""
     try:
         current_profile = get_user_profile(user_id)
         update_prompt = f"""
@@ -204,7 +203,6 @@ def get_recent_history_for_router(user_id: int, limit: int = 5) -> str:
 
 
 def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 8, search_limit: int = 10) -> str:
-    """User Profile + Past Memory Matches + Recent Conversation ကို စုစည်းထုတ်ပေးသည်။"""
     sections = []
 
     profile_text = get_user_profile(user_id)
@@ -267,77 +265,74 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 8
     return "\n\n".join(sections)
 
 
-# --- 3-Tier AI Fallback Helper (Gemini 3.5 Flash-Lite -> Groq -> OpenRouter) ---
+# --- Speed-First & Burmese-Safe 3-Tier AI Fallback Helper ---
+# Tier 1: gemini-3.5-flash-lite (1x retry) -> Tier 2: gemini-3.8-flash -> Tier 3: OpenRouter google/gemma-4-31b-it:free
 def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, use_google_search=False):
-    # 1st Attempt: Gemini 3.5 Flash-Lite
+    contents = (
+        [types.Part.from_bytes(data=bytes(image_bytes), mime_type=mime_type or 'image/jpeg'), prompt_text]
+        if image_bytes else prompt_text
+    )
+    tools = [types.Tool(google_search=types.GoogleSearch())] if use_google_search else None
+    config = types.GenerateContentConfig(
+        system_instruction=STRICT_MYANMAR_SYSTEM,
+        tools=tools,
+    )
+
+    # Tier 1: Gemini 3.5 Flash-Lite (Fast + 1 retry)
+    for attempt in range(2):
+        try:
+            response = gemini_client.models.generate_content(
+                model="gemini-3.5-flash-lite",
+                contents=contents,
+                config=config
+            )
+            if response and response.text and response.text.strip():
+                return response.text.strip()
+        except Exception as e:
+            print(f"1. Gemini 3.5 Flash-Lite (attempt {attempt + 1}) Error: {e}")
+            if attempt == 0:
+                time.sleep(1.2)
+
+    # Tier 2: Gemini 3.8 Flash
     try:
-        if image_bytes:
-            contents = [
-                types.Part.from_bytes(data=bytes(image_bytes), mime_type=mime_type or 'image/jpeg'),
-                prompt_text
-            ]
-        else:
-            contents = prompt_text
-
-        tools = [types.Tool(google_search=types.GoogleSearch())] if use_google_search else None
-        config = types.GenerateContentConfig(
-            system_instruction=STRICT_MYANMAR_SYSTEM,
-            tools=tools,
-        )
-
         response = gemini_client.models.generate_content(
-            model="gemini-3.5-flash-lite",
+            model="gemini-3.8-flash",
             contents=contents,
             config=config
         )
         if response and response.text and response.text.strip():
             return response.text.strip()
     except Exception as e:
-        print(f"1. Gemini Error: {e}")
+        print(f"2. Gemini 3.8 Flash Error: {e}")
 
-    # 2nd Attempt: Groq (Llama 3.1 8B Instant)
-    try:
-        completion = groq_client.with_options(timeout=8.0).chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": STRICT_MYANMAR_SYSTEM},
-                {"role": "user", "content": prompt_text}
-            ],
-            temperature=0.1,
-        )
-        if completion and completion.choices and completion.choices[0].message.content:
-            txt = completion.choices[0].message.content.strip()
-            if txt:
-                return txt
-    except Exception as e:
-        print(f"2. Groq Error: {e}")
+    # Tier 3: OpenRouter Specific Burmese-Capable Model (google/gemma-4-31b-it:free)
+    if OPENROUTER_API_KEY:
+        try:
+            headers = {
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+            }
+            data = {
+                "model": "google/gemma-4-31b-it:free",
+                "messages": [
+                    {"role": "system", "content": STRICT_MYANMAR_SYSTEM},
+                    {"role": "user", "content": prompt_text}
+                ],
+                "temperature": 0.2,
+            }
+            response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=9)
+            res_json = response.json()
+            if "choices" in res_json and len(res_json["choices"]) > 0:
+                txt = (res_json["choices"][0]["message"].get("content") or "").strip()
+                if txt:
+                    return txt
+        except Exception as e:
+            print(f"3. OpenRouter (google/gemma-4-31b-it:free) Error: {e}")
 
-    # 3rd Attempt: OpenRouter Auto-Free Router
-    try:
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        data = {
-            "model": "openrouter/free",
-            "messages": [
-                {"role": "system", "content": STRICT_MYANMAR_SYSTEM},
-                {"role": "user", "content": prompt_text}
-            ]
-        }
-        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=8)
-        res_json = response.json()
-        if "choices" in res_json and len(res_json["choices"]) > 0:
-            txt = (res_json["choices"][0]["message"].get("content") or "").strip()
-            if txt:
-                return txt
-    except Exception as e:
-        print(f"3. OpenRouter Error: {e}")
-
-    return "ဟုတ်ကဲ့ရှင်၊ လောလောဆယ် AI ဝန်ဆောင်မှုများ နှေးကွေးနေပါသည်။ ခဏနေမှ ထပ်မံမေးမြန်းကြည့်ပါနော်။"
+    return "ဟုတ်ကဲ့ရှင်၊ လောလောဆယ် AI ဆာဗာ ခဏအလုပ်များနေပါသည်။ စက္ကန့်အနည်းငယ်နေပြီး ပြန်ပို့ပေးပါနော်။"
 
 
-# --- 6-Intent AI Router (Zero-Keyword Smart Routing with Context) ---
+# --- 6-Intent AI Router (Groq Fast JSON Routing with Recent Context) ---
 def classify_user_intent(user_message: str, available_groups: list, recent_ctx: str = "") -> dict:
     groups_str = ", ".join(available_groups[:15]) if available_groups else "None"
     router_prompt = f"""
@@ -359,21 +354,21 @@ Return ONLY JSON:
 {{"intent":"...","group_name":null,"period":"today|yesterday|recent","task_action":null,"task_title":null,"task_id":null}}
 """
     try:
-        completion = groq_client.with_options(timeout=4.0).chat.completions.create(
+        completion = groq_client.with_options(timeout=3.5).chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": "Output only valid JSON."},
                 {"role": "user", "content": router_prompt}
             ],
             temperature=0.0,
-            max_tokens=140,
+            max_tokens=130,
         )
         raw = (completion.choices[0].message.content or "").strip()
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if match:
             return json.loads(match.group(0))
     except Exception as e:
-        print(f"Fast router fallback: {e}")
+        print(f"Groq router fallback: {e}")
 
     return {"intent": "GENERAL_TASK", "group_name": None, "period": "recent"}
 
@@ -391,7 +386,7 @@ def _tavily_worker(search_query: str, max_results: int = 4) -> str:
                 "search_depth": "basic",
                 "topic": "general",
                 "max_results": max_results,
-                "include_answer": True,
+                "include_answer": "advanced",
             },
             timeout=5,
         )
@@ -479,29 +474,29 @@ def get_myanmar_news_summary() -> str:
     return f"📰 Myanmar News Summary ({now_str})\n\n{summary}"
 
 
-# --- Keyword-Free Universal Web Search + Profile/Memory Answer ---
+# --- Google AI Overview Style Web Search + Profile/Memory Answer ---
 def answer_with_universal_search(user_id: int, user_message: str) -> str:
     now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
     memory_context = recall_relevant_history(user_id, user_message, recent_limit=8, search_limit=10)
 
     clean_q = re.sub(r"[?？!]", "", user_message).strip()
-    web_context = fetch_combined_web_context(clean_q, rss_queries=[clean_q], max_results=4)
+    web_context = fetch_combined_web_context(clean_q, rss_queries=[clean_q], max_results=5)
 
     system_prompt = (
         f"သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။\n"
         f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n"
-        f"စည်းမျဉ်းများ:\n"
-        f"1. Learned User Profile၊ Past Memory Matches နှင့် Recent Conversation တို့ကို အခြေခံ၍ အသုံးပြုသူ၏ အကြောင်း၊ အလေ့အထနှင့် အဓိပ္ပာယ်ကို အလိုက်သိသိ နားလည်ပြီး ဖြေကြားပါ။\n"
-        f"2. Web Search ရလဒ်များနှင့် Google Search Tool ကို အသုံးပြု၍ သက်ဆိုင်ရာ အချက်အလက်များကို တိကျစွာ မြန်မာဘာသာဖြင့် ဖြေပါ။\n"
-        f"3. Web Search ရလဒ်ထဲတွင် မေးခွန်းနှင့် မသက်ဆိုင်သော သို့မဟုတ် ဘာသာစကားရောထွေးနေသော အချက်များ ပါလာပါက လုံးဝ မသုံးပါနှင့်။ သေချာမသိပါက မသိကြောင်း ရိုးသားစွာ ဖြေပါ။\n"
-        f"4. မြန်မာစာလုံး သန့်သန့်ရှင်းရှင်းနှင့် တိုတိုရှင်းရှင်း ဖြေပါ။\n"
+        f"Google Search AI Overview ကဲ့သို့ အသုံးပြုသူ ရှာဖွေမေးမြန်းသည့် အကြောင်းအရာကို တိတိကျကျ စုစည်းပြီး အောက်ပါပုံစံအတိုင်း မြန်မာဘာသာဖြင့် ဖြေကြားပါ:\n"
+        f"1. **တိုက်ရိုက် အဖြေချုပ် (Direct Answer):** မေးခွန်း၏ အဓိကအဖြေကို စာကြောင်း ၁–၂ ကြောင်းဖြင့် အရင်ဆုံး ရှင်းရှင်းလင်းလင်း ဖြေပါ။\n"
+        f"2. **အဓိက အချက်အလက်များ (Key Points):** အရေးကြီးသော အချက် (၃–၅ ချက်) ကို Bullet point များဖြင့် တိုတိုရှင်းရှင်း ဖော်ပြပါ။\n"
+        f"3. အသုံးပြုသူ၏ Learned User Profile နှင့် အရှေ့နောက် Conversation History ကို ချိတ်ဆက်ပြီး အလိုက်သိသိ ဖြေပါ။\n"
+        f"4. မေးခွန်းနှင့် မသက်ဆိုင်သော Search ရလဒ်များကို လုံးဝ မသုံးပါနှင့်။ သေချာမသိပါက မသိကြောင်း ရိုးသားစွာ ဖြေပါ။\n"
     )
 
     full_prompt = (
         f"{system_prompt}\n"
         f"{memory_context or '--- Memory ---\nNone'}\n\n"
         f"{web_context or '--- Web Search Results ---\nNone'}\n\n"
-        f"လက်ရှိ မေးခွန်း/စကား: {user_message}"
+        f"ရှာဖွေမေးမြန်းချက်: {user_message}"
     )
 
     return call_ai_with_3tier_fallback(full_prompt, use_google_search=True)
