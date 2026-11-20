@@ -57,6 +57,7 @@ MYANMAR_WEEKDAYS = [
 STRICT_MYANMAR_SYSTEM = (
     "သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။ "
     "အမြဲတမ်း မြန်မာဘာသာ (Unicode) ဖြင့်သာ လူတစ်ယောက်ကဲ့သို့ သဘာဝကျကျ၊ ရင်းနှီးဖော်ရွေစွာ၊ ရှင်းလင်းပြတ်သားစွာ ဖြေဆိုပါ။ "
+    "အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး စကားအဆုံးတွင် 'ပါနော်' ဟု မသုံးဘဲ 'နော်' ဟုသာ ရင်းရင်းနှီးနှီး သုံးပါ။ "
     "မလိုအပ်ဘဲ နိုင်ငံခြားစာလုံး/သင်္ကေတများ ရောနှောခြင်းကို လုံးဝ ရှောင်ကြဉ်ပါ။ "
     "အသုံးပြုသူ၏ Profile၊ နှစ်သက်သည့်ဟန် (Style Preferences)၊ အတိတ်မှတ်တမ်း၊ အလေ့အထနှင့် မြန်မာပြက္ခဒိန်အချက်အလက်များကို "
     "သေချာမှတ်မိပြီး အလိုက်သိသိနှင့် ဖြေပါ။ "
@@ -84,7 +85,7 @@ def run_health_server():
 # --- Safe Long Message Sender ---
 async def send_long_message(message, text: str, chunk_size: int = 3500):
     if not text or not str(text).strip():
-        await message.reply_text("ဟုတ်ကဲ့ရှင်၊ လောလောဆယ် အဖြေပြန်ထုတ်ရာတွင် အခက်အခဲ ရှိနေပါသည်။ နောက်မှ ထပ်မေးကြည့်ပါနော်။")
+        await message.reply_text("မောင်ရေ၊ လောလောဆယ် အဖြေပြန်ထုတ်ရာမှာ ခဏအခက်အခဲ ရှိနေတယ်၊ နောက်မှ ထပ်မေးကြည့်နော်")
         return
 
     clean_text = str(text).strip()
@@ -278,7 +279,7 @@ Assistant: {assistant_reply[:400]}
 
 Return ONLY valid JSON with two concise fields in Burmese (max ~150 words each):
 1. "profile_summary": Key facts, work context, recurring topics, and recent routing corrections (e.g., when user clarifies a query should be web search vs group log). Keep accurate details, drop outdated/contradictory info, and exclude temporary news/weather trivia.
-2. "style_preferences": How the user likes responses formatted/toned (e.g., quick & friendly, concise vs detailed, bullet points) and any explicit feedback.
+2. "style_preferences": How the user likes responses formatted/toned (e.g., calling user "မောင်", ending with "နော်" instead of "ပါနော်", quick & friendly, concise vs detailed, bullet points) and any explicit feedback.
 
 JSON format:
 {{"profile_summary":"...","style_preferences":"..."}}
@@ -500,7 +501,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
     except Exception as e:
         print(f"3B. Groq 70B Error: {e}")
 
-    return "ဟုတ်ကဲ့ရှင်၊ လောလောဆယ် AI ဆာဗာ ခဏအလုပ်များနေပါသည်။ စက္ကန့်အနည်းငယ်နေပြီး ပြန်ပို့ပေးပါနော်။"
+    return "မောင်ရေ၊ လောလောဆယ် ဆာဗာ ခဏအလုပ်များနေတယ်၊ ခဏနေပြီး ထပ်ပို့ကြည့်နော်"
 
 
 # --- Dedicated 3-Bucket Router (WEB_SEARCH / TASK_GROUP / ADVICE_GENERAL + Learned Preferences) ---
@@ -616,7 +617,7 @@ async def check_pending_followups_job(context: ContextTypes.DEFAULT_TYPE):
                         query_specific_group_logs, question, target_group, "recent", ""
                     )
                     if ans and "မရှိသေးပါ" not in ans:
-                        msg = f"ဟိုင်းရှင် — ခုဏက စောင့်ခိုင်းထားတဲ့ Group အချက်အလက် ရလာပါပြီနော်:\n\n{ans}"
+                        msg = f"မောင်ရေ — ခုဏက စောင့်ခိုင်းထားတဲ့ Group အချက်အလက် ရလာပြီနော်\n\n{ans}"
                         await context.bot.send_message(chat_id=user_id, text=msg[:3500])
                         save_chat_message(user_id, "assistant", msg)
                         supabase.table("pending_followups").update({"status": "completed"}).eq("id", item_id).execute()
@@ -634,8 +635,8 @@ async def check_pending_followups_job(context: ContextTypes.DEFAULT_TYPE):
                     continue
 
                 ans = await asyncio.to_thread(answer_with_universal_search, user_id, question)
-                if ans and "ခဏအလုပ်များနေပါသည်" not in ans and "429" not in ans:
-                    msg = f"ဟိုင်းရှင် — ခုဏက ဆွဲလို့မရသေးတဲ့ အချက်အလက် ရလာလို့ ပြန်ပြောပေးတာပါနော်:\n\n{ans}"
+                if ans and "ခဏအလုပ်များနေတယ်" not in ans and "429" not in ans:
+                    msg = f"မောင်ရေ — ခုဏက ဆွဲလို့မရသေးတဲ့ အချက်အလက် ရလာလို့ ပြန်ပြောပေးတာနော်\n\n{ans}"
                     await context.bot.send_message(chat_id=user_id, text=msg[:3500])
                     save_chat_message(user_id, "assistant", msg)
                     supabase.table("pending_followups").update({
@@ -775,6 +776,7 @@ def answer_with_universal_search(user_id: int, user_message: str) -> str:
         f"သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။\n"
         f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n"
         f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
+        f"အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ။\n"
         f"အသုံးပြုသူ၏ ရှာဖွေမေးမြန်းချက်အပေါ်သာ တိုက်ရိုက် Focus ထားပြီး Google AI Overview ကဲ့သို့ "
         f"ရင်းနှီးဖော်ရွေစွာ၊ ရှင်းလင်းပြတ်သားစွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ (Telegram Group မှတ်တမ်းများကို မရောပါနှင့်):\n"
         f"1. **တိုက်ရိုက် အဖြေချုပ် (Direct Answer):** မေးခွန်း၏ အဓိကအဖြေကို စာကြောင်း ၁–၂ ကြောင်းဖြင့် အရင်ဆုံး ရှင်းရှင်းလင်းလင်း ဖြေပါ။\n"
@@ -790,9 +792,9 @@ def answer_with_universal_search(user_id: int, user_message: str) -> str:
     )
 
     reply = call_ai_with_3tier_fallback(full_prompt, use_google_search=True)
-    if "ခဏအလုပ်များနေပါသည်" in reply:
+    if "ခဏအလုပ်များနေတယ်" in reply:
         queue_pending_followup(user_id, "web_search", user_message, target_group=None, delay_seconds=120)
-        return "ဟိုင်းရှင် — ခုဏက ဆာဗာ ခဏအလုပ်များနေလို့ အဖြေမထွက်သေးဘူးရှင်။ ပြန်ရတာနဲ့ ချက်ချင်း ပြန်ပြောပေးပါ့မယ်နော်။"
+        return "မောင်ရေ — ခုဏက ဆာဗာ ခဏအလုပ်များနေလို့ အဖြေမထွက်သေးဘူး၊ ရတာနဲ့ ချက်ချင်း ပြန်ပြောပေးမယ်နော်"
     return reply
 
 
@@ -810,9 +812,8 @@ async def scheduled_morning_news_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
-    """အချိန်ကျရောက်လာသော Task Reminder များကို Quick & Friendly ဟန်ဖြင့် သတိပေးသည်။"""
+    """အချိန်ကျရောက်လာသော Task Reminder များကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး 'နော်' ဖြင့် သတိပေးသည်။"""
     if not ADMIN_USER_ID:
-        print("[Reminder Check] ADMIN_USER_ID is 0/missing; skipping.")
         return
     try:
         now_mm = datetime.now(MM_TZ)
@@ -839,11 +840,13 @@ async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
 
                 if r_dt <= now_mm:
                     title = (t.get("title") or "").strip()
-                    msg = f"မောင် — {title} အချိန်ရောက်ပြီနော်။"
+                    msg = f"မောင်ရေ — {title} အချိန်ရောက်ပြီနော်"
                     await context.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
                     save_chat_message(ADMIN_USER_ID, "assistant", msg)
-                    supabase.table("tasks").update({"reminded": True}).eq("id", t["id"]).execute()
-                    print(f"[Reminder Sent] task_id={t['id']}, title={title}")
+                    try:
+                        supabase.table("tasks").update({"reminded": True}).eq("id", t["id"]).execute()
+                    except Exception:
+                        pass
             except Exception as item_err:
                 print(f"[Reminder Item Error] id={t.get('id')}: {item_err}")
     except Exception as e:
@@ -851,7 +854,7 @@ async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def scheduled_evening_task_digest_job(context: ContextTypes.DEFAULT_TYPE):
-    """ညနေ ၆ နာရီတိုင်း ပြီးဖို့ ကျန်နေသေးတဲ့ Pending Task များကို Quick & Friendly သတိပေးသည်။"""
+    """ညနေ ၆ နာရီတိုင်း ပြီးဖို့ ကျန်နေသေးတဲ့ Pending Task များကို ရင်းရင်းနှီးနှီး သတိပေးသည်။"""
     if not ADMIN_USER_ID:
         return
     try:
@@ -861,7 +864,7 @@ async def scheduled_evening_task_digest_job(context: ContextTypes.DEFAULT_TYPE):
             return
 
         lines = [f"• {t['title']}" for t in pending[:10]]
-        msg = "ဟိုင်းရှင် — ဒီနေ့အတွက် ပြီးဖို့ ကျန်နေသေးတဲ့ Task လေးတွေပါနော်:\n" + "\n".join(lines)
+        msg = "မောင်ရေ — ဒီနေ့ ပြီးဖို့ ကျန်နေသေးတဲ့ Task လေးတွေနော်\n" + "\n".join(lines)
         await context.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
         save_chat_message(ADMIN_USER_ID, "assistant", msg)
     except Exception as e:
@@ -869,6 +872,24 @@ async def scheduled_evening_task_digest_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 # --- 1. Personal Tasks & Smart Intelligence Helpers ---
+def _extract_weekday_target(text: str) -> int | None:
+    """စာသားထဲက နေ့အမည် (0=Mon .. 6=Sun) ကို ရှာပေးသည်။"""
+    t = text.lower()
+    mapping = {
+        0: ["တနင်္လာ", "monday", "mon"],
+        1: ["အင်္ဂါ", "tuesday", "tue"],
+        2: ["ဗုဒ္ဓဟူး", "wednesday", "wed"],
+        3: ["ကြာသပတေး", "thursday", "thu"],
+        4: ["သောကြာ", "friday", "fri"],
+        5: ["စနေ", "saturday", "sat"],
+        6: ["တနင်္ဂနွေ", "sunday", "sun"],
+    }
+    for idx, keys in mapping.items():
+        if any(k in t for k in keys):
+            return idx
+    return None
+
+
 def looks_like_task_or_reminder(text: str) -> bool:
     """LLM fail ဖြစ်မှသာ သုံးမယ့် Safety Net keyword check"""
     t = text.strip().lower()
@@ -923,16 +944,16 @@ def parse_reminder_datetime_mmt(text: str) -> datetime | None:
 def _clean_task_title_fallback(raw_text: str) -> str:
     t = raw_text.strip()
     t = re.sub(r"(?:နောက်\s*)?[၀-၉\d]+\s*(?:မိနစ်|နာရီ|minute|min|hour|hr)s?\s*(?:မှာ|နေရင်|အကြာမှာ)?", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"(?:မနက်ဖြန်|ဒီနေ့|ယနေ့|မနက်|ညနေ|ည|ကျောင်းဖွင့်ရက်|တိုင်း)", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:မနက်ဖြန်|ဒီနေ့|ယနေ့|မနက်|ညနေ|ည|ကျောင်းဖွင့်ရက်|တိုင်း|မြန်မာ\s*calendar|sunday|monday|tuesday|wednesday|thursday|friday|saturday|တနင်္လာ|အင်္ဂါ|ဗုဒ္ဓဟူး|ကြာသပတေး|သောကြာ|စနေ|တနင်္ဂနွေ)", "", t, flags=re.IGNORECASE)
     t = re.sub(r"\b\d{1,2}:\d{2}\b", "", t)
     t = re.sub(r"(?:remind\s*ပေးပါ|remind\s*လုပ်ပေးပါ|သတိပေးပါ|သတိပေး|remind)", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:\S+\s+သိချင်လို့|\S+\s+ဖြစ်လို့)$", "", t)
     t = re.sub(r"\s+", " ", t).strip(" -–—၊။")
     return t or raw_text.strip()
 
 
 def smart_parse_task_details(user_message: str) -> dict:
     """Fallback parser when smart_classify_and_parse_task falls back."""
-    now_mm = datetime.now(MM_TZ)
     fallback_dt = parse_reminder_datetime_mmt(user_message)
     fallback_title = _clean_task_title_fallback(user_message)
     is_school_day_rule = any(k in user_message for k in ["ကျောင်းဖွင့်ရက်", "ကျောင်းသွားရက်", "school day"])
@@ -940,19 +961,20 @@ def smart_parse_task_details(user_message: str) -> dict:
     if fallback_dt and is_school_day_rule:
         while fallback_dt.weekday() >= 5:
             fallback_dt += timedelta(days=1)
-    return {"title": fallback_title, "remind_dt": fallback_dt, "repeat": repeat_mode}
+    return {"title": fallback_title, "reason": None, "remind_dt": fallback_dt, "repeat": repeat_mode}
 
 
 def smart_classify_and_parse_task(user_message: str, recent_ctx: str = "") -> dict:
     """
-    Keyword ထက် Smart Intelligence ဖြင့် Task ဟုတ်/မဟုတ်၊ action (add/done/list)၊
-    clean_title၊ remind_at (MMT) နှင့် repeat mode ကို ခွဲခြားပေးသည်။
+    Task ဟုတ်/မဟုတ်၊ action (add/done/list)၊ လုပ်ရမယ့်အလုပ်သက်သက် (clean_title)၊
+    ရည်ရွယ်ချက် (reason)၊ remind_at (MMT) နှင့် repeat mode ကို Smart ခွဲခြားပေးသည်။
     """
     now_mm = datetime.now(MM_TZ)
     weekday_mm = MYANMAR_WEEKDAYS[now_mm.weekday()]
+    target_wd = _extract_weekday_target(user_message)
 
     prompt = f"""
-You are a smart task/reminder classifier for a Myanmar personal assistant.
+You are a precision task & reminder parser for a Myanmar personal assistant.
 Current Myanmar Time: {now_mm.strftime('%Y-%m-%d (%A) %H:%M MMT')} ({weekday_mm})
 
 Recent Context:
@@ -960,16 +982,30 @@ Recent Context:
 
 User Message: "{user_message}"
 
-Decide whether the user wants to ADD a task/reminder, MARK a task DONE, LIST tasks, or NOT a task action (e.g., asking a question, seeking advice, chatting, or asking about group logs).
-Be careful: asking "ဘယ်နေ့လဲ / ဘယ်လိုလဲ / ဘာလဲ" is usually NOT adding a task unless clearly asking to remind/schedule/track something.
+Carefully separate:
+1. "is_task": true if user wants to add a reminder/task, mark done, or list tasks. false if just asking a general question, seeking advice, or chatting.
+2. "action": "add" | "done" | "list" | "none"
+3. "clean_title": ONLY the core action to perform in natural Burmese. Strip out:
+   - time/delay/schedule words (e.g., "နောက် 1မိနစ်မှာ", "ညနေ 4နာရီတိုင်း", "Sunday မနက် 8နာရီတိုင်းမှာ", "ကျောင်းဖွင့်ရက်တိုင်း", "မြန်မာ calendar")
+   - trigger/command words ("remind ပေးပါ", "သတိပေးပါ", "remind")
+   - trailing reason clauses ("... သိချင်လို့", "... ဖြစ်လို့", "... အတွက်")
+   Example: "ကလေးတွေကို ဖုန်းဆက်ရန် remind ပေးပါ ကျောင်းကပြန်ရောက် မရောက် သိချင်လို့" -> clean_title: "ကလေးတွေကို ဖုန်းဆက်ရန်", reason: "ကျောင်းကပြန်ရောက် မရောက် သိချင်လို့"
+   Example: "မြန်မာ calendar ကျောင်းဖွင့်ရက်တိုင်း ညနေ 4နာရီတိုင်း ကလေးတွေကို ဖုန်းဆက်ရန် remind ပေးပါ ကျောင်းကပြန်ရောက် မရောက် သိချင်လို့" -> clean_title: "ကလေးတွေကို ဖုန်းဆက်ရန်", repeat: "school_days"
+   Example: "Sunday မနက် 8နာရီတိုင်းမှာ ဆေးသောက်ဖို့ သတိပေးပါ" -> clean_title: "ဆေးသောက်ဖို့", repeat: "weekly"
+4. "reason": Short reason if stated (like "ကျောင်းကပြန်ရောက် မရောက် သိချင်လို့"), else null.
+5. "remind_iso": ISO-8601 datetime with +06:30 offset for the next occurrence in Myanmar Time, or null if no time/delay is mentioned.
+   - If "school_days" is set, use Monday-Friday (skip Saturday/Sunday).
+   - If "weekly" with a weekday (e.g., Sunday) is set, compute the upcoming matching weekday at that time.
+6. "repeat": "once" | "daily" | "weekly" | "school_days"
 
 Return ONLY valid JSON:
 {{
-  "is_task": true or false,
-  "action": "add" | "done" | "list" | "none",
-  "clean_title": "short natural Burmese title without time/remind words",
-  "remind_iso": "ISO-8601 datetime with +06:30 if time/delay is given, else null",
-  "repeat": "once" | "daily" | "school_days"
+  "is_task": true,
+  "action": "add",
+  "clean_title": "...",
+  "reason": null,
+  "remind_iso": null,
+  "repeat": "once"
 }}
 """
     try:
@@ -980,7 +1016,7 @@ Return ONLY valid JSON:
                 {"role": "user", "content": prompt}
             ],
             temperature=0.0,
-            max_tokens=200,
+            max_tokens=240,
         )
         raw = (completion.choices[0].message.content or "").strip()
         match = re.search(r"\{.*\}", raw, re.DOTALL)
@@ -992,6 +1028,19 @@ Return ONLY valid JSON:
                 action = "add" if is_task else "none"
 
             clean_title = str(parsed.get("clean_title") or "").strip() or _clean_task_title_fallback(user_message)
+            reason = str(parsed.get("reason") or "").strip() or None
+
+            repeat_mode = parsed.get("repeat")
+            if repeat_mode not in {"once", "daily", "weekly", "school_days"}:
+                if "ကျောင်းဖွင့်ရက်" in user_message:
+                    repeat_mode = "school_days"
+                elif target_wd is not None and any(k in user_message.lower() for k in ["တိုင်း", "every", "weekly"]):
+                    repeat_mode = "weekly"
+                elif any(k in user_message for k in ["တိုင်း", "နေ့စဉ်"]):
+                    repeat_mode = "daily"
+                else:
+                    repeat_mode = "once"
+
             rem_dt = None
             r_iso = parsed.get("remind_iso")
             if r_iso:
@@ -999,39 +1048,42 @@ Return ONLY valid JSON:
                     rem_dt = datetime.fromisoformat(str(r_iso)).astimezone(MM_TZ)
                 except Exception:
                     rem_dt = parse_reminder_datetime_mmt(user_message)
+            else:
+                rem_dt = parse_reminder_datetime_mmt(user_message)
 
-            repeat_mode = parsed.get("repeat")
-            if repeat_mode not in {"once", "daily", "school_days"}:
-                repeat_mode = "school_days" if "ကျောင်းဖွင့်ရက်" in user_message else (
-                    "daily" if any(k in user_message for k in ["တိုင်း", "နေ့စဉ်"]) else "once"
-                )
-
-            if rem_dt and repeat_mode == "school_days":
-                while rem_dt.weekday() >= 5:
-                    rem_dt += timedelta(days=1)
+            if rem_dt:
+                if repeat_mode == "school_days":
+                    while rem_dt.weekday() >= 5:
+                        rem_dt += timedelta(days=1)
+                elif repeat_mode == "weekly" and target_wd is not None:
+                    days_ahead = (target_wd - rem_dt.weekday()) % 7
+                    if days_ahead == 0 and rem_dt <= now_mm:
+                        days_ahead = 7
+                    rem_dt += timedelta(days=days_ahead)
 
             return {
                 "is_task": is_task and action != "none",
                 "action": action if is_task else "none",
                 "title": clean_title,
+                "reason": reason,
                 "remind_dt": rem_dt,
                 "repeat": repeat_mode,
             }
     except Exception as e:
         print(f"smart_classify_and_parse_task error: {e}")
 
-    # Safety fallback only if LLM fails
     if looks_like_task_or_reminder(user_message):
         fb = smart_parse_task_details(user_message)
         return {
             "is_task": True,
             "action": "add",
             "title": fb.get("title"),
+            "reason": None,
             "remind_dt": fb.get("remind_dt"),
             "repeat": fb.get("repeat", "once"),
         }
 
-    return {"is_task": False, "action": "none", "title": "", "remind_dt": None, "repeat": "once"}
+    return {"is_task": False, "action": "none", "title": "", "reason": None, "remind_dt": None, "repeat": "once"}
 
 
 def add_task(title: str, remind_dt: datetime | None = None) -> dict:
@@ -1057,7 +1109,7 @@ def list_tasks() -> list:
 def get_formatted_tasks() -> str:
     tasks = list_tasks()
     if not tasks:
-        return "လက်ရှိ Task မရှိသေးပါဘူးရှင်။"
+        return "မောင်ရေ၊ လက်ရှိ Task မရှိသေးဘူးနော်"
     lines = []
     for t in tasks:
         mark = "✓" if t.get("status") == "done" else "•"
@@ -1068,8 +1120,8 @@ def get_formatted_tasks() -> str:
                 r_str = f" (⏰ {r_dt.strftime('%m-%d %H:%M')})"
             except Exception:
                 pass
-        lines.append(f"{mark} [{t['id']}] {t['title']}{r_str}")
-    return "လက်ရှိ Task စာရင်းလေးပါရှင်:\n" + "\n".join(lines)
+        lines.append(f"{mark} {t['title']}{r_str}")
+    return "မောင်ရေ — လက်ရှိ Task စာရင်းလေးနော်\n" + "\n".join(lines)
 
 
 def handle_task_intent(user_message: str, route: dict) -> str:
@@ -1084,7 +1136,7 @@ def handle_task_intent(user_message: str, route: dict) -> str:
         try:
             if task_id:
                 supabase.table("tasks").update({"status": "done"}).eq("id", int(task_id)).execute()
-                return f"ပြီးသွားပြီနော် — Task #{task_id} ကို Done မှတ်လိုက်ပါပြီရှင်။"
+                return "မောင်ရေ — ပြီးသွားပြီနော်၊ Done မှတ်လိုက်ပြီနော်"
 
             search_key = (task_title or user_message).strip()
             pending_res = (
@@ -1102,30 +1154,32 @@ def handle_task_intent(user_message: str, route: dict) -> str:
             )
             if matched:
                 supabase.table("tasks").update({"status": "done"}).eq("id", matched["id"]).execute()
-                return f"ပြီးသွားပြီနော် — \"{matched['title']}\" ကို Done မှတ်လိုက်ပါပြီရှင်။"
+                return f"မောင်ရေ — \"{matched['title']}\" ပြီးသွားပြီနော်၊ Done မှတ်လိုက်ပြီနော်"
 
-            return "ပြီးစီးကြောင်း မှတ်ရမယ့် Pending Task မတွေ့သေးဘူးရှင်။ `/tasks` နဲ့ ကြည့်ပြီး ထပ်ပြောပေးပါနော်။"
+            return "မောင်ရေ — ပြီးစီးကြောင်း မှတ်ရမယ့် Pending Task မတွေ့သေးဘူး၊ `/tasks` နဲ့ ကြည့်ပြီး ပြောဦးနော်"
         except Exception as e:
             print(f"Task update error: {e}")
-            return "Task အခြေအနေ ပြောင်းရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားပါတယ်ရှင်။"
+            return "မောင်ရေ — Task အခြေအနေ ပြောင်းရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားတယ်၊ ထပ်စမ်းကြည့်နော်"
 
     clean_title = task_title or _clean_task_title_fallback(user_message)
     remind_dt = route.get("remind_dt")
     repeat_mode = route.get("repeat", "once")
+    reason = route.get("reason")
 
     add_task(clean_title, remind_dt)
 
-    note_parts = []
+    reply_line = f"မောင်ရေ — \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်"
     if remind_dt:
-        note_parts.append(f"⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[remind_dt.weekday()]})")
+        reply_line += f"\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[remind_dt.weekday()]})"
     if repeat_mode == "school_days":
-        note_parts.append("ကျောင်းဖွင့်ရက် အလိုက် ညှိထားပါတယ်")
+        reply_line += " · ကျောင်းဖွင့်ရက်"
+    elif repeat_mode == "weekly":
+        reply_line += " · အပတ်စဉ်"
     elif repeat_mode == "daily":
-        note_parts.append("နေ့စဉ် အတွက် မှတ်ထားပါတယ်")
-
-    if note_parts:
-        return f"မှတ်ထားပါပြီရှင် — \"{clean_title}\" ({' | '.join(note_parts)})"
-    return f"မှတ်ထားပါပြီရှင် — \"{clean_title}\""
+        reply_line += " · နေ့စဉ်"
+    if reason:
+        reply_line += f"\n📝 {reason}"
+    return reply_line
 
 
 # --- 2. Group Summary, Report & Keyword-Free Natural Group Q&A Tools ---
@@ -1198,7 +1252,7 @@ def query_specific_group_logs(
 
     if not all_logs:
         scope_d = f" ({date_label})" if date_label else ""
-        return f"သက်ဆိုင်ရာ ကာလ{scope_d} အတွင်း Group မှတ်တမ်းများ မရှိသေးပါရှင်။"
+        return f"မောင်ရေ — သက်ဆိုင်ရာ ကာလ{scope_d} အတွင်း Group မှတ်တမ်းတွေ မရှိသေးဘူးနော်"
 
     matched_group = router_group
     if not matched_group:
@@ -1218,7 +1272,7 @@ def query_specific_group_logs(
     selected_logs = [l for l in all_logs if l.get("group_name") == matched_group] if matched_group else all_logs
 
     if not selected_logs:
-        return f"{matched_group or 'သက်ဆိုင်ရာ Group'} ထဲမှာ မှတ်တမ်း မရှိသေးပါရှင်။"
+        return f"မောင်ရေ — {matched_group or 'သက်ဆိုင်ရာ Group'} ထဲမှာ မှတ်တမ်း မရှိသေးဘူးနော်"
 
     raw_text = "\n".join(
         [
@@ -1237,10 +1291,11 @@ def query_specific_group_logs(
     အချက် (သို့မဟုတ် သက်ဆိုင်ရာ လူပြောထားသည့် အကြောင်းအရာ) တစ်ခုတည်းကိုသာ Focus ထား၍ ပြန်ပြောပြပေးပါ။
 
     ဖြေဆိုရမည့် ပုံစံစည်းမျဉ်းများ:
-    1. စက်ရုပ်လို တစ်ကြောင်းချင်းစီ၏ အချိန် (Timestamp) တွေ ထည့်ရေးစရာ မလိုပါ (အသုံးပြုသူက ဘယ်အချိန်လဲဟု မေးမှသာ အချိန်ကို ထည့်ပြောပါ)။
-    2. လူတစ်ယောက်က လုပ်ဖော်ကိုင်ဖက်ကို ရင်းနှီးဖော်ရွေစွာ ပြန်ရှင်းပြနေသလို သဘာဝကျကျ၊ ချောချောမွေ့မွေ့နှင့် လိုရင်းတိုရှင်း မြန်မာဘာသာဖြင့် ပြောပြပါ။
-    3. အရှေ့မှာ ပြောခဲ့သည့် လူ/အကြောင်းအရာကို ဆက်မေးခြင်း (ဥပမာ - "သူပြောတဲ့ key points အကျဉ်းချုပ်ပေးပါ") ဖြစ်ပါက ထိုသူ၏ ပြောစကားများထဲမှ အဓိက Key Points များကိုသာ Bullet point များဖြင့် ရှင်းရှင်းလင်းလင်း ထုတ်ပေးပါ။
-    4. မေးထားသည့် အချက်/လူနှင့် မသက်ဆိုင်သော အခြားလူများ၏ စကားများကို လုံးဝ ထည့်မပြောပါနှင့်။ မှတ်တမ်းထဲတွင် မပါဝင်ပါက မတွေ့ရှိကြောင်း ရိုးသားစွာ ဖြေပါ။
+    1. အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ။
+    2. စက်ရုပ်လို တစ်ကြောင်းချင်းစီ၏ အချိန် (Timestamp) တွေ ထည့်ရေးစရာ မလိုပါ (အသုံးပြုသူက ဘယ်အချိန်လဲဟု မေးမှသာ အချိန်ကို ထည့်ပြောပါ)။
+    3. လူတစ်ယောက်က လုပ်ဖော်ကိုင်ဖက်ကို ရင်းနှီးဖော်ရွေစွာ ပြန်ရှင်းပြနေသလို သဘာဝကျကျ၊ ချောချောမွေ့မွေ့နှင့် လိုရင်းတိုရှင်း မြန်မာဘာသာဖြင့် ပြောပြပါ။
+    4. အရှေ့မှာ ပြောခဲ့သည့် လူ/အကြောင်းအရာကို ဆက်မေးခြင်း (ဥပမာ - "သူပြောတဲ့ key points အကျဉ်းချုပ်ပေးပါ") ဖြစ်ပါက ထိုသူ၏ ပြောစကားများထဲမှ အဓိက Key Points များကိုသာ Bullet point များဖြင့် ရှင်းရှင်းလင်းလင်း ထုတ်ပေးပါ။
+    5. မေးထားသည့် အချက်/လူနှင့် မသက်ဆိုင်သော အခြားလူများ၏ စကားများကို လုံးဝ ထည့်မပြောပါနှင့်။ မှတ်တမ်းထဲတွင် မပါဝင်ပါက မတွေ့ရှိကြောင်း ရိုးသားစွာ ဖြေပါ။
 
     Recent Context:
     {recent_ctx or "None"}
@@ -1289,8 +1344,8 @@ def get_group_report(user_query: str = "", exact_group_name: str = None, day_mod
     if not logs:
         scope_desc = f" [{matched_group_name}]" if matched_group_name else ""
         if date_label:
-            return f"No logs found for {date_label}{scope_desc}."
-        return f"No unread messages found{scope_desc}."
+            return f"မောင်ရေ — {date_label}{scope_desc} အတွက် မှတ်တမ်း မရှိသေးဘူးနော်"
+        return f"မောင်ရေ — ဖတ်ရမယ့် မက်ဆေ့ခ်ျအသစ် မရှိသေးဘူး{scope_desc} နော်"
 
     raw_text = "\n".join(
         [f"[{l['group_name']} | {l['sender_name']} | {str(l.get('created_at', ''))[:16]}]: {l['content_summary']}" for l in logs]
@@ -1337,10 +1392,10 @@ def handle_task_and_group(user_id: int, user_message: str, route: dict, recent_c
         return get_group_report(user_message, target_group, day_m)
 
     ans = query_specific_group_logs(user_message, target_group, period, recent_ctx)
-    if ans and "မရှိသေးပါ" in ans:
+    if ans and "မရှိသေးဘူး" in ans:
         queue_pending_followup(user_id, "group_query", user_message, target_group=target_group, delay_seconds=30)
         g_label = f"\"{target_group}\"" if target_group else "သက်ဆိုင်ရာ Group"
-        return f"ဟိုင်းရှင် — {g_label} ရဲ့ မက်ဆေ့ခ်ျအချက်အလက်တွေ အခုထိ မရောက်သေးဘူးရှင်။ ရောက်လာတာနဲ့ ချက်ချင်း ပြန်ပြောပေးပါ့မယ်နော်။"
+        return f"မောင်ရေ — {g_label} ရဲ့ မက်ဆေ့ခ်ျအချက်အလက်တွေ အခုထိ မရောက်သေးဘူး၊ ရောက်လာတာနဲ့ ချက်ချင်း ပြန်ပြောပေးမယ်နော်"
     return ans
 
 
@@ -1353,6 +1408,7 @@ def handle_advice_and_general(user_id: int, user_message: str, route: dict) -> s
     if sub_type == "advice":
         prompt = (
             f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
+            f"အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ။\n"
             f"အသုံးပြုသူ၏ Profile၊ နှစ်သက်သည့်ဟန် (Style Preferences)၊ အတိတ်မှတ်ဉာဏ်နှင့် မေးခွန်းကို သုံးသပ်ပြီး "
             f"အလိုက်သိသိ မြန်မာဘာသာဖြင့် အကြံပြုပါ:\n"
             f"1. အခြေအနေ သုံးသပ်ချက်\n"
@@ -1364,6 +1420,7 @@ def handle_advice_and_general(user_id: int, user_message: str, route: dict) -> s
     else:
         prompt = (
             f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
+            f"အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ။\n"
             f"အသုံးပြုသူ၏ Profile၊ နှစ်သက်သည့်ဟန် (Style Preferences)၊ အတိတ်စကားပြောဆိုမှုများနှင့် ခိုင်းစေချက်ကို သေချာမှတ်မိပြီး "
             f"အလိုက်သိသိနှင့် မြန်မာစာ သန့်သန့်ရှင်းရှင်းဖြင့် ကူညီဆောင်ရွက်ပေးပါ။\n\n"
             f"{memory_context}\n\n"
@@ -1437,23 +1494,23 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if cmd in ["/start", "/menu"]:
         await message.reply_text(
-            "Quick Menu:",
+            "မောင်ရေ — Quick Menu နော်",
             reply_markup=build_main_menu_keyboard()
         )
         return
 
     if cmd == "/addtask":
         if not arg:
-            await message.reply_text("Usage: /addtask <task description>")
+            await message.reply_text("မောင်ရေ — /addtask <task description> လို့ ရေးပေးနော်")
             return
         parsed = smart_classify_and_parse_task(arg)
         clean_title = parsed.get("title") or _clean_task_title_fallback(arg)
         remind_dt = parsed.get("remind_dt")
         add_task(clean_title, remind_dt)
         if remind_dt:
-            await message.reply_text(f"မှတ်ထားပါပြီရှင် — \"{clean_title}\" (⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')})")
+            await message.reply_text(f"မောင်ရေ — \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')}")
         else:
-            await message.reply_text(f"မှတ်ထားပါပြီရှင် — \"{clean_title}\"")
+            await message.reply_text(f"မောင်ရေ — \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်")
         return
 
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
@@ -1590,12 +1647,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             stripped_lower = user_message.strip().lower()
             if stripped_lower in ["menu", "help"]:
-                await message.reply_text("Quick Menu:", reply_markup=build_main_menu_keyboard())
+                await message.reply_text("မောင်ရေ — Quick Menu နော်", reply_markup=build_main_menu_keyboard())
                 return
 
             if stripped_lower in ["မာယာ", "maya", "hi", "hello", "hey", "မင်္ဂလာပါ"]:
                 memory_ctx = await asyncio.to_thread(recall_relevant_history, message.from_user.id, user_message, 4, 2)
                 greet_prompt = (
+                    f"အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ။ "
                     f"အသုံးပြုသူက နှုတ်ဆက်/ခေါ်နေပါသည်။ လက်ရှိ လေ့လာမှတ်သားထားသော Profile/Preferences/Conversation ရှိလျှင် အလိုက်သိသိ "
                     f"ရင်းနှီးဖော်ရွေစွာ နှုတ်ဆက်ပြီး ဘာကူညီပေးနိုင်မလဲ တိုတိုရှင်းရှင်း မြန်မာဘာသာဖြင့် ဖြေပါ။\n\n{memory_ctx}"
                 )
@@ -1616,6 +1674,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "task_id": None,
                     "remind_dt": smart_task.get("remind_dt"),
                     "repeat": smart_task.get("repeat", "once"),
+                    "reason": smart_task.get("reason"),
                 }
                 reply_text = await asyncio.to_thread(handle_task_intent, user_message, forced_route)
                 save_chat_message(message.from_user.id, "assistant", reply_text)
@@ -1648,7 +1707,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_long_message(message, reply_text)
 
         except Exception as e:
-            await send_long_message(message, "ဟုတ်ကဲ့ရှင်၊ လောလောဆယ် အဖြေပြန်ထုတ်ရာတွင် အခက်အခဲ ရှိနေပါသည်။ နောက်မှ ထပ်မံမေးကြည့်ပါနော်။")
+            await send_long_message(message, "မောင်ရေ၊ လောလောဆယ် အဖြေပြန်ထုတ်ရာမှာ ခဏအခက်အခဲ ရှိနေတယ်၊ နောက်မှ ထပ်မေးကြည့်နော်")
             print(f"Error in handle_message: {e}")
 
 
@@ -1666,7 +1725,7 @@ async def main_async():
     # Normal Messages
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-    # Scheduled Jobs (9:00 AM News, 1-min Due Reminder Watcher, 6:00 PM Pending Digest, 30s Follow-up Watcher)
+    # Scheduled Jobs (9:00 AM News, Due Reminders, 6:00 PM Pending Digest, 30s Follow-up Watcher)
     if application.job_queue:
         morning_9_mmt = dt_time(hour=9, minute=0, second=0, tzinfo=MM_TZ)
         application.job_queue.run_daily(
