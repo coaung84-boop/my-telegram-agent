@@ -283,36 +283,43 @@ Return ONLY valid JSON with two concise fields in Burmese (max ~150 words each):
 JSON format:
 {{"profile_summary":"...","style_preferences":"..."}}
 """
-        completion = groq_client.with_options(timeout=6.0).chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "Output only valid JSON in Myanmar Unicode."},
-                {"role": "user", "content": update_prompt}
-            ],
-            temperature=0.1,
-            max_tokens=360,
-        )
-        raw = (completion.choices[0].message.content or "").strip()
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not match:
-            print(f"evolve_user_profile: no JSON found in response: {raw[:120]}")
-            return
+        raw = ""
+        try:
+            completion = groq_client.with_options(timeout=8.0).chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": "Output only valid JSON in Myanmar Unicode."},
+                    {"role": "user", "content": update_prompt}
+                ],
+                temperature=0.1,
+                max_tokens=360,
+            )
+            raw = (completion.choices[0].message.content or "").strip()
+        except Exception as groq_err:
+            print(f"evolve_user_profile Groq error, falling back to Gemini: {groq_err}")
+            raw = call_ai_with_3tier_fallback(update_prompt, None, None, False)
 
-        parsed = json.loads(match.group(0))
-        summary = str(parsed.get("profile_summary") or "").strip()
-        prefs = str(parsed.get("style_preferences") or "").strip()
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if match:
+            parsed = json.loads(match.group(0))
+            summary = str(parsed.get("profile_summary") or "").strip()
+            prefs = str(parsed.get("style_preferences") or "").strip()
+        else:
+            summary = raw[:500].strip()
+            prefs = ""
 
         if not summary and not prefs:
+            print("evolve_user_profile: empty summary/prefs, skipped upsert")
             return
 
         payload = {
-            "user_id": user_id,
+            "user_id": int(user_id),
             "profile_summary": summary,
             "style_preferences": prefs,
             "updated_at": datetime.now(MM_TZ).isoformat(),
         }
-        supabase.table("user_profile").upsert(payload, on_conflict="user_id").execute()
-        print(f"[User Profile Updated] user_id={user_id}")
+        res = supabase.table("user_profile").upsert(payload, on_conflict="user_id").execute()
+        print(f"[User Profile Updated] user_id={user_id}, rows={len(res.data or [])}")
     except Exception as e:
         print(f"Error evolving user_profile: {e}")
 
