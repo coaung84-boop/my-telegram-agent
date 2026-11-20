@@ -43,11 +43,21 @@ ADMIN_USER_ID = int(os.getenv("MY_TELEGRAM_USER_ID", "0"))
 MM_TZ = timezone(timedelta(hours=6, minutes=30))
 RETENTION_DAYS = 30
 
+MYANMAR_WEEKDAYS = [
+    "တနင်္လာနေ့",
+    "အင်္ဂါနေ့",
+    "ဗုဒ္ဓဟူးနေ့",
+    "ကြာသပတေးနေ့",
+    "သောကြာနေ့",
+    "စနေနေ့",
+    "တနင်္ဂနွေနေ့",
+]
+
 STRICT_MYANMAR_SYSTEM = (
-    "သင်သည် 'မာယာ' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။ "
+    "သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။ "
     "အမြဲတမ်း မြန်မာဘာသာ (Unicode) ဖြင့်သာ သဘာဝကျကျ၊ ရှင်းလင်းပြတ်သားစွာ ဖြေဆိုပါ။ "
     "မလိုအပ်ဘဲ နိုင်ငံခြားစာလုံး/သင်္ကေတများ ရောနှောခြင်းကို လုံးဝ ရှောင်ကြဉ်ပါ။ "
-    "အသုံးပြုသူ၏ Profile၊ အတိတ်မှတ်တမ်းနှင့် အလေ့အထများကို သေချာမှတ်မိပြီး အလိုက်သိသိနှင့် တိုတိုရှင်းရှင်း ဖြေပါ။ "
+    "အသုံးပြုသူ၏ Profile၊ အတိတ်မှတ်တမ်း၊ အလေ့အထနှင့် မြန်မာပြက္ခဒိန်အချက်အလက်များကို သေချာမှတ်မိပြီး အလိုက်သိသိနှင့် တိုတိုရှင်းရှင်း ဖြေပါ။ "
     "မေးခွန်းနှင့် မသက်ဆိုင်သော Search အချက်အလက်များကို လုံးဝ မသုံးပါနှင့်။ မသေချာပါက မသိကြောင်း ရိုးသားစွာ ဖြေပါ။"
 )
 
@@ -89,6 +99,34 @@ def cleanup_old_raw_logs():
         supabase.table("raw_logs").delete().lt("created_at", cutoff_dt.isoformat()).execute()
     except Exception as e:
         print(f"Error cleaning up old raw_logs: {e}")
+
+
+# --- Myanmar Calendar Helper ---
+def get_myanmar_calendar_context(dt_mm: datetime = None) -> str:
+    """လက်ရှိ မြန်မာစံတော်ချိန်အတွက် ပြက္ခဒိန်အချက်အလက်ကို စုစည်းပေးသည်။"""
+    now_mm = dt_mm or datetime.now(MM_TZ)
+    weekday_mm = MYANMAR_WEEKDAYS[now_mm.weekday()]
+    gregorian_str = now_mm.strftime(f"%Y-%m-%d ({weekday_mm}) %H:%M MMT")
+
+    try:
+        import mmcalendar  # type: ignore
+
+        mc = mmcalendar.MyanmarCalendar.from_date(now_mm.date())
+        parts = [
+            f"Gregorian Date/Time: {gregorian_str}",
+            f"Myanmar Year: {mc.year} ME",
+            f"Myanmar Month: {mc.month_name}",
+            f"Fortnight / Day: {mc.fortnight_day_str}",
+            f"Sabbath (ဥပုသ်): {'ဟုတ်ပါသည်' if mc.is_sabbath else 'မဟုတ်ပါ'}",
+            f"Yatyaza (ရက်ရာဇာ): {'ဟုတ်ပါသည်' if mc.is_yatyaza else 'မဟုတ်ပါ'}",
+            f"Pyathada (ပြဿဒါး): {'ဟုတ်ပါသည်' if mc.is_pyathada else 'မဟုတ်ပါ'}",
+        ]
+        return "\n".join(parts)
+    except Exception:
+        return (
+            f"Gregorian Date/Time: {gregorian_str}\n"
+            f"Note: မြန်မာလ/လဆန်း-လဆုတ် အတိအကျအတွက် mmcalendar package သုံးရန် သို့မဟုတ် search/reference ကို ကိုးကားရန်။"
+        )
 
 
 # --- Timestamp, Chat Memory & Self-Improving User Profile Helpers ---
@@ -343,7 +381,7 @@ Intents:
 3. TASK: Managing personal to-do tasks (adding a task, listing tasks, or marking a task done).
 4. ADVICE: Asking for advice, recommendations, strategic options, or how to handle/solve a problem or decision.
 5. GENERAL_TASK: General requests/instructions like drafting messages, translating, summarizing, coding/tech help, explanations, recalling earlier conversation/user profile, or casual chat.
-6. GENERAL_SEARCH: Asking for current/live facts, weather, news, prices, sports scores/fixtures, or external web information.
+6. GENERAL_SEARCH: Asking for current/live facts, weather, news, prices, sports scores/fixtures, calendar/holidays, or external web information.
 
 Available Groups: [{groups_str}]
 Recent Context:
@@ -453,8 +491,10 @@ def fetch_combined_web_context(tavily_query: str, rss_queries: list = None, max_
 
 # --- Myanmar News Fetcher & Summarizer (/news & 9:00 AM Daily Job) ---
 def get_myanmar_news_summary() -> str:
-    now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
-    today_date = datetime.now(MM_TZ).strftime("%Y-%m-%d")
+    now_mm = datetime.now(MM_TZ)
+    now_str = now_mm.strftime("%Y-%m-%d %H:%M MMT")
+    today_date = now_mm.strftime("%Y-%m-%d")
+    cal_info = get_myanmar_calendar_context(now_mm)
 
     web_context = fetch_combined_web_context(
         tavily_query=f"Myanmar latest news {today_date} Yangon",
@@ -464,6 +504,9 @@ def get_myanmar_news_summary() -> str:
 
     prompt = f"""
     လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)
+    ပြက္ခဒိန် အချက်အလက်:
+    {cal_info}
+
     Google Search နှင့် အောက်ပါ Web Search / RSS အချက်အလက်များကို ပေါင်းစပ်၍ ယနေ့ မြန်မာပြည်နှင့် ပတ်သက်သည့်
     နောက်ဆုံးရ အရေးကြီး သတင်းအစုံအလင်ကို မြန်မာဘာသာဖြင့် ရှင်းလင်းပြတ်သားသော Bullet point များဖြင့်
     စာလုံးရေ ၁,၅၀၀ အတွင်း တိုတိုရှင်းရှင်း အနှစ်ချုပ် တင်ပြပေးပါ။
@@ -474,9 +517,11 @@ def get_myanmar_news_summary() -> str:
     return f"📰 Myanmar News Summary ({now_str})\n\n{summary}"
 
 
-# --- Google AI Overview Style Web Search + Profile/Memory Answer ---
+# --- Google AI Overview Style Web Search + Calendar + Profile/Memory Answer ---
 def answer_with_universal_search(user_id: int, user_message: str) -> str:
-    now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
+    now_mm = datetime.now(MM_TZ)
+    now_str = now_mm.strftime("%Y-%m-%d %H:%M MMT")
+    cal_info = get_myanmar_calendar_context(now_mm)
     memory_context = recall_relevant_history(user_id, user_message, recent_limit=8, search_limit=10)
 
     clean_q = re.sub(r"[?？!]", "", user_message).strip()
@@ -485,10 +530,11 @@ def answer_with_universal_search(user_id: int, user_message: str) -> str:
     system_prompt = (
         f"သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။\n"
         f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n"
+        f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
         f"Google Search AI Overview ကဲ့သို့ အသုံးပြုသူ ရှာဖွေမေးမြန်းသည့် မည်သည့်အကြောင်းအရာကိုမဆို "
-        f"Google Search Tool နှင့် Web Search ရလဒ်များကို အသုံးပြု၍ အောက်ပါပုံစံအတိုင်း မြန်မာဘာသာဖြင့် ဖြေကြားပါ:\n"
+        f"Google Search Tool၊ Web Search ရလဒ်များနှင့် မြန်မာပြက္ခဒိန်အချက်အလက်များကို အသုံးပြု၍ အောက်ပါပုံစံအတိုင်း မြန်မာဘာသာဖြင့် ဖြေကြားပါ:\n"
         f"1. **တိုက်ရိုက် အဖြေချုပ် (Direct Answer):** မေးခွန်း၏ အဓိကအဖြေကို စာကြောင်း ၁–၂ ကြောင်းဖြင့် အရင်ဆုံး ရှင်းရှင်းလင်းလင်း ဖြေပါ။\n"
-        f"2. **အဓိက အချက်အလက်များ (Key Points):** ရရှိထားသော ရှာဖွေမှုရလဒ်ထဲမှ သက်ဆိုင်ရာ ရက်စွဲ၊ ဂဏန်း/ဈေးနှုန်း၊ နေရာနှင့် အရေးကြီး အချက်များကို Bullet point များဖြင့် တိတိကျကျ ဖော်ပြပါ။\n"
+        f"2. **အဓိက အချက်အလက်များ (Key Points):** ရရှိထားသော ရှာဖွေမှုရလဒ်/ပြက္ခဒိန်ထဲမှ သက်ဆိုင်ရာ ရက်စွဲ၊ ဂဏန်း/ဈေးနှုန်း၊ နေရာနှင့် အရေးကြီး အချက်များကို Bullet point များဖြင့် တိတိကျကျ ဖော်ပြပါ။\n"
         f"3. အသုံးပြုသူ၏ Learned User Profile နှင့် အရှေ့နောက် Conversation History ကို ချိတ်ဆက်ပြီး အလိုက်သိသိ ဖြေပါ။\n"
         f"4. မေးခွန်းနှင့် မသက်ဆိုင်သော Search ရလဒ်များကို လုံးဝ မသုံးပါနှင့်။ သေချာမသိပါက မသိကြောင်း ရိုးသားစွာ ဖြေပါ။\n"
     )
@@ -891,7 +937,7 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
     await send_long_message(query.message, reply_text)
 
 
-# --- 4. General Telegram Message Handler (6-Intent AI Router + Self-Improving Memory) ---
+# --- 4. General Telegram Message Handler (6-Intent AI Router + Self-Improving Memory + Calendar) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
@@ -983,10 +1029,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif intent == "TASK":
                 reply_text = await asyncio.to_thread(handle_task_intent, user_message, route)
             elif intent == "ADVICE":
+                cal_info = await asyncio.to_thread(get_myanmar_calendar_context)
                 memory_context = await asyncio.to_thread(
                     recall_relevant_history, message.from_user.id, user_message, 8, 10
                 )
                 advice_prompt = (
+                    f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
                     f"အသုံးပြုသူ၏ Profile၊ အတိတ်မှတ်ဉာဏ်နှင့် မေးခွန်းကို သုံးသပ်ပြီး အလိုက်သိသိ မြန်မာဘာသာဖြင့် အကြံပြုပါ:\n"
                     f"1. အခြေအနေ သုံးသပ်ချက်\n"
                     f"2. အကြံပြု လုပ်ဆောင်သင့်သော နည်းလမ်းများ\n"
@@ -996,10 +1044,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 reply_text = await asyncio.to_thread(call_ai_with_3tier_fallback, advice_prompt, None, None, False)
             elif intent == "GENERAL_TASK":
+                cal_info = await asyncio.to_thread(get_myanmar_calendar_context)
                 memory_context = await asyncio.to_thread(
                     recall_relevant_history, message.from_user.id, user_message, 8, 10
                 )
                 gen_prompt = (
+                    f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
                     f"အသုံးပြုသူ၏ Profile၊ အတိတ်စကားပြောဆိုမှုများနှင့် ခိုင်းစေချက်ကို သေချာမှတ်မိပြီး "
                     f"အလိုက်သိသိနှင့် မြန်မာစာ သန့်သန့်ရှင်းရှင်းဖြင့် တိုတိုရှင်းရှင်း ကူညီဆောင်ရွက်ပေးပါ။\n\n"
                     f"{memory_context}\n\n"
@@ -1057,7 +1107,7 @@ async def main_async():
         BotCommand("addtask", "Add a new task"),
     ])
 
-    print("🤖 Self-Improving 6-Intent AI Agent (Maya) started...")
+    print("🤖 Self-Improving 6-Intent AI Agent with Calendar & Memory (Maya) started...")
 
     await application.start()
     await application.updater.start_polling()
