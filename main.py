@@ -827,8 +827,8 @@ async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
             try:
                 r_dt = datetime.fromisoformat(str(r_at).replace("Z", "+00:00")).astimezone(MM_TZ)
                 if r_dt <= now_mm:
-                    title = t.get("title", "")
-                    msg = f"ဟိုင်းရှင် — \"{title}\" လုပ်ဖို့ အချိန်ရောက်ပါပြီနော်။"
+                    title = (t.get("title") or "").strip()
+                    msg = f"ဟိုင်းရှင် — {title} အချိန်ရောက်ပါပြီနော်။"
                     await context.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
                     save_chat_message(ADMIN_USER_ID, "assistant", msg)
                     try:
@@ -859,12 +859,13 @@ async def scheduled_evening_task_digest_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"Error in scheduled_evening_task_digest_job: {e}")
 
 
-# --- 1. Personal Tasks & Reminder Helpers ---
+# --- 1. Personal Tasks & Smart Intelligence Helpers ---
 def looks_like_task_or_reminder(text: str) -> bool:
+    """LLM fail ဖြစ်မှသာ သုံးမယ့် Safety Net keyword check"""
     t = text.strip().lower()
     keywords = [
         "သတိပေး", "remind", "reminder", "task",
-        "မိနစ်နေရင်", "နာရီနေရင်", "မနက်ဖြန်", "မှတ်ထား", "ထည့်ထား"
+        "မိနစ်နေရင်", "မိနစ်မှာ", "နာရီနေရင်", "မှတ်ထား", "ထည့်ထား"
     ]
     return any(k in t for k in keywords)
 
@@ -875,8 +876,7 @@ def parse_reminder_datetime_mmt(text: str) -> datetime | None:
     mm_digits = str.maketrans("၀၁၂၃၄၅၆၇၈၉", "0123456789")
     norm_text = text.translate(mm_digits)
 
-    # 1) Relative time: e.g. "နောက် 1 မိနစ်", "1 minute", "2 mins"
-    rel_min = re.search(r"(?:နောက်\s*)?(\d{1,3})\s*(?:မိနစ်|minute|min)", norm_text, re.IGNORECASE)
+    rel_min = re.search(r"(?:နောက်\s*)?(\d{1,3})\s*(?:မိနစ်|minute|min)s?", norm_text, re.IGNORECASE)
     if rel_min:
         mins = int(rel_min.group(1))
         if 1 <= mins <= 1440:
@@ -886,7 +886,6 @@ def parse_reminder_datetime_mmt(text: str) -> datetime | None:
     if "မနက်ဖြန်" in text or "tomorrow" in text.lower():
         target_date = (now_mm + timedelta(days=1)).date()
 
-    # 2) Explicit HH:MM or X နာရီ
     hm_match = re.search(r"\b(\d{1,2}):(\d{2})\b", norm_text)
     hour = None
     minute = 0
@@ -912,6 +911,120 @@ def parse_reminder_datetime_mmt(text: str) -> datetime | None:
     return candidate
 
 
+def _clean_task_title_fallback(raw_text: str) -> str:
+    t = raw_text.strip()
+    t = re.sub(r"(?:နောက်\s*)?[၀-၉\d]+\s*(?:မိနစ်|နာရီ|minute|min|hour|hr)s?\s*(?:မှာ|နေရင်|အကြာမှာ)?", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:မနက်ဖြန်|ဒီနေ့|ယနေ့|မနက်|ညနေ|ည|ကျောင်းဖွင့်ရက်|တိုင်း)", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\b\d{1,2}:\d{2}\b", "", t)
+    t = re.sub(r"(?:remind\s*ပေးပါ|remind\s*လုပ်ပေးပါ|သတိပေးပါ|သတိပေး|remind)", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s+", " ", t).strip(" -–—၊။")
+    return t or raw_text.strip()
+
+
+def smart_parse_task_details(user_message: str) -> dict:
+    """Fallback parser when smart_classify_and_parse_task falls back."""
+    now_mm = datetime.now(MM_TZ)
+    fallback_dt = parse_reminder_datetime_mmt(user_message)
+    fallback_title = _clean_task_title_fallback(user_message)
+    is_school_day_rule = any(k in user_message for k in ["ကျောင်းဖွင့်ရက်", "ကျောင်းသွားရက်", "school day"])
+    repeat_mode = "school_days" if is_school_day_rule else ("daily" if any(k in user_message for k in ["တိုင်း", "နေ့စဉ်", "daily", "every day"]) else "once")
+    if fallback_dt and is_school_day_rule:
+        while fallback_dt.weekday() >= 5:
+            fallback_dt += timedelta(days=1)
+    return {"title": fallback_title, "remind_dt": fallback_dt, "repeat": repeat_mode}
+
+
+def smart_classify_and_parse_task(user_message: str, recent_ctx: str = "") -> dict:
+    """
+    Keyword ထက် Smart Intelligence ဖြင့် Task ဟုတ်/မဟုတ်၊ action (add/done/list)၊
+    clean_title၊ remind_at (MMT) နှင့် repeat mode ကို ခွဲခြားပေးသည်။
+    """
+    now_mm = datetime.now(MM_TZ)
+    weekday_mm = MYANMAR_WEEKDAYS[now_mm.weekday()]
+
+    prompt = f"""
+You are a smart task/reminder classifier for a Myanmar personal assistant.
+Current Myanmar Time: {now_mm.strftime('%Y-%m-%d (%A) %H:%M MMT')} ({weekday_mm})
+
+Recent Context:
+{recent_ctx or "None"}
+
+User Message: "{user_message}"
+
+Decide whether the user wants to ADD a task/reminder, MARK a task DONE, LIST tasks, or NOT a task action (e.g., asking a question, seeking advice, chatting, or asking about group logs).
+Be careful: asking "ဘယ်နေ့လဲ / ဘယ်လိုလဲ / ဘာလဲ" is usually NOT adding a task unless clearly asking to remind/schedule/track something.
+
+Return ONLY valid JSON:
+{{
+  "is_task": true or false,
+  "action": "add" | "done" | "list" | "none",
+  "clean_title": "short natural Burmese title without time/remind words",
+  "remind_iso": "ISO-8601 datetime with +06:30 if time/delay is given, else null",
+  "repeat": "once" | "daily" | "school_days"
+}}
+"""
+    try:
+        completion = groq_client.with_options(timeout=4.5).chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "Output only valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.0,
+            max_tokens=200,
+        )
+        raw = (completion.choices[0].message.content or "").strip()
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if match:
+            parsed = json.loads(match.group(0))
+            is_task = bool(parsed.get("is_task", False))
+            action = str(parsed.get("action") or "none").lower().strip()
+            if action not in {"add", "done", "list", "none"}:
+                action = "add" if is_task else "none"
+
+            clean_title = str(parsed.get("clean_title") or "").strip() or _clean_task_title_fallback(user_message)
+            rem_dt = None
+            r_iso = parsed.get("remind_iso")
+            if r_iso:
+                try:
+                    rem_dt = datetime.fromisoformat(str(r_iso)).astimezone(MM_TZ)
+                except Exception:
+                    rem_dt = parse_reminder_datetime_mmt(user_message)
+
+            repeat_mode = parsed.get("repeat")
+            if repeat_mode not in {"once", "daily", "school_days"}:
+                repeat_mode = "school_days" if "ကျောင်းဖွင့်ရက်" in user_message else (
+                    "daily" if any(k in user_message for k in ["တိုင်း", "နေ့စဉ်"]) else "once"
+                )
+
+            if rem_dt and repeat_mode == "school_days":
+                while rem_dt.weekday() >= 5:
+                    rem_dt += timedelta(days=1)
+
+            return {
+                "is_task": is_task and action != "none",
+                "action": action if is_task else "none",
+                "title": clean_title,
+                "remind_dt": rem_dt,
+                "repeat": repeat_mode,
+            }
+    except Exception as e:
+        print(f"smart_classify_and_parse_task error: {e}")
+
+    # Safety fallback only if LLM fails
+    if looks_like_task_or_reminder(user_message):
+        fb = smart_parse_task_details(user_message)
+        return {
+            "is_task": True,
+            "action": "add",
+            "title": fb.get("title"),
+            "remind_dt": fb.get("remind_dt"),
+            "repeat": fb.get("repeat", "once"),
+        }
+
+    return {"is_task": False, "action": "none", "title": "", "remind_dt": None, "repeat": "once"}
+
+
 def add_task(title: str, remind_dt: datetime | None = None) -> dict:
     payload = {"title": title, "status": "pending"}
     if remind_dt:
@@ -919,7 +1032,7 @@ def add_task(title: str, remind_dt: datetime | None = None) -> dict:
         payload["reminded"] = False
     try:
         res = supabase.table("tasks").insert(payload).execute()
-        print(f"[Task Inserted] rows={len(res.data or [])}, remind_at={payload.get('remind_at')}")
+        print(f"[Task Inserted] rows={len(res.data or [])}, title={title}, remind_at={payload.get('remind_at')}")
     except Exception as e:
         print(f"[Task Insert Fallback] error={e}")
         res = supabase.table("tasks").insert({"title": title, "status": "pending"}).execute()
@@ -987,12 +1100,22 @@ def handle_task_intent(user_message: str, route: dict) -> str:
             print(f"Task update error: {e}")
             return "Task အခြေအနေ ပြောင်းရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားပါတယ်ရှင်။"
 
-    clean_title = task_title or user_message.strip()
-    remind_dt = parse_reminder_datetime_mmt(user_message)
+    clean_title = task_title or _clean_task_title_fallback(user_message)
+    remind_dt = route.get("remind_dt")
+    repeat_mode = route.get("repeat", "once")
+
     add_task(clean_title, remind_dt)
 
+    note_parts = []
     if remind_dt:
-        return f"မှတ်ထားပါပြီရှင် — \"{clean_title}\" (⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')} မှာ သတိပေးပါ့မယ်နော်)"
+        note_parts.append(f"⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[remind_dt.weekday()]})")
+    if repeat_mode == "school_days":
+        note_parts.append("ကျောင်းဖွင့်ရက် အလိုက် ညှိထားပါတယ်")
+    elif repeat_mode == "daily":
+        note_parts.append("နေ့စဉ် အတွက် မှတ်ထားပါတယ်")
+
+    if note_parts:
+        return f"မှတ်ထားပါပြီရှင် — \"{clean_title}\" ({' | '.join(note_parts)})"
     return f"မှတ်ထားပါပြီရှင် — \"{clean_title}\""
 
 
@@ -1314,9 +1437,14 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not arg:
             await message.reply_text("Usage: /addtask <task description>")
             return
-        remind_dt = parse_reminder_datetime_mmt(arg)
-        add_task(arg, remind_dt)
-        await message.reply_text(f"မှတ်ထားပါပြီရှင် — \"{arg}\"")
+        parsed = smart_classify_and_parse_task(arg)
+        clean_title = parsed.get("title") or _clean_task_title_fallback(arg)
+        remind_dt = parsed.get("remind_dt")
+        add_task(clean_title, remind_dt)
+        if remind_dt:
+            await message.reply_text(f"မှတ်ထားပါပြီရှင် — \"{clean_title}\" (⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')})")
+        else:
+            await message.reply_text(f"မှတ်ထားပါပြီရှင် — \"{clean_title}\"")
         return
 
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
@@ -1395,7 +1523,7 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
     await send_long_message(query.message, reply_text)
 
 
-# --- 4. General Telegram Message Handler (Task Guard + Dedicated Buckets + Self-Improve + Calendar) ---
+# --- 4. General Telegram Message Handler (Smart Task Intelligence + Dedicated Buckets + Self-Improve + Calendar) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
@@ -1467,23 +1595,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_long_message(message, reply_text)
                 return
 
-            if looks_like_task_or_reminder(user_message):
+            recent_ctx = await asyncio.to_thread(get_recent_history_for_router, message.from_user.id, 6)
+            smart_task = await asyncio.to_thread(smart_classify_and_parse_task, user_message, recent_ctx)
+
+            if smart_task.get("is_task"):
                 forced_route = {
                     "bucket": "TASK_GROUP",
                     "sub_type": "task",
-                    "task_action": "done" if any(w in user_message.lower() for w in ["ပြီးပြီ", "done", "ပြီးသွား"]) else (
-                        "list" if any(w in user_message.lower() for w in ["task တွေ ပြ", "ဘာ task", "စာရင်း"]) else "add"
-                    ),
-                    "task_title": user_message.strip(),
+                    "task_action": smart_task.get("action", "add"),
+                    "task_title": smart_task.get("title", user_message.strip()),
                     "task_id": None,
+                    "remind_dt": smart_task.get("remind_dt"),
+                    "repeat": smart_task.get("repeat", "once"),
                 }
                 reply_text = await asyncio.to_thread(handle_task_intent, user_message, forced_route)
                 save_chat_message(message.from_user.id, "assistant", reply_text)
+                asyncio.create_task(asyncio.to_thread(evolve_user_profile, message.from_user.id, user_message, reply_text))
                 await send_long_message(message, reply_text)
                 return
 
             available_groups = await asyncio.to_thread(get_available_groups)
-            recent_ctx = await asyncio.to_thread(get_recent_history_for_router, message.from_user.id, 6)
             user_pref_ctx = await asyncio.to_thread(get_user_profile, message.from_user.id)
             route = await asyncio.to_thread(
                 classify_dedicated_bucket, user_message, available_groups, recent_ctx, user_pref_ctx
@@ -1567,7 +1698,7 @@ async def main_async():
         BotCommand("addtask", "Add a new task"),
     ])
 
-    print("🤖 Dedicated-Bucket Self-Improving AI Agent (Maya) started...")
+    print("🤖 Dedicated-Bucket Self-Improving Smart AI Agent (Maya) started...")
 
     await application.start()
     await application.updater.start_polling()
