@@ -861,14 +861,24 @@ async def scheduled_evening_task_digest_job(context: ContextTypes.DEFAULT_TYPE):
 
 # --- 1. Personal Tasks & Reminder Helpers ---
 def parse_reminder_datetime_mmt(text: str) -> datetime | None:
-    """စာသားထဲက အချိန်/ရက်စွဲ ကို ဖတ်ပြီး MMT datetime ပြန်ပေးသည်။"""
+    """စာသားထဲက နောက် ... မိနစ်/နာရီ သို့မဟုတ် သတ်မှတ်အချိန်ကို ဖတ်ပြီး MMT datetime ပြန်ပေးသည်။"""
     now_mm = datetime.now(MM_TZ)
-    target_date = now_mm.date()
+    mm_digits = str.maketrans("၀၁၂၃၄၅၆၇၈၉", "0123456789")
+    norm_text = text.translate(mm_digits)
 
+    # 1) Relative time: e.g. "နောက် 1 မိနစ်", "1 minute", "2 mins"
+    rel_min = re.search(r"(?:နောက်\s*)?(\d{1,3})\s*(?:မိနစ်|minute|min)", norm_text, re.IGNORECASE)
+    if rel_min:
+        mins = int(rel_min.group(1))
+        if 1 <= mins <= 1440:
+            return now_mm + timedelta(minutes=mins)
+
+    target_date = now_mm.date()
     if "မနက်ဖြန်" in text or "tomorrow" in text.lower():
         target_date = (now_mm + timedelta(days=1)).date()
 
-    hm_match = re.search(r"\b(\d{1,2}):(\d{2})\b", text)
+    # 2) Explicit HH:MM or X နာရီ
+    hm_match = re.search(r"\b(\d{1,2}):(\d{2})\b", norm_text)
     hour = None
     minute = 0
 
@@ -876,8 +886,6 @@ def parse_reminder_datetime_mmt(text: str) -> datetime | None:
         hour = int(hm_match.group(1))
         minute = int(hm_match.group(2))
     else:
-        mm_digits = str.maketrans("၀၁၂၃၄၅၆၇၈၉", "0123456789")
-        norm_text = text.translate(mm_digits)
         hr_match = re.search(r"(\d{1,2})\s*(?:နာရီ|hour|hr)", norm_text, re.IGNORECASE)
         if hr_match:
             hour = int(hr_match.group(1))
@@ -890,10 +898,9 @@ def parse_reminder_datetime_mmt(text: str) -> datetime | None:
         return None
 
     candidate = datetime(target_date.year, target_date.month, target_date.day, hour, minute, 0, tzinfo=MM_TZ)
-    if candidate <= now_mm and "မနက်ဖြန်" not in text and "tomorrow" not in text.lower():
+    if candidate < (now_mm - timedelta(minutes=1)) and "မနက်ဖြန်" not in text and "tomorrow" not in text.lower():
         candidate += timedelta(days=1)
     return candidate
-
 
 def add_task(title: str, remind_dt: datetime | None = None) -> dict:
     payload = {"title": title, "status": "pending"}
