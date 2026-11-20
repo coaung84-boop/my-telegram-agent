@@ -1086,17 +1086,35 @@ Return ONLY valid JSON:
     return {"is_task": False, "action": "none", "title": "", "reason": None, "remind_dt": None, "repeat": "once"}
 
 
-def add_task(title: str, remind_dt: datetime | None = None) -> dict:
-    payload = {"title": title, "status": "pending"}
+def add_task(
+    title: str,
+    remind_dt: datetime | None = None,
+    reason: str | None = None,
+    repeat_type: str = "once",
+) -> dict:
+    payload = {
+        "title": title,
+        "status": "pending",
+        "repeat_type": repeat_type or "once",
+    }
+    if reason:
+        payload["reason"] = reason
     if remind_dt:
         payload["remind_at"] = remind_dt.isoformat()
         payload["reminded"] = False
     try:
         res = supabase.table("tasks").insert(payload).execute()
-        print(f"[Task Inserted] rows={len(res.data or [])}, title={title}, remind_at={payload.get('remind_at')}")
+        print(
+            f"[Task Inserted] rows={len(res.data or [])}, title={title}, "
+            f"repeat={payload.get('repeat_type')}, remind_at={payload.get('remind_at')}"
+        )
     except Exception as e:
         print(f"[Task Insert Fallback] error={e}")
-        res = supabase.table("tasks").insert({"title": title, "status": "pending"}).execute()
+        fallback_payload = {"title": title, "status": "pending"}
+        if remind_dt:
+            fallback_payload["remind_at"] = remind_dt.isoformat()
+            fallback_payload["reminded"] = False
+        res = supabase.table("tasks").insert(fallback_payload).execute()
         print(f"[Task Inserted Basic] rows={len(res.data or [])}")
     return {"status": "success", "message": f"Task added: {title}"}
 
@@ -1166,7 +1184,7 @@ def handle_task_intent(user_message: str, route: dict) -> str:
     repeat_mode = route.get("repeat", "once")
     reason = route.get("reason")
 
-    add_task(clean_title, remind_dt)
+    add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
 
     reply_line = f"မောင်ရေ — \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်"
     if remind_dt:
