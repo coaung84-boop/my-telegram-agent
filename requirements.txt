@@ -4,3 +4,4 @@ groq
 requests
 supabase
 python-dotenv
+mmcalendar
