@@ -495,16 +495,16 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
 
 # --- 6-Intent AI Router (Groq Fast JSON Routing with Recent Context) ---
 def classify_user_intent(user_message: str, available_groups: list, recent_ctx: str = "") -> dict:
-    groups_str = ", ".join(available_groups[:15]) if available_groups else "None"
+    groups_str = ", ".join(available_groups[:20]) if available_groups else "None"
     router_prompt = f"""
 Classify the user's latest message using recent context if needed.
 Intents:
-1. GROUP_QUERY: Asking a specific question/check about internal operations, ways, cancellations, parcels, riders, branches, or events inside Telegram work groups.
-2. GROUP_SUMMARY: Requesting a summary/report of unread or daily messages from Telegram groups.
+1. GROUP_QUERY: Asking about any specific fact, update, number, issue, status, decision, or what a specific person/sender said or did inside Telegram groups. Use this whenever the user asks about a person's words/messages in groups or details from group logs.
+2. GROUP_SUMMARY: Requesting a broad summary or report of unread/today/yesterday messages across Telegram groups.
 3. TASK: Managing personal to-do tasks (adding a task, listing tasks, or marking a task done).
 4. ADVICE: Asking for advice, recommendations, strategic options, or how to handle/solve a problem or decision.
-5. GENERAL_TASK: General requests/instructions like drafting messages, translating, summarizing, coding/tech help, explanations, recalling earlier conversation/user profile, or casual chat.
-6. GENERAL_SEARCH: Asking for current/live facts, weather, news, prices, sports scores/fixtures, calendar/holidays, or external web information.
+5. GENERAL_TASK: General requests like drafting messages, translating, coding/tech help, explanations, or recalling private chat memory with Maya.
+6. GENERAL_SEARCH: Asking for external/live information outside Telegram groups (weather, news, prices, sports scores, general facts).
 
 Available Groups: [{groups_str}]
 Recent Context:
@@ -527,12 +527,20 @@ Return ONLY JSON:
         raw = (completion.choices[0].message.content or "").strip()
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if match:
-            return json.loads(match.group(0))
+            parsed = json.loads(match.group(0))
+            if parsed.get("intent") in {
+                "GROUP_QUERY",
+                "GROUP_SUMMARY",
+                "TASK",
+                "ADVICE",
+                "GENERAL_TASK",
+                "GENERAL_SEARCH",
+            }:
+                return parsed
     except Exception as e:
         print(f"Groq router fallback: {e}")
 
-    return {"intent": "GENERAL_TASK", "group_name": None, "period": "recent"}
-
+    return {"intent": "GROUP_QUERY", "group_name": None, "period": "recent"}
 
 # --- Keyword-Free Parallel Web Search Helpers (Tavily + Google News RSS) ---
 def _tavily_worker(search_query: str, max_results: int = 4) -> str:
@@ -767,32 +775,28 @@ def parse_date_range_from_text(text: str):
 
 
 def query_specific_group_logs(user_message: str, router_group: str = None, router_period: str = "recent") -> str:
+    """Group logs များထဲမှ လိုချင်သော အချက်နှင့် လူတစ်ဦးချင်းစီ၏ ပြောစကားများကို ရှာဖွေဖြေကြားသည်။"""
     cleanup_old_raw_logs()
 
-    if router_period in ["today", "yesterday"]:
-        start_iso, end_iso, date_label = get_date_bounds(router_period)
-    else:
-        start_iso, end_iso, date_label = parse_date_range_from_text(user_message)
-
     thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
-    query = supabase.table("raw_logs").select("*").gte("created_at", thirty_days_ago_iso).order("id")
-
-    if start_iso and end_iso:
-        query = query.gte("created_at", start_iso).lt("created_at", end_iso)
-    else:
-        query = query.limit(150)
-
-    logs_res = query.execute()
-    all_logs = logs_res.data or []
+    logs_res = (
+        supabase.table("raw_logs")
+        .select("*")
+        .gte("created_at", thirty_days_ago_iso)
+        .order("id", desc=True)
+        .limit(400)
+        .execute()
+    )
+    all_logs = list(reversed(logs_res.data or []))
 
     if not all_logs:
-        scope_d = f" ({date_label})" if date_label else ""
-        return f"သက်ဆိုင်ရာ ကာလ{scope_d} အတွက် Group log မှတ်တမ်းများ မရှိသေးပါ။"
+        return "ပြီးခဲ့သော ရက် ၃၀ အတွင်း Group log မှတ်တမ်းများ မရှိသေးပါ။"
 
     matched_group = router_group
+    q_lower = user_message.lower()
+    available_groups = list({l.get("group_name") for l in all_logs if l.get("group_name")})
+
     if not matched_group:
-        q_lower = user_message.lower()
-        available_groups = list({l.get("group_name") for l in all_logs if l.get("group_name")})
         best_score = 0
         for g_name in available_groups:
             g_lower = g_name.lower()
@@ -804,35 +808,57 @@ def query_specific_group_logs(user_message: str, router_group: str = None, route
                 best_score = score
                 matched_group = g_name
 
-    if matched_group:
-        filtered_logs = [l for l in all_logs if l.get("group_name") == matched_group]
-    else:
-        filtered_logs = all_logs
+    candidate_logs = [l for l in all_logs if l.get("group_name") == matched_group] if matched_group else all_logs
 
-    if not filtered_logs:
-        scope_g = matched_group or "သက်ဆိုင်ရာ Group"
-        scope_d = f" ({date_label})" if date_label else ""
-        return f"{scope_g}{scope_d} အတွက် Log မှတ်တမ်း မရှိပါ။"
+    # မေးခွန်းထဲက စကားလုံး/နာမည်များနှင့် ကိုက်ညီသော Log များကို ဦးစားပေးစစ်ထုတ်ခြင်း
+    query_tokens = [
+        tok for tok in re.findall(r"[a-z0-9\u1000-\u109F]+", q_lower)
+        if len(tok) >= 2 and tok not in {"ဘာပြော", "ပြော", "မေး", "လဲ", "လား", "ထဲမှာ", "ထဲက", "group", "ဂရု"}
+    ]
+
+    scored_logs = []
+    for log_item in candidate_logs:
+        sender = str(log_item.get("sender_name") or "").lower()
+        summary = str(log_item.get("content_summary") or "").lower()
+        g_name_l = str(log_item.get("group_name") or "").lower()
+        combined = f"{sender} {summary} {g_name_l}"
+        hit_score = sum(1 for tok in query_tokens if tok in combined)
+        scored_logs.append((hit_score, log_item))
+
+    matched_items = [item for score, item in scored_logs if score > 0]
+    selected_logs = matched_items[-120:] if matched_items else candidate_logs[-120:]
+
+    if router_period in ["today", "yesterday"]:
+        start_iso, end_iso, date_label = get_date_bounds(router_period)
+        period_filtered = [
+            l for l in selected_logs
+            if str(l.get("created_at") or "") >= start_iso and str(l.get("created_at") or "") < end_iso
+        ]
+        if period_filtered:
+            selected_logs = period_filtered
+    else:
+        _, _, date_label = parse_date_range_from_text(user_message)
 
     raw_text = "\n".join(
         [
-            f"[{l.get('group_name', '')} | {str(l.get('created_at', ''))[:16]} | {l.get('sender_name', 'Unknown')}]: {l.get('content_summary', '')}"
-            for l in filtered_logs
+            f"[{_format_mm_timestamp(l.get('created_at'))} | Group: {l.get('group_name', '')} | Sender: {l.get('sender_name', 'Unknown')}]: {l.get('content_summary', '')}"
+            for l in selected_logs
         ]
     )
 
     now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
-    header_info = f"Group: {matched_group or 'All Groups'} | Period: {date_label or 'Recent'}"
+    header_info = f"Group: {matched_group or 'All Groups'} | Period: {date_label or 'All Recent (30d)'}"
 
     prompt = f"""
     လက်ရှိအချိန်: {now_str}
     {header_info}
 
-    အောက်ပါတို့မှာ အဆိုပါ Group ထဲမှ စုစည်းရရှိထားသော Log မှတ်တမ်းများ (Overall) ဖြစ်သည်။
-    အသုံးပြုသူ၏ မေးခွန်းနှင့် တိုက်ရိုက် သက်ဆိုင်သော အချက်အလက်ကိုသာ ရှာဖွေပြီး လူတစ်ယောက်လို သဘာဝကျကျ၊
-    တိတိကျကျနှင့် တိုတိုရှင်းရှင်း မြန်မာဘာသာဖြင့် ဖြေကြားပေးပါ။
-    - မေးထားသည့် အချက် ပါဝင်ပါက အရေအတွက်၊ အချိန်၊ အကြောင်းရင်း/အသေးစိတ်ကို တိတိကျကျ ဖော်ပြပါ။
-    - မေးထားသည့် အချက် Log များထဲတွင် မပါဝင်ပါက မတွေ့ရှိကြောင်း ရှင်းလင်းစွာ ဖြေပါ။ မဆိုင်သည့် အကြောင်းအရာများကို ထည့်မရေးပါနှင့်။
+    အောက်ပါတို့မှာ Telegram Group များမှ သိမ်းဆည်းထားသော Log မှတ်တမ်းများ ဖြစ်သည်။
+    အသုံးပြုသူ၏ မေးခွန်းနှင့် သက်ဆိုင်သော အချက်အလက် သို့မဟုတ် လူတစ်ဦးချင်းစီ၏ ပြောစကားများကို
+    တိတိကျကျ ရှာဖွေပြီး မြန်မာဘာသာဖြင့် ရှင်းလင်းစွာ ဖြေကြားပေးပါ:
+    - Sender နာမည်ဖြင့် မေးလျှင် ထိုသူ ပြောခဲ့သော မက်ဆေ့ခ်ျများ၊ အချိန်နှင့် Group အမည်ကို တိတိကျကျ ဖော်ပြပါ။
+    - အကြောင်းအရာ/အချက်အလက် မေးလျှင် Log ထဲတွင် တွေ့ရှိသည့် အချက်များကို အချိန်၊ အကြောင်းအရာနှင့်တကွ ဖော်ပြပါ။
+    - Log မှတ်တမ်းများထဲတွင် လုံးဝ မပါဝင်ပါက မတွေ့ရှိကြောင်း ရိုးသားစွာ ဖြေပါ။ ထင်ကြေးဖြင့် မဖြေပါနှင့်။
 
     အသုံးပြုသူ မေးခွန်း: {user_message}
 
