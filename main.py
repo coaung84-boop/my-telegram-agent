@@ -821,7 +821,7 @@ def get_formatted_tasks() -> str:
             except Exception:
                 pass
         lines.append(f"{mark} {t['title']}{r_str}")
-    return "မောင်ရေ — လက်ရှိ Task စာရင်းလေးနော်\n" + "\n".join(lines)
+    return "မောင်  လက်ရှိ Task စာရင်းလေးနော်\n" + "\n".join(lines)
 
 
 def delete_latest_pending_task() -> str | None:
@@ -856,8 +856,8 @@ def handle_task_intent(user_message: str, route: dict) -> str:
     if action == "cancel_last":
         removed = delete_latest_pending_task()
         if removed:
-            return f"မောင်ရေ — \"{removed}\" ကို Task ထဲက ပြန်ဖျက်ပေးလိုက်ပြီနော်"
-        return "မောင်ရေ — ပြန်ဖျက်စရာ Task မတွေ့ဘူးနော်"
+            return f"မောင်  \"{removed}\" ကို Task ထဲက ပြန်ဖျက်ပေးလိုက်ပြီနော်"
+        return "မောင်  ပြန်ဖျက်စရာ Task မတွေ့ဘူးနော်"
 
     if action == "done":
         try:
@@ -877,12 +877,12 @@ def handle_task_intent(user_message: str, route: dict) -> str:
             )
             if matched:
                 supabase.table("tasks").update({"status": "done"}).eq("id", matched["id"]).execute()
-                return f"မောင်ရေ — \"{matched['title']}\" ပြီးသွားပြီနော်၊ Done မှတ်လိုက်ပြီနော်"
+                return f"မောင် \"{matched['title']}\" ပြီးသွားပြီနော်၊ Done မှတ်လိုက်ပြီနော်"
 
-            return "မောင်ရေ — ပြီးစီးကြောင်း မှတ်ရမယ့် Pending Task မတွေ့သေးဘူးနော်"
+            return "မောင်  ပြီးစီးကြောင်း မှတ်ရမယ့် Pending Task မတွေ့သေးဘူးနော်"
         except Exception as e:
             print(f"Task update error: {e}")
-            return "မောင်ရေ — Task အခြေအနေ ပြောင်းရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားတယ်၊ ထပ်စမ်းကြည့်နော်"
+            return "မောင် Task အခြေအနေ ပြောင်းရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားတယ်၊ ထပ်စမ်းကြည့်နော်"
 
     clean_title = task_title or _clean_task_title_fallback(user_message)
     remind_dt = route.get("remind_dt")
@@ -920,7 +920,7 @@ def handle_task_intent(user_message: str, route: dict) -> str:
     else:
         add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
 
-    reply_line = f"မောင်ရေ — \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်"
+    reply_line = f"မောင်  \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်"
     if remind_dt:
         reply_line += f"\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[remind_dt.weekday()]})"
     if repeat_mode == "school_days":
@@ -1004,7 +1004,7 @@ def query_specific_group_logs(
 
     if not all_logs:
         scope_d = f" ({date_label})" if date_label else ""
-        return f"မောင်ရေ — သက်ဆိုင်ရာ ကာလ{scope_d} အတွင်း Group မှတ်တမ်းတွေ မရှိသေးဘူးနော်"
+        return f"မောင် သက်ဆိုင်ရာ ကာလ{scope_d} အတွင်း Group မှတ်တမ်းတွေ မရှိသေးဘူးနော်"
 
     matched_group = router_group
     if not matched_group:
@@ -1024,7 +1024,7 @@ def query_specific_group_logs(
     selected_logs = [l for l in all_logs if l.get("group_name") == matched_group] if matched_group else all_logs
 
     if not selected_logs:
-        return f"မောင်ရေ — {matched_group or 'သက်ဆိုင်ရာ Group'} ထဲမှာ မှတ်တမ်း မရှိသေးဘူးနော်"
+        return f"မောင် {matched_group or 'သက်ဆိုင်ရာ Group'} ထဲမှာ မှတ်တမ်း မရှိသေးဘူးနော်"
 
     raw_text = "\n".join(
         [
@@ -1096,8 +1096,8 @@ def get_group_report(user_query: str = "", exact_group_name: str = None, day_mod
     if not logs:
         scope_desc = f" [{matched_group_name}]" if matched_group_name else ""
         if date_label:
-            return f"မောင်ရေ — {date_label}{scope_desc} အတွက် မှတ်တမ်း မရှိသေးဘူးနော်"
-        return f"မောင်ရေ — ဖတ်ရမယ့် မက်ဆေ့ခ်ျအသစ် မရှိသေးဘူး{scope_desc} နော်"
+            return f"မောင် {date_label}{scope_desc} အတွက် မှတ်တမ်း မရှိသေးဘူးနော်"
+        return f"မောင် ဖတ်ရမယ့် မက်ဆေ့ခ်ျအသစ် မရှိသေးဘူး{scope_desc} နော်"
 
     raw_text = "\n".join(
         [f"[{l['group_name']} | {l['sender_name']} | {str(l.get('created_at', ''))[:16]}]: {l['content_summary']}" for l in logs]
@@ -1150,14 +1150,14 @@ def queue_pending_followup(user_id: int, followup_type: str, question: str, targ
 
 
 async def check_pending_followups_job(context: ContextTypes.DEFAULT_TYPE):
-    """Supabase pending_followups ထဲမှ အချက်အလက်ရလာပြီဖြစ်သော Group / Web Search များကို အလိုအလျောက် ပြန်ပို့ပေးသည်။"""
+    """Group query များကိုသာ တစ်ကြိမ်စစ်ပြီး ထပ်ခါထပ်ခါ repeat မပို့စေရန် ထိန်းချုပ်သည်။"""
     try:
         res = (
             supabase.table("pending_followups")
             .select("*")
             .eq("status", "pending")
             .order("id")
-            .limit(30)
+            .limit(20)
             .execute()
         )
         rows = res.data or []
@@ -1175,9 +1175,14 @@ async def check_pending_followups_job(context: ContextTypes.DEFAULT_TYPE):
             target_group = item.get("target_group")
             attempts = int(item.get("attempts") or 0)
 
+            # Web search auto-repeat ကို ရပ်ပြီး လက်ကျန် row များကို ပိတ်သိမ်းသည်
+            if f_type == "web_search":
+                supabase.table("pending_followups").update({"status": "cancelled"}).eq("id", item_id).execute()
+                continue
+
             try:
                 created_dt = datetime.fromisoformat(str(item.get("created_at")).replace("Z", "+00:00")).astimezone(MM_TZ)
-                if (now_mm - created_dt).total_seconds() > 86400:
+                if (now_mm - created_dt).total_seconds() > 3600 or attempts >= 3:
                     supabase.table("pending_followups").update({"status": "expired"}).eq("id", item_id).execute()
                     continue
             except Exception:
@@ -1193,38 +1198,14 @@ async def check_pending_followups_job(context: ContextTypes.DEFAULT_TYPE):
                         query_specific_group_logs, question, target_group, "recent", ""
                     )
                     if ans and "မရှိသေးဘူး" not in ans:
-                        msg = f"မောင်ရေ — ခုဏက စောင့်ခိုင်းထားတဲ့ Group အချက်အလက် ရလာပြီနော်\n\n{ans}"
+                        msg = f"မောင် ခုဏက Group အချက်အလက်လေး ပြန်ပြောပေးတာနော်\n\n{ans}"
                         await context.bot.send_message(chat_id=user_id, text=msg[:3500])
                         save_chat_message(user_id, "assistant", msg)
                         supabase.table("pending_followups").update({"status": "completed"}).eq("id", item_id).execute()
-
-            elif f_type == "web_search":
-                try:
-                    retry_dt = datetime.fromisoformat(str(item.get("retry_at")).replace("Z", "+00:00")).astimezone(MM_TZ)
-                    if now_mm < retry_dt:
-                        continue
-                except Exception:
-                    pass
-
-                if attempts >= 6:
-                    supabase.table("pending_followups").update({"status": "expired"}).eq("id", item_id).execute()
-                    continue
-
-                ans = await asyncio.to_thread(answer_with_universal_search, user_id, question)
-                if ans and "ခဏအလုပ်များနေတယ်" not in ans and "429" not in ans:
-                    msg = f"မောင်ရေ — ခုဏက ဆွဲလို့မရသေးတဲ့ အချက်အလက် ရလာလို့ ပြန်ပြောပေးတာနော်\n\n{ans}"
-                    await context.bot.send_message(chat_id=user_id, text=msg[:3500])
-                    save_chat_message(user_id, "assistant", msg)
-                    supabase.table("pending_followups").update({
-                        "status": "completed",
-                        "attempts": attempts + 1
-                    }).eq("id", item_id).execute()
-                else:
-                    next_retry = (now_mm + timedelta(seconds=180)).isoformat()
-                    supabase.table("pending_followups").update({
-                        "attempts": attempts + 1,
-                        "retry_at": next_retry
-                    }).eq("id", item_id).execute()
+                    else:
+                        supabase.table("pending_followups").update({
+                            "attempts": attempts + 1
+                        }).eq("id", item_id).execute()
 
     except Exception as e:
         print(f"Error in check_pending_followups_job: {e}")
@@ -1337,7 +1318,7 @@ def get_myanmar_news_summary() -> str:
 
 
 # --- Google AI Overview Style Web Search (Focused on User's Search Query) ---
-def answer_with_universal_search(user_id: int, user_message: str) -> str:
+def answer_with_universal_search(user_id: int, user_message: str, allow_queue: bool = True) -> str:
     now_mm = datetime.now(MM_TZ)
     now_str = now_mm.strftime("%Y-%m-%d %H:%M MMT")
     cal_info = get_myanmar_calendar_context(now_mm)
@@ -1369,8 +1350,9 @@ def answer_with_universal_search(user_id: int, user_message: str) -> str:
 
     reply = call_ai_with_3tier_fallback(full_prompt, use_google_search=True)
     if "ခဏအလုပ်များနေတယ်" in reply:
-        queue_pending_followup(user_id, "web_search", user_message, target_group=None, delay_seconds=120)
-        return "မောင်ရေ — ခုဏက ဆာဗာ ခဏအလုပ်များနေလို့ အဖြေမထွက်သေးဘူး၊ ရတာနဲ့ ချက်ချင်း ပြန်ပြောပေးမယ်နော်"
+        if allow_queue:
+            queue_pending_followup(user_id, "web_search", user_message, target_group=None, delay_seconds=120)
+        return "မောင် လောလောဆယ် ဆာဗာ ခဏအလုပ်များနေတယ်၊ ခဏနေပြီး ထပ်မေးကြည့်နော်"
     return reply
 
 
@@ -1416,7 +1398,7 @@ async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
 
                 if r_dt <= now_mm:
                     title = (t.get("title") or "").strip()
-                    msg = f"မောင်ရေ — {title} အချိန်ရောက်ပြီနော်"
+                    msg = f"မောင်  {title} အချိန်ရောက်ပြီနော်"
                     await context.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
                     save_chat_message(ADMIN_USER_ID, "assistant", msg)
                     try:
@@ -1440,7 +1422,7 @@ async def scheduled_evening_task_digest_job(context: ContextTypes.DEFAULT_TYPE):
             return
 
         lines = [f"• {t['title']}" for t in pending[:10]]
-        msg = "မောင်ရေ — ဒီနေ့ ပြီးဖို့ ကျန်နေသေးတဲ့ Task လေးတွေနော်\n" + "\n".join(lines)
+        msg = "မောင်  ဒီနေ့ ပြီးဖို့ ကျန်နေသေးတဲ့ Task လေးတွေနော်\n" + "\n".join(lines)
         await context.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
         save_chat_message(ADMIN_USER_ID, "assistant", msg)
     except Exception as e:
@@ -1462,7 +1444,7 @@ def handle_group_intent(user_id: int, user_message: str, route: dict, recent_ctx
     if ans and "မရှိသေးဘူး" in ans:
         queue_pending_followup(user_id, "group_query", user_message, target_group=target_group, delay_seconds=30)
         g_label = f"\"{target_group}\"" if target_group else "သက်ဆိုင်ရာ Group"
-        return f"မောင်ရေ — {g_label} ရဲ့ မက်ဆေ့ခ်ျအချက်အလက်တွေ အခုထိ မရောက်သေးဘူး၊ ရောက်လာတာနဲ့ ချက်ချင်း ပြန်ပြောပေးမယ်နော်"
+        return f"မောင် {g_label} ရဲ့ မက်ဆေ့ခ်ျအချက်အလက်တွေ အခုထိ မရောက်သေးဘူး၊ ရောက်လာတာနဲ့ ချက်ချင်း ပြန်ပြောပေးမယ်နော်"
     return ans
 
 
@@ -1555,14 +1537,14 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if cmd in ["/start", "/menu"]:
         await message.reply_text(
-            "မောင်ရေ — Quick Menu နော်",
+            "မောင် Quick Menu နော်",
             reply_markup=build_main_menu_keyboard()
         )
         return
 
     if cmd == "/addtask":
         if not arg:
-            await message.reply_text("မောင်ရေ — /addtask <task description> လို့ ရေးပေးနော်")
+            await message.reply_text("မောင်  /addtask <task description> လို့ ရေးပေးနော်")
             return
         parsed = smart_route_and_parse(arg, [])
         clean_title = parsed.get("clean_title") or _clean_task_title_fallback(arg)
@@ -1571,9 +1553,9 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         repeat_mode = parsed.get("repeat_type", "once")
         add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
         if remind_dt:
-            await message.reply_text(f"မောင်ရေ — \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')}")
+            await message.reply_text(f"မောင် \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')}")
         else:
-            await message.reply_text(f"မောင်ရေ — \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်")
+            await message.reply_text(f"မောင်  \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်")
         return
 
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
@@ -1710,7 +1692,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             stripped_lower = user_message.strip().lower()
             if stripped_lower in ["menu", "help"]:
-                await message.reply_text("မောင်ရေ — Quick Menu နော်", reply_markup=build_main_menu_keyboard())
+                await message.reply_text("မောင်  Quick Menu နော်", reply_markup=build_main_menu_keyboard())
                 return
 
             if stripped_lower in ["မာယာ", "maya", "hi", "hello", "hey", "မင်္ဂလာပါ"]:
