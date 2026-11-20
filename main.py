@@ -57,7 +57,7 @@ MYANMAR_WEEKDAYS = [
 STRICT_MYANMAR_SYSTEM = (
     "သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။ "
     "အမြဲတမ်း မြန်မာဘာသာ (Unicode) ဖြင့်သာ လူတစ်ယောက်ကဲ့သို့ သဘာဝကျကျ၊ ရင်းနှီးဖော်ရွေစွာ၊ ရှင်းလင်းပြတ်သားစွာ ဖြေဆိုပါ။ "
-    "အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး စကားအဆုံးတွင် 'ပါနော်' ဟု မသုံးဘဲ 'နော်' ဟုသာ ရင်းရင်းနှီးနှီး သုံးပါ။ "
+    "အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး စကားအဆုံးတွင် 'နော်' ဟုသာ ရင်းရင်းနှီးနှီး သုံးပါ ('ပါနော်' ဟု မသုံးပါနှင့်)။ "
     "မလိုအပ်ဘဲ နိုင်ငံခြားစာလုံး/သင်္ကေတများ ရောနှောခြင်းကို လုံးဝ ရှောင်ကြဉ်ပါ။ "
     "အသုံးပြုသူ၏ Profile၊ နှစ်သက်သည့်ဟန် (Style Preferences)၊ အတိတ်မှတ်တမ်း၊ အလေ့အထနှင့် မြန်မာပြက္ခဒိန်အချက်အလက်များကို "
     "သေချာမှတ်မိပြီး အလိုက်သိသိနှင့် ဖြေပါ။ "
@@ -263,6 +263,20 @@ def get_user_profile(user_id: int) -> str:
     return ""
 
 
+def _extract_json_from_text(raw_text: str) -> dict | None:
+    if not raw_text:
+        return None
+    cleaned = re.sub(r"```(?:json)?", "", raw_text, flags=re.IGNORECASE).replace("```", "").strip()
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
 def evolve_user_profile(user_id: int, user_msg: str, assistant_reply: str):
     """User profile + style/routing preferences နှစ်မျိုးလုံးကို Self-improve လုပ်ပြီး Supabase ထဲ သိမ်းသည်။"""
     try:
@@ -286,27 +300,32 @@ JSON format:
 """
         raw = ""
         try:
-            completion = groq_client.with_options(timeout=8.0).chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=[
-                    {"role": "system", "content": "Output only valid JSON in Myanmar Unicode."},
-                    {"role": "user", "content": update_prompt}
-                ],
-                temperature=0.1,
-                max_tokens=360,
-            )
-            raw = (completion.choices[0].message.content or "").strip()
-        except Exception as groq_err:
-            print(f"evolve_user_profile Groq error, falling back to Gemini: {groq_err}")
             raw = call_ai_with_3tier_fallback(update_prompt, None, None, False)
+        except Exception:
+            raw = ""
 
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if match:
-            parsed = json.loads(match.group(0))
+        parsed = _extract_json_from_text(raw)
+        if not parsed:
+            try:
+                completion = groq_client.with_options(timeout=8.0).chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=[
+                        {"role": "system", "content": "Output only valid JSON in Myanmar Unicode."},
+                        {"role": "user", "content": update_prompt}
+                    ],
+                    temperature=0.1,
+                    max_tokens=360,
+                )
+                raw = (completion.choices[0].message.content or "").strip()
+                parsed = _extract_json_from_text(raw)
+            except Exception as groq_err:
+                print(f"evolve_user_profile Groq fallback error: {groq_err}")
+
+        if parsed:
             summary = str(parsed.get("profile_summary") or "").strip()
             prefs = str(parsed.get("style_preferences") or "").strip()
         else:
-            summary = raw[:500].strip()
+            summary = (raw or "")[:500].strip()
             prefs = ""
 
         if not summary and not prefs:
@@ -531,23 +550,24 @@ Return ONLY JSON:
 {{"bucket":"WEB_SEARCH|TASK_GROUP|ADVICE_GENERAL","sub_type":"group_query|group_summary|task|advice|general","group_name":null,"period":"today|yesterday|recent","task_action":null,"task_title":null,"task_id":null}}
 """
     try:
-        completion = groq_client.with_options(timeout=4.0).chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "Output only valid JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.0,
-            max_tokens=150,
-        )
-        raw = (completion.choices[0].message.content or "").strip()
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if match:
-            parsed = json.loads(match.group(0))
-            if parsed.get("bucket") in {"WEB_SEARCH", "TASK_GROUP", "ADVICE_GENERAL"}:
-                if parsed.get("bucket") == "WEB_SEARCH":
-                    parsed["group_name"] = None
-                return parsed
+        raw_gem = call_ai_with_3tier_fallback(prompt, None, None, False)
+        parsed = _extract_json_from_text(raw_gem)
+        if not parsed:
+            completion = groq_client.with_options(timeout=4.0).chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": "Output only valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.0,
+                max_tokens=150,
+            )
+            parsed = _extract_json_from_text((completion.choices[0].message.content or "").strip())
+
+        if parsed and parsed.get("bucket") in {"WEB_SEARCH", "TASK_GROUP", "ADVICE_GENERAL"}:
+            if parsed.get("bucket") == "WEB_SEARCH":
+                parsed["group_name"] = None
+            return parsed
     except Exception as e:
         print(f"Dedicated router error: {e}")
 
@@ -616,7 +636,7 @@ async def check_pending_followups_job(context: ContextTypes.DEFAULT_TYPE):
                     ans = await asyncio.to_thread(
                         query_specific_group_logs, question, target_group, "recent", ""
                     )
-                    if ans and "မရှိသေးပါ" not in ans:
+                    if ans and "မရှိသေးဘူး" not in ans:
                         msg = f"မောင်ရေ — ခုဏက စောင့်ခိုင်းထားတဲ့ Group အချက်အလက် ရလာပြီနော်\n\n{ans}"
                         await context.bot.send_message(chat_id=user_id, text=msg[:3500])
                         save_chat_message(user_id, "assistant", msg)
@@ -871,7 +891,7 @@ async def scheduled_evening_task_digest_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"Error in scheduled_evening_task_digest_job: {e}")
 
 
-# --- 1. Personal Tasks & Smart Intelligence Helpers ---
+# --- 1. Personal Tasks & Smart Intelligence Helpers (Gemini First -> Groq Fallback) ---
 def _extract_weekday_target(text: str) -> int | None:
     """စာသားထဲက နေ့အမည် (0=Mon .. 6=Sun) ကို ရှာပေးသည်။"""
     t = text.lower()
@@ -890,8 +910,124 @@ def _extract_weekday_target(text: str) -> int | None:
     return None
 
 
+def _parse_time_parts_mmt(text: str) -> tuple[int, int] | None:
+    """'8နာရီခွဲ', '၈ နာရီခွဲ', '16:30', 'ညနေ 4နာရီ' စသည်တို့မှ (hour, minute) ကို ဖတ်သည်။"""
+    mm_digits = str.maketrans("၀၁၂၃၄၅၆၇၈၉", "0123456789")
+    norm = text.translate(mm_digits)
+    lower = text.lower()
+
+    hm = re.search(r"\b(\d{1,2}):(\d{2})\b", norm)
+    if hm:
+        h, m = int(hm.group(1)), int(hm.group(2))
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return h, m
+
+    hr = re.search(r"(\d{1,2})\s*(?:နာရီ|hour|hr)", norm, re.IGNORECASE)
+    if not hr:
+        return None
+
+    h = int(hr.group(1))
+    after_hr = norm[hr.end():hr.end() + 12]
+    m = 0
+    if "ခွဲ" in after_hr or "half" in after_hr.lower():
+        m = 30
+    else:
+        min_m = re.search(r"(\d{1,2})\s*(?:မိနစ်|min)", after_hr, re.IGNORECASE)
+        if min_m:
+            m = int(min_m.group(1))
+
+    if ("ညနေ" in text or "ည" in text or "pm" in lower) and h < 12:
+        h += 12
+    elif ("မနက်" in text or "am" in lower) and h == 12:
+        h = 0
+
+    if 0 <= h <= 23 and 0 <= m <= 59:
+        return h, m
+    return None
+
+
+def parse_reminder_datetime_mmt(text: str) -> datetime | None:
+    """စာသားထဲက နောက် ... မိနစ်/နာရီ သို့မဟုတ် သတ်မှတ်အချိန်/နေ့ကို ဖတ်ပြီး MMT datetime ပြန်ပေးသည်။"""
+    now_mm = datetime.now(MM_TZ)
+    mm_digits = str.maketrans("၀၁၂၃၄၅၆၇၈၉", "0123456789")
+    norm_text = text.translate(mm_digits)
+
+    rel_min = re.search(r"(?:နောက်\s*)?(\d{1,3})\s*(?:မိနစ်|minute|min)s?", norm_text, re.IGNORECASE)
+    if rel_min and "နာရီ" not in norm_text:
+        mins = int(rel_min.group(1))
+        if 1 <= mins <= 1440:
+            return now_mm + timedelta(minutes=mins)
+
+    parts = _parse_time_parts_mmt(text)
+    if not parts:
+        return None
+    hour, minute = parts
+
+    target_date = now_mm.date()
+    target_wd = _extract_weekday_target(text)
+
+    if target_wd is not None:
+        days_ahead = (target_wd - now_mm.weekday()) % 7
+        candidate_check = datetime(now_mm.year, now_mm.month, now_mm.day, hour, minute, 0, tzinfo=MM_TZ) + timedelta(days=days_ahead)
+        if days_ahead == 0 and candidate_check <= now_mm:
+            days_ahead = 7
+        target_date = (now_mm + timedelta(days=days_ahead)).date()
+    elif "မနက်ဖြန်" in text or "tomorrow" in text.lower():
+        target_date = (now_mm + timedelta(days=1)).date()
+
+    candidate = datetime(target_date.year, target_date.month, target_date.day, hour, minute, 0, tzinfo=MM_TZ)
+    if target_wd is None and candidate < (now_mm - timedelta(minutes=1)) and "မနက်ဖြန်" not in text and "tomorrow" not in text.lower():
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def _clean_task_title_fallback(raw_text: str) -> str:
+    t = raw_text.strip()
+    t = re.sub(r"^(?:မဟုတ်ဘူးလေ|မဟုတ်ဘူး|Task\s*[-–—:]?)", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:အပတ်စဉ်|နေ့စဉ်|ကျောင်းဖွင့်ရက်|မြန်မာ\s*calendar|တိုင်း)", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday|တနင်္လာ|အင်္ဂါ|ဗုဒ္ဓဟူး|ကြာသပတေး|သောကြာ|စနေ|တနင်္ဂနွေ)", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:မနက်|ညနေ|ည|နောက်\s*)?[၀-၉\d]+\s*(?:နာရီ|hour|hr)(?:\s*(?:ခွဲ|[၀-၉\d]+\s*မိနစ်))?", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:နောက်\s*)?[၀-၉\d]+\s*(?:မိနစ်|minute|min)s?\s*(?:မှာ|နေရင်|အကြာမှာ)?", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\b\d{1,2}:\d{2}\b", "", t)
+    t = re.sub(r"(?:remind\s*လုပ်ပေးပါ|remind\s*ပေးပါ|သတိပေးပါ|သတိပေး|remind|ပြောတယ်|မှာ)", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s+", " ", t).strip(" -–—၊။")
+    return t or raw_text.strip()
+
+
+def _call_task_parser_llm(prompt: str) -> dict | None:
+    """JSON ခွဲတာကို Gemini နဲ့ အရင်သွားပြီး error/JSON မမှန်မှ Groq fallback သုံးသည်။"""
+    # 1) Gemini first
+    try:
+        raw_gemini = call_ai_with_3tier_fallback(prompt, None, None, False)
+        parsed_gemini = _extract_json_from_text(raw_gemini)
+        if parsed_gemini is not None:
+            return parsed_gemini
+    except Exception as e:
+        print(f"[Task Parser Gemini Error]: {e}")
+
+    # 2) Groq fallback only if Gemini fails or returns non-JSON
+    try:
+        completion = groq_client.with_options(timeout=4.5).chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "Output only valid JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=240,
+        )
+        raw_groq = (completion.choices[0].message.content or "").strip()
+        parsed_groq = _extract_json_from_text(raw_groq)
+        if parsed_groq is not None:
+            return parsed_groq
+    except Exception as e:
+        print(f"[Task Parser Groq Fallback Error]: {e}")
+
+    return None
+
+
 def looks_like_task_or_reminder(text: str) -> bool:
-    """LLM fail ဖြစ်မှသာ သုံးမယ့် Safety Net keyword check"""
+    """LLM နှစ်ခုလုံး fail ဖြစ်မှသာ သုံးမယ့် Safety Net keyword check"""
     t = text.strip().lower()
     keywords = [
         "သတိပေး", "remind", "reminder", "task",
@@ -900,103 +1036,38 @@ def looks_like_task_or_reminder(text: str) -> bool:
     return any(k in t for k in keywords)
 
 
-def parse_reminder_datetime_mmt(text: str) -> datetime | None:
-    """စာသားထဲက နောက် ... မိနစ်/နာရီ သို့မဟုတ် သတ်မှတ်အချိန်ကို ဖတ်ပြီး MMT datetime ပြန်ပေးသည်။"""
-    now_mm = datetime.now(MM_TZ)
-    mm_digits = str.maketrans("၀၁၂၃၄၅၆၇၈၉", "0123456789")
-    norm_text = text.translate(mm_digits)
-
-    rel_min = re.search(r"(?:နောက်\s*)?(\d{1,3})\s*(?:မိနစ်|minute|min)s?", norm_text, re.IGNORECASE)
-    if rel_min:
-        mins = int(rel_min.group(1))
-        if 1 <= mins <= 1440:
-            return now_mm + timedelta(minutes=mins)
-
-    target_date = now_mm.date()
-    if "မနက်ဖြန်" in text or "tomorrow" in text.lower():
-        target_date = (now_mm + timedelta(days=1)).date()
-
-    hm_match = re.search(r"\b(\d{1,2}):(\d{2})\b", norm_text)
-    hour = None
-    minute = 0
-
-    if hm_match:
-        hour = int(hm_match.group(1))
-        minute = int(hm_match.group(2))
-    else:
-        hr_match = re.search(r"(\d{1,2})\s*(?:နာရီ|hour|hr)", norm_text, re.IGNORECASE)
-        if hr_match:
-            hour = int(hr_match.group(1))
-            if ("ညနေ" in text or "ည" in text or "pm" in text.lower()) and hour < 12:
-                hour += 12
-            elif ("မနက်" in text or "am" in text.lower()) and hour == 12:
-                hour = 0
-
-    if hour is None or not (0 <= hour <= 23) or not (0 <= minute <= 59):
-        return None
-
-    candidate = datetime(target_date.year, target_date.month, target_date.day, hour, minute, 0, tzinfo=MM_TZ)
-    if candidate < (now_mm - timedelta(minutes=1)) and "မနက်ဖြန်" not in text and "tomorrow" not in text.lower():
-        candidate += timedelta(days=1)
-    return candidate
-
-
-def _clean_task_title_fallback(raw_text: str) -> str:
-    t = raw_text.strip()
-    t = re.sub(r"(?:နောက်\s*)?[၀-၉\d]+\s*(?:မိနစ်|နာရီ|minute|min|hour|hr)s?\s*(?:မှာ|နေရင်|အကြာမှာ)?", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"(?:မနက်ဖြန်|ဒီနေ့|ယနေ့|မနက်|ညနေ|ည|ကျောင်းဖွင့်ရက်|တိုင်း|မြန်မာ\s*calendar|sunday|monday|tuesday|wednesday|thursday|friday|saturday|တနင်္လာ|အင်္ဂါ|ဗုဒ္ဓဟူး|ကြာသပတေး|သောကြာ|စနေ|တနင်္ဂနွေ)", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"\b\d{1,2}:\d{2}\b", "", t)
-    t = re.sub(r"(?:remind\s*ပေးပါ|remind\s*လုပ်ပေးပါ|သတိပေးပါ|သတိပေး|remind)", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"(?:\S+\s+သိချင်လို့|\S+\s+ဖြစ်လို့)$", "", t)
-    t = re.sub(r"\s+", " ", t).strip(" -–—၊။")
-    return t or raw_text.strip()
-
-
-def smart_parse_task_details(user_message: str) -> dict:
-    """Fallback parser when smart_classify_and_parse_task falls back."""
-    fallback_dt = parse_reminder_datetime_mmt(user_message)
-    fallback_title = _clean_task_title_fallback(user_message)
-    is_school_day_rule = any(k in user_message for k in ["ကျောင်းဖွင့်ရက်", "ကျောင်းသွားရက်", "school day"])
-    repeat_mode = "school_days" if is_school_day_rule else ("daily" if any(k in user_message for k in ["တိုင်း", "နေ့စဉ်", "daily", "every day"]) else "once")
-    if fallback_dt and is_school_day_rule:
-        while fallback_dt.weekday() >= 5:
-            fallback_dt += timedelta(days=1)
-    return {"title": fallback_title, "reason": None, "remind_dt": fallback_dt, "repeat": repeat_mode}
-
-
 def smart_classify_and_parse_task(user_message: str, recent_ctx: str = "") -> dict:
     """
-    Task ဟုတ်/မဟုတ်၊ action (add/done/list)၊ လုပ်ရမယ့်အလုပ်သက်သက် (clean_title)၊
-    ရည်ရွယ်ချက် (reason)၊ remind_at (MMT) နှင့် repeat mode ကို Smart ခွဲခြားပေးသည်။
+    လူတစ်ယောက်လို အဓိပ္ပာယ်ကို နားလည်ပြီး Task ဟုတ်/မဟုတ်၊ action (add/done/list)၊
+    သန့်ရှင်းတဲ့ title၊ reason၊ remind_at (MMT) နဲ့ repeat_type ကို ခွဲထုတ်ပေးသည်။
     """
     now_mm = datetime.now(MM_TZ)
     weekday_mm = MYANMAR_WEEKDAYS[now_mm.weekday()]
     target_wd = _extract_weekday_target(user_message)
+    fallback_dt = parse_reminder_datetime_mmt(user_message)
+    fallback_title = _clean_task_title_fallback(user_message)
 
     prompt = f"""
-You are a precision task & reminder parser for a Myanmar personal assistant.
-Current Myanmar Time: {now_mm.strftime('%Y-%m-%d (%A) %H:%M MMT')} ({weekday_mm})
+You are a smart Burmese personal assistant parsing a task/reminder request like a human.
+Current Time: {now_mm.strftime('%Y-%m-%d (%A) %H:%M MMT')} ({weekday_mm})
 
 Recent Context:
 {recent_ctx or "None"}
 
 User Message: "{user_message}"
 
-Carefully separate:
-1. "is_task": true if user wants to add a reminder/task, mark done, or list tasks. false if just asking a general question, seeking advice, or chatting.
+Analyze carefully:
+1. "is_task": true if adding/updating a task or reminder, marking done, or listing tasks. false if just chatting/asking questions/advice.
 2. "action": "add" | "done" | "list" | "none"
-3. "clean_title": ONLY the core action to perform in natural Burmese. Strip out:
-   - time/delay/schedule words (e.g., "နောက် 1မိနစ်မှာ", "ညနေ 4နာရီတိုင်း", "Sunday မနက် 8နာရီတိုင်းမှာ", "ကျောင်းဖွင့်ရက်တိုင်း", "မြန်မာ calendar")
-   - trigger/command words ("remind ပေးပါ", "သတိပေးပါ", "remind")
-   - trailing reason clauses ("... သိချင်လို့", "... ဖြစ်လို့", "... အတွက်")
-   Example: "ကလေးတွေကို ဖုန်းဆက်ရန် remind ပေးပါ ကျောင်းကပြန်ရောက် မရောက် သိချင်လို့" -> clean_title: "ကလေးတွေကို ဖုန်းဆက်ရန်", reason: "ကျောင်းကပြန်ရောက် မရောက် သိချင်လို့"
-   Example: "မြန်မာ calendar ကျောင်းဖွင့်ရက်တိုင်း ညနေ 4နာရီတိုင်း ကလေးတွေကို ဖုန်းဆက်ရန် remind ပေးပါ ကျောင်းကပြန်ရောက် မရောက် သိချင်လို့" -> clean_title: "ကလေးတွေကို ဖုန်းဆက်ရန်", repeat: "school_days"
-   Example: "Sunday မနက် 8နာရီတိုင်းမှာ ဆေးသောက်ဖို့ သတိပေးပါ" -> clean_title: "ဆေးသောက်ဖို့", repeat: "weekly"
-4. "reason": Short reason if stated (like "ကျောင်းကပြန်ရောက် မရောက် သိချင်လို့"), else null.
-5. "remind_iso": ISO-8601 datetime with +06:30 offset for the next occurrence in Myanmar Time, or null if no time/delay is mentioned.
-   - If "school_days" is set, use Monday-Friday (skip Saturday/Sunday).
-   - If "weekly" with a weekday (e.g., Sunday) is set, compute the upcoming matching weekday at that time.
-6. "repeat": "once" | "daily" | "weekly" | "school_days"
+3. "clean_title": ONLY the pure task to do in natural Burmese (e.g. "ဆေးသောက်ဖို့", "ကလေးတွေကို ဖုန်းဆက်ရန်").
+   Remove all filler words like "မဟုတ်ဘူးလေ", "ပြောတယ်", "remind လုပ်ပေးပါ", "သတိပေးပါ", "Task-", "အပတ်စဉ်", "Sunday", "မနက် ၈ နာရီခွဲမှာ", etc.
+4. "reason": Short reason if given (e.g. "ကျောင်းကပြန်ရောက် မရောက် သိချင်လို့"), else null.
+5. "repeat_type":
+   - "weekly" if repeating on a specific weekday / "အပတ်စဉ်" (like Sunday / တနင်္ဂနွေ)
+   - "school_days" if "ကျောင်းဖွင့်ရက်"
+   - "daily" if daily ("နေ့စဉ်" / every day without specific weekday/school_days)
+   - "once" otherwise
+6. "remind_iso": Exact ISO-8601 datetime with +06:30 offset for the next occurrence in Myanmar Time (e.g. "8နာရီခွဲ" -> 08:30, if today is Saturday 2026-11-21 and user says "Sunday မနက် 8နာရီခွဲ", next Sunday is 2026-11-22T08:30:00+06:30), or null if no time is specified.
 
 Return ONLY valid JSON:
 {{
@@ -1004,58 +1075,55 @@ Return ONLY valid JSON:
   "action": "add",
   "clean_title": "...",
   "reason": null,
-  "remind_iso": null,
-  "repeat": "once"
+  "repeat_type": "once",
+  "remind_iso": null
 }}
 """
-    try:
-        completion = groq_client.with_options(timeout=4.5).chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "Output only valid JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.0,
-            max_tokens=240,
-        )
-        raw = (completion.choices[0].message.content or "").strip()
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if match:
-            parsed = json.loads(match.group(0))
+    parsed = _call_task_parser_llm(prompt)
+    if parsed is not None:
+        try:
             is_task = bool(parsed.get("is_task", False))
             action = str(parsed.get("action") or "none").lower().strip()
             if action not in {"add", "done", "list", "none"}:
                 action = "add" if is_task else "none"
 
-            clean_title = str(parsed.get("clean_title") or "").strip() or _clean_task_title_fallback(user_message)
+            clean_title = str(parsed.get("clean_title") or "").strip()
+            if not clean_title or len(clean_title) > len(user_message) + 5:
+                clean_title = fallback_title
+            else:
+                clean_title = _clean_task_title_fallback(clean_title) or fallback_title
+
             reason = str(parsed.get("reason") or "").strip() or None
 
-            repeat_mode = parsed.get("repeat")
-            if repeat_mode not in {"once", "daily", "weekly", "school_days"}:
+            repeat_type = str(parsed.get("repeat_type") or "once").strip()
+            if repeat_type not in {"once", "daily", "weekly", "school_days"}:
                 if "ကျောင်းဖွင့်ရက်" in user_message:
-                    repeat_mode = "school_days"
-                elif target_wd is not None and any(k in user_message.lower() for k in ["တိုင်း", "every", "weekly"]):
-                    repeat_mode = "weekly"
-                elif any(k in user_message for k in ["တိုင်း", "နေ့စဉ်"]):
-                    repeat_mode = "daily"
+                    repeat_type = "school_days"
+                elif target_wd is not None or "အပတ်စဉ်" in user_message:
+                    repeat_type = "weekly"
+                elif "နေ့စဉ်" in user_message:
+                    repeat_type = "daily"
                 else:
-                    repeat_mode = "once"
+                    repeat_type = "once"
 
-            rem_dt = None
+            rem_dt = fallback_dt
             r_iso = parsed.get("remind_iso")
             if r_iso:
                 try:
-                    rem_dt = datetime.fromisoformat(str(r_iso)).astimezone(MM_TZ)
+                    dt_from_llm = datetime.fromisoformat(str(r_iso))
+                    if dt_from_llm.tzinfo is None:
+                        dt_from_llm = dt_from_llm.replace(tzinfo=MM_TZ)
+                    else:
+                        dt_from_llm = dt_from_llm.astimezone(MM_TZ)
+                    rem_dt = dt_from_llm
                 except Exception:
-                    rem_dt = parse_reminder_datetime_mmt(user_message)
-            else:
-                rem_dt = parse_reminder_datetime_mmt(user_message)
+                    rem_dt = fallback_dt
 
             if rem_dt:
-                if repeat_mode == "school_days":
+                if repeat_type == "school_days":
                     while rem_dt.weekday() >= 5:
                         rem_dt += timedelta(days=1)
-                elif repeat_mode == "weekly" and target_wd is not None:
+                elif repeat_type == "weekly" and target_wd is not None:
                     days_ahead = (target_wd - rem_dt.weekday()) % 7
                     if days_ahead == 0 and rem_dt <= now_mm:
                         days_ahead = 7
@@ -1067,20 +1135,24 @@ Return ONLY valid JSON:
                 "title": clean_title,
                 "reason": reason,
                 "remind_dt": rem_dt,
-                "repeat": repeat_mode,
+                "repeat": repeat_type,
             }
-    except Exception as e:
-        print(f"smart_classify_and_parse_task error: {e}")
+        except Exception as e:
+            print(f"smart_classify_and_parse_task field error: {e}")
 
     if looks_like_task_or_reminder(user_message):
-        fb = smart_parse_task_details(user_message)
+        rep = (
+            "school_days" if "ကျောင်းဖွင့်ရက်" in user_message
+            else ("weekly" if (target_wd is not None or "အပတ်စဉ်" in user_message)
+                  else ("daily" if "နေ့စဉ်" in user_message else "once"))
+        )
         return {
             "is_task": True,
             "action": "add",
-            "title": fb.get("title"),
+            "title": fallback_title,
             "reason": None,
-            "remind_dt": fb.get("remind_dt"),
-            "repeat": fb.get("repeat", "once"),
+            "remind_dt": fallback_dt,
+            "repeat": rep,
         }
 
     return {"is_task": False, "action": "none", "title": "", "reason": None, "remind_dt": None, "repeat": "once"}
@@ -1184,7 +1256,36 @@ def handle_task_intent(user_message: str, route: dict) -> str:
     repeat_mode = route.get("repeat", "once")
     reason = route.get("reason")
 
-    add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
+    is_correction = any(w in user_message for w in ["မဟုတ်ဘူး", "ပြောတယ်", "ပြင်"])
+    if is_correction and action == "add":
+        try:
+            latest_res = (
+                supabase.table("tasks")
+                .select("*")
+                .eq("status", "pending")
+                .order("id", desc=True)
+                .limit(1)
+                .execute()
+            )
+            latest_rows = latest_res.data or []
+            if latest_rows:
+                last_id = latest_rows[0]["id"]
+                upd = {"title": clean_title, "repeat_type": repeat_mode or "once"}
+                if reason:
+                    upd["reason"] = reason
+                if remind_dt:
+                    upd["remind_at"] = remind_dt.isoformat()
+                    upd["reminded"] = False
+                try:
+                    supabase.table("tasks").update(upd).eq("id", last_id).execute()
+                except Exception:
+                    supabase.table("tasks").update({"title": clean_title}).eq("id", last_id).execute()
+            else:
+                add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
+        except Exception:
+            add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
+    else:
+        add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
 
     reply_line = f"မောင်ရေ — \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်"
     if remind_dt:
@@ -1524,7 +1625,9 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parsed = smart_classify_and_parse_task(arg)
         clean_title = parsed.get("title") or _clean_task_title_fallback(arg)
         remind_dt = parsed.get("remind_dt")
-        add_task(clean_title, remind_dt)
+        reason = parsed.get("reason")
+        repeat_mode = parsed.get("repeat", "once")
+        add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
         if remind_dt:
             await message.reply_text(f"မောင်ရေ — \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')}")
         else:
