@@ -812,31 +812,40 @@ async def scheduled_morning_news_job(context: ContextTypes.DEFAULT_TYPE):
 async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
     """အချိန်ကျရောက်လာသော Task Reminder များကို Quick & Friendly ဟန်ဖြင့် သတိပေးသည်။"""
     if not ADMIN_USER_ID:
+        print("[Reminder Check] ADMIN_USER_ID is 0/missing; skipping.")
         return
     try:
         now_mm = datetime.now(MM_TZ)
-        res = supabase.table("tasks").select("*").eq("status", "pending").execute()
+        res = supabase.table("tasks").select("*").execute()
         tasks = res.data or []
 
         for t in tasks:
+            status_val = str(t.get("status") or "pending").strip().lower()
+            if status_val != "pending":
+                continue
             if t.get("reminded") is True:
                 continue
+
             r_at = t.get("remind_at")
             if not r_at:
                 continue
+
             try:
-                r_dt = datetime.fromisoformat(str(r_at).replace("Z", "+00:00")).astimezone(MM_TZ)
+                r_dt = datetime.fromisoformat(str(r_at).replace("Z", "+00:00"))
+                if r_dt.tzinfo is None:
+                    r_dt = r_dt.replace(tzinfo=MM_TZ)
+                else:
+                    r_dt = r_dt.astimezone(MM_TZ)
+
                 if r_dt <= now_mm:
                     title = (t.get("title") or "").strip()
-                    msg = f"ဟိုင်းရှင် — {title} အချိန်ရောက်ပါပြီနော်။"
+                    msg = f"မောင် — {title} အချိန်ရောက်ပြီနော်။"
                     await context.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
                     save_chat_message(ADMIN_USER_ID, "assistant", msg)
-                    try:
-                        supabase.table("tasks").update({"reminded": True}).eq("id", t["id"]).execute()
-                    except Exception:
-                        pass
-            except Exception:
-                continue
+                    supabase.table("tasks").update({"reminded": True}).eq("id", t["id"]).execute()
+                    print(f"[Reminder Sent] task_id={t['id']}, title={title}")
+            except Exception as item_err:
+                print(f"[Reminder Item Error] id={t.get('id')}: {item_err}")
     except Exception as e:
         print(f"Error in check_due_task_reminders_job: {e}")
 
