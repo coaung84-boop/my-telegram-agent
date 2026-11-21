@@ -57,12 +57,25 @@ MYANMAR_WEEKDAYS = [
 STRICT_MYANMAR_SYSTEM = (
     "သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။ "
     "အမြဲတမ်း မြန်မာဘာသာ (Unicode) ဖြင့်သာ လူတစ်ယောက်ကဲ့သို့ သဘာဝကျကျ၊ ရင်းနှီးဖော်ရွေစွာ၊ ရှင်းလင်းပြတ်သားစွာ ဖြေဆိုပါ။ "
-    "အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး စကားအဆုံးတွင် 'နော်' ဟုသာ ရင်းရင်းနှီးနှီး သုံးပါ ('ပါနော်' ဟု မသုံးပါနှင့်)။ "
+    "စကားအဆုံးတွင် 'နော်' ဟု သဘာဝကျကျ သုံးပါ ('ပါနော်' ဟု မသုံးပါနှင့်)။ "
+    "'မောင်' ဟူသော အသုံးအနှုန်းကို ဆေးသောက်ရန် နှင့် မိသားစု/ကလေးများနှင့် ပတ်သက်သော Task/Reminder များတွင်သာ သုံးပါ။ "
+    "အခြား Task များ၊ လုပ်ငန်း/Group Summary များ၊ Web Search များနှင့် အခြားစကားပြောမှုများတွင် 'မောင်' ဟု မသုံးဘဲ ပုံမှန် မာယာ ပြောသလို သဘာဝကျကျ ပြောပါ။ "
     "မလိုအပ်ဘဲ နိုင်ငံခြားစာလုံး/သင်္ကေတများ ရောနှောခြင်းကို လုံးဝ ရှောင်ကြဉ်ပါ။ "
     "အသုံးပြုသူ၏ Profile၊ နှစ်သက်သည့်ဟန် (Style Preferences)၊ အတိတ်မှတ်တမ်း၊ အလေ့အထနှင့် မြန်မာပြက္ခဒိန်အချက်အလက်များကို "
     "သေချာမှတ်မိပြီး အလိုက်သိသိနှင့် ဖြေပါ။ "
     "မေးခွန်းနှင့် မသက်ဆိုင်သော Search အချက်အလက်များကို လုံးဝ မသုံးပါနှင့်။ မသေချာပါက မသိကြောင်း ရိုးသားစွာ ဖြေပါ။"
 )
+
+
+def _is_health_or_family_task(text: str, reason: str | None = None) -> bool:
+    """ဆေးသောက်ရန် သို့မဟုတ် မိသားစု/ကလေးတွေနဲ့ ပတ်သက်တဲ့ task/reminder ဟုတ်မဟုတ် စစ်သည်။"""
+    combined = f"{text or ''} {reason or ''}".lower()
+    keywords = [
+        "ဆေး", "medicine", "pill", "tablet", "ဆေးသောက်",
+        "မိသားစု", "family", "ကလေး", "ကလေးတွေ", "သား", "သမီး", "child", "children", "kid", "kids",
+        "ကျောင်း", "school"
+    ]
+    return any(k in combined for k in keywords)
 
 
 # --- Dummy Health Check Server for Render ---
@@ -85,7 +98,7 @@ def run_health_server():
 # --- Safe Long Message Sender ---
 async def send_long_message(message, text: str, chunk_size: int = 3500):
     if not text or not str(text).strip():
-        await message.reply_text("မောင်ရေ၊ လောလောဆယ် အဖြေပြန်ထုတ်ရာမှာ ခဏအခက်အခဲ ရှိနေတယ်၊ နောက်မှ ထပ်မေးကြည့်နော်")
+        await message.reply_text("လောလောဆယ် အဖြေပြန်ထုတ်ရာမှာ ခဏအခက်အခဲ ရှိနေတယ်၊ နောက်မှ ထပ်မေးကြည့်နော်")
         return
 
     clean_text = str(text).strip()
@@ -335,7 +348,7 @@ Assistant: {assistant_reply[:400]}
 
 Return ONLY valid JSON with two concise fields in Burmese (max ~150 words each):
 1. "profile_summary": Key facts, work context, recurring topics, and recent routing corrections (e.g., when user clarifies a query should be web search vs group log). Keep accurate details, drop outdated/contradictory info, and exclude temporary news/weather trivia.
-2. "style_preferences": How the user likes responses formatted/toned (e.g., calling user "မောင်", ending with "နော်" instead of "ပါနော်", quick & friendly, concise vs detailed, bullet points) and any explicit feedback.
+2. "style_preferences": How the user likes responses formatted/toned (using "မောင်" only for medicine or family/children tasks, normal Maya style elsewhere, ending with "နော်" instead of "ပါနော်", concise vs detailed) and any explicit feedback.
 
 JSON format:
 {{"profile_summary":"...","style_preferences":"..."}}
@@ -540,7 +553,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
     except Exception as e:
         print(f"3B. Groq 70B Error: {e}")
 
-    return "မောင်ရေ၊ လောလောဆယ် ဆာဗာ ခဏအလုပ်များနေတယ်၊ ခဏနေပြီး ထပ်ပို့ကြည့်နော်"
+    return "လောလောဆယ် ဆာဗာ ခဏအလုပ်များနေတယ်၊ ခဏနေပြီး ထပ်မေးကြည့်နော်"
 
 
 # --- Single Smart Intelligence Classifier (TASK / GROUP / ADVICE / GENERAL / WEB_SEARCH) ---
@@ -809,7 +822,7 @@ def list_tasks() -> list:
 def get_formatted_tasks() -> str:
     tasks = list_tasks()
     if not tasks:
-        return "မောင်ရေ၊ လက်ရှိ Task မရှိသေးဘူးနော်"
+        return "လက်ရှိ Task မရှိသေးဘူးနော်"
     lines = []
     for t in tasks:
         mark = "✓" if t.get("status") == "done" else "•"
@@ -821,7 +834,7 @@ def get_formatted_tasks() -> str:
             except Exception:
                 pass
         lines.append(f"{mark} {t['title']}{r_str}")
-    return "မောင်  လက်ရှိ Task စာရင်းလေးနော်\n" + "\n".join(lines)
+    return "လက်ရှိ Task စာရင်းလေးနော်\n" + "\n".join(lines)
 
 
 def delete_latest_pending_task() -> str | None:
@@ -849,6 +862,9 @@ def delete_latest_pending_task() -> str | None:
 def handle_task_intent(user_message: str, route: dict) -> str:
     action = (route.get("task_action") or "add").lower().strip()
     task_title = (route.get("clean_title") or "").strip()
+    reason = route.get("reason")
+    use_maung = _is_health_or_family_task(f"{task_title} {user_message}", reason)
+    prefix = "မောင်ရေ — " if use_maung else ""
 
     if action == "list":
         return get_formatted_tasks()
@@ -856,8 +872,9 @@ def handle_task_intent(user_message: str, route: dict) -> str:
     if action == "cancel_last":
         removed = delete_latest_pending_task()
         if removed:
-            return f"မောင်  \"{removed}\" ကို Task ထဲက ပြန်ဖျက်ပေးလိုက်ပြီနော်"
-        return "မောင်  ပြန်ဖျက်စရာ Task မတွေ့ဘူးနော်"
+            p = "မောင်ရေ — " if _is_health_or_family_task(removed) else ""
+            return f"{p}\"{removed}\" ကို Task ထဲက ပြန်ဖျက်ပေးလိုက်ပြီနော်"
+        return f"{prefix}ပြန်ဖျက်စရာ Task မတွေ့ဘူးနော်"
 
     if action == "done":
         try:
@@ -876,18 +893,21 @@ def handle_task_intent(user_message: str, route: dict) -> str:
                 pending_tasks[0] if pending_tasks else None
             )
             if matched:
+                m_title = matched["title"]
+                p = "မောင်ရေ — " if _is_health_or_family_task(m_title, matched.get("reason")) else ""
                 supabase.table("tasks").update({"status": "done"}).eq("id", matched["id"]).execute()
-                return f"မောင် \"{matched['title']}\" ပြီးသွားပြီနော်၊ Done မှတ်လိုက်ပြီနော်"
+                return f"{p}\"{m_title}\" ပြီးသွားပြီနော်၊ Done မှတ်လိုက်ပြီနော်"
 
-            return "မောင်  ပြီးစီးကြောင်း မှတ်ရမယ့် Pending Task မတွေ့သေးဘူးနော်"
+            return f"{prefix}ပြီးစီးကြောင်း မှတ်ရမယ့် Pending Task မတွေ့သေးဘူးနော်"
         except Exception as e:
             print(f"Task update error: {e}")
-            return "မောင် Task အခြေအနေ ပြောင်းရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားတယ်၊ ထပ်စမ်းကြည့်နော်"
+            return f"{prefix}Task အခြေအနေ ပြောင်းရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားတယ်၊ ထပ်စမ်းကြည့်နော်"
 
     clean_title = task_title or _clean_task_title_fallback(user_message)
     remind_dt = route.get("remind_dt")
     repeat_mode = route.get("repeat_type", "once")
-    reason = route.get("reason")
+    use_maung = _is_health_or_family_task(f"{clean_title} {user_message}", reason)
+    prefix = "မောင်ရေ — " if use_maung else ""
 
     is_correction = any(w in user_message for w in ["မဟုတ်ဘူး", "ပြောတယ်", "ပြင်"])
     if is_correction:
@@ -920,7 +940,7 @@ def handle_task_intent(user_message: str, route: dict) -> str:
     else:
         add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
 
-    reply_line = f"မောင်  \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်"
+    reply_line = f"{prefix}\"{clean_title}\" မှတ်ထားလိုက်ပြီနော်"
     if remind_dt:
         reply_line += f"\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[remind_dt.weekday()]})"
     if repeat_mode == "school_days":
@@ -1004,7 +1024,7 @@ def query_specific_group_logs(
 
     if not all_logs:
         scope_d = f" ({date_label})" if date_label else ""
-        return f"မောင် သက်ဆိုင်ရာ ကာလ{scope_d} အတွင်း Group မှတ်တမ်းတွေ မရှိသေးဘူးနော်"
+        return f"သက်ဆိုင်ရာ ကာလ{scope_d} အတွင်း Group မှတ်တမ်းတွေ မရှိသေးဘူးနော်"
 
     matched_group = router_group
     if not matched_group:
@@ -1024,7 +1044,7 @@ def query_specific_group_logs(
     selected_logs = [l for l in all_logs if l.get("group_name") == matched_group] if matched_group else all_logs
 
     if not selected_logs:
-        return f"မောင် {matched_group or 'သက်ဆိုင်ရာ Group'} ထဲမှာ မှတ်တမ်း မရှိသေးဘူးနော်"
+        return f"{matched_group or 'သက်ဆိုင်ရာ Group'} ထဲမှာ မှတ်တမ်း မရှိသေးဘူးနော်"
 
     raw_text = "\n".join(
         [
@@ -1043,7 +1063,7 @@ def query_specific_group_logs(
     အချက် (သို့မဟုတ် သက်ဆိုင်ရာ လူပြောထားသည့် အကြောင်းအရာ) တစ်ခုတည်းကိုသာ Focus ထား၍ ပြန်ပြောပြပေးပါ။
 
     ဖြေဆိုရမည့် ပုံစံစည်းမျဉ်းများ:
-    1. အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ။
+    1. ပုံမှန် မာယာ ပြောသလို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ ('မောင်' ဟု မသုံးပါနှင့်)။
     2. စက်ရုပ်လို တစ်ကြောင်းချင်းစီ၏ အချိန် (Timestamp) တွေ ထည့်ရေးစရာ မလိုပါ (အသုံးပြုသူက ဘယ်အချိန်လဲဟု မေးမှသာ အချိန်ကို ထည့်ပြောပါ)။
     3. လူတစ်ယောက်က လုပ်ဖော်ကိုင်ဖက်ကို ရင်းနှီးဖော်ရွေစွာ ပြန်ရှင်းပြနေသလို သဘာဝကျကျ၊ ချောချောမွေ့မွေ့နှင့် လိုရင်းတိုရှင်း မြန်မာဘာသာဖြင့် ပြောပြပါ။
     4. အရှေ့မှာ ပြောခဲ့သည့် လူ/အကြောင်းအရာကို ဆက်မေးခြင်း (ဥပမာ - "သူပြောတဲ့ key points အကျဉ်းချုပ်ပေးပါ") ဖြစ်ပါက ထိုသူ၏ ပြောစကားများထဲမှ အဓိက Key Points များကိုသာ Bullet point များဖြင့် ရှင်းရှင်းလင်းလင်း ထုတ်ပေးပါ။
@@ -1096,8 +1116,8 @@ def get_group_report(user_query: str = "", exact_group_name: str = None, day_mod
     if not logs:
         scope_desc = f" [{matched_group_name}]" if matched_group_name else ""
         if date_label:
-            return f"မောင် {date_label}{scope_desc} အတွက် မှတ်တမ်း မရှိသေးဘူးနော်"
-        return f"မောင် ဖတ်ရမယ့် မက်ဆေ့ခ်ျအသစ် မရှိသေးဘူး{scope_desc} နော်"
+            return f"{date_label}{scope_desc} အတွက် မှတ်တမ်း မရှိသေးဘူးနော်"
+        return f"ဖတ်ရမယ့် မက်ဆေ့ခ်ျအသစ် မရှိသေးဘူး{scope_desc} နော်"
 
     raw_text = "\n".join(
         [f"[{l['group_name']} | {l['sender_name']} | {str(l.get('created_at', ''))[:16]}]: {l['content_summary']}" for l in logs]
@@ -1108,7 +1128,7 @@ def get_group_report(user_query: str = "", exact_group_name: str = None, day_mod
     prompt = f"""
     အောက်ပါတို့မှာ Telegram Group များမှ ရရှိထားသော မက်ဆေ့ခ်ျများနှင့် ပုံ/ဖိုင် အနှစ်ချုပ်များ ဖြစ်သည်။
     ({header_info})
-    အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ။
+    ပုံမှန် မာယာ ပြောသလို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ ('မောင်' ဟု မသုံးပါနှင့်)။
     နေ့စဉ် တွေ့နေကျ ရိုးရိုးနှုတ်ဆက်စကားများ၊ အရေးမပါသော စကားပြောဆိုမှုများကို လုံးဝ ဖယ်ထုတ်ပါ။
     အောက်ပါ အချက်များကိုသာ ဦးစားပေး၍ အနှစ်ချုပ် Report တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ထုတ်ပေးပါ:
     1. ပုံမှန်မဟုတ်သော ပြဿနာများ (Issues / Blockers)
@@ -1130,9 +1150,11 @@ def get_group_report(user_query: str = "", exact_group_name: str = None, day_mod
     return f"{header_info}\n\n{report_text}"
 
 
-# --- Supabase Pending Follow-ups Queue ("ရရင် ပြန်ပြောပေးမယ်") ---
-def queue_pending_followup(user_id: int, followup_type: str, question: str, target_group: str = None, delay_seconds: int = 120):
+# --- Supabase Pending Follow-ups Queue (Repeat မဖြစ်စေရန် ထိန်းချုပ်ထားသည်) ---
+def queue_pending_followup(user_id: int, followup_type: str, question: str, target_group: str = None, delay_seconds: int = 30):
     try:
+        if followup_type == "web_search":
+            return
         now_mm = datetime.now(MM_TZ)
         retry_dt = now_mm + timedelta(seconds=delay_seconds)
         supabase.table("pending_followups").insert({
@@ -1175,14 +1197,13 @@ async def check_pending_followups_job(context: ContextTypes.DEFAULT_TYPE):
             target_group = item.get("target_group")
             attempts = int(item.get("attempts") or 0)
 
-            # Web search auto-repeat ကို ရပ်ပြီး လက်ကျန် row များကို ပိတ်သိမ်းသည်
             if f_type == "web_search":
                 supabase.table("pending_followups").update({"status": "cancelled"}).eq("id", item_id).execute()
                 continue
 
             try:
                 created_dt = datetime.fromisoformat(str(item.get("created_at")).replace("Z", "+00:00")).astimezone(MM_TZ)
-                if (now_mm - created_dt).total_seconds() > 3600 or attempts >= 3:
+                if (now_mm - created_dt).total_seconds() > 3600 or attempts >= 2:
                     supabase.table("pending_followups").update({"status": "expired"}).eq("id", item_id).execute()
                     continue
             except Exception:
@@ -1198,7 +1219,7 @@ async def check_pending_followups_job(context: ContextTypes.DEFAULT_TYPE):
                         query_specific_group_logs, question, target_group, "recent", ""
                     )
                     if ans and "မရှိသေးဘူး" not in ans:
-                        msg = f"မောင် ခုဏက Group အချက်အလက်လေး ပြန်ပြောပေးတာနော်\n\n{ans}"
+                        msg = f"ခုဏက Group အချက်အလက်လေး ပြန်ပြောပေးတာနော်\n\n{ans}"
                         await context.bot.send_message(chat_id=user_id, text=msg[:3500])
                         save_chat_message(user_id, "assistant", msg)
                         supabase.table("pending_followups").update({"status": "completed"}).eq("id", item_id).execute()
@@ -1318,7 +1339,7 @@ def get_myanmar_news_summary() -> str:
 
 
 # --- Google AI Overview Style Web Search (Focused on User's Search Query) ---
-def answer_with_universal_search(user_id: int, user_message: str, allow_queue: bool = True) -> str:
+def answer_with_universal_search(user_id: int, user_message: str, allow_queue: bool = False) -> str:
     now_mm = datetime.now(MM_TZ)
     now_str = now_mm.strftime("%Y-%m-%d %H:%M MMT")
     cal_info = get_myanmar_calendar_context(now_mm)
@@ -1333,7 +1354,7 @@ def answer_with_universal_search(user_id: int, user_message: str, allow_queue: b
         f"သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။\n"
         f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n"
         f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
-        f"အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ။\n"
+        f"ပုံမှန် မာယာ ပြောသလို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ ('မောင်' ဟု မသုံးပါနှင့်)။\n"
         f"အသုံးပြုသူ၏ ရှာဖွေမေးမြန်းချက်အပေါ်သာ တိုက်ရိုက် Focus ထားပြီး Google AI Overview ကဲ့သို့ "
         f"ရင်းနှီးဖော်ရွေစွာ၊ ရှင်းလင်းပြတ်သားစွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ (Telegram Group မှတ်တမ်းများကို မရောပါနှင့်):\n"
         f"1. **တိုက်ရိုက် အဖြေချုပ် (Direct Answer):** မေးခွန်း၏ အဓိကအဖြေကို စာကြောင်း ၁–၂ ကြောင်းဖြင့် အရင်ဆုံး ရှင်းရှင်းလင်းလင်း ဖြေပါ။\n"
@@ -1348,11 +1369,23 @@ def answer_with_universal_search(user_id: int, user_message: str, allow_queue: b
         f"ရှာဖွေမေးမြန်းချက်: {user_message}"
     )
 
+    # 1st try: With Google Search grounding
     reply = call_ai_with_3tier_fallback(full_prompt, use_google_search=True)
-    if "ခဏအလုပ်များနေတယ်" in reply:
-        if allow_queue:
-            queue_pending_followup(user_id, "web_search", user_message, target_group=None, delay_seconds=120)
-        return "မောင် လောလောဆယ် ဆာဗာ ခဏအလုပ်များနေတယ်၊ ခဏနေပြီး ထပ်မေးကြည့်နော်"
+
+    # 2nd try: If Google Search grounding fails/busy, answer using Tavily/RSS context without search tool
+    if not reply or "ခဏအလုပ်များနေတယ်" in reply:
+        fallback_prompt = (
+            f"{full_prompt}\n\n"
+            f"မှတ်ချက်: Google Search tool ခဏမရသဖြင့် အထက်ပါ Web Search / RSS အချက်အလက်များနှင့် "
+            f"သင်သိထားသည့် အချက်အလက်များကို အခြေခံ၍ အတတ်နိုင်ဆုံး ရှင်းလင်းစွာ ဖြေပေးပါ။"
+        )
+        reply_no_search = call_ai_with_3tier_fallback(fallback_prompt, use_google_search=False)
+        if reply_no_search and "ခဏအလုပ်များနေတယ်" not in reply_no_search:
+            return reply_no_search
+
+    if not reply or "ခဏအလုပ်များနေတယ်" in reply:
+        return "လောလောဆယ် Web Search ဘက်မှာ ခဏအဆင်မပြေ ဖြစ်နေတယ်၊ ခဏနေပြီး ထပ်မေးကြည့်နော်"
+
     return reply
 
 
@@ -1370,7 +1403,7 @@ async def scheduled_morning_news_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
-    """အချိန်ကျရောက်လာသော Task Reminder များကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး 'နော်' ဖြင့် သတိပေးသည်။"""
+    """အချိန်ကျရောက်လာသော Task Reminder များကို သတိပေးသည်။ (ဆေးသောက်ရန် နှင့် မိသားစု/ကလေး task များတွင်သာ 'မောင်' သုံးသည်)"""
     if not ADMIN_USER_ID:
         return
     try:
@@ -1398,7 +1431,8 @@ async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
 
                 if r_dt <= now_mm:
                     title = (t.get("title") or "").strip()
-                    msg = f"မောင်  {title} အချိန်ရောက်ပြီနော်"
+                    use_maung = _is_health_or_family_task(title, t.get("reason"))
+                    msg = f"မောင်ရေ — {title} အချိန်ရောက်ပြီနော်" if use_maung else f"{title} အချိန်ရောက်ပြီနော်"
                     await context.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
                     save_chat_message(ADMIN_USER_ID, "assistant", msg)
                     try:
@@ -1412,7 +1446,7 @@ async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def scheduled_evening_task_digest_job(context: ContextTypes.DEFAULT_TYPE):
-    """ညနေ ၆ နာရီတိုင်း ပြီးဖို့ ကျန်နေသေးတဲ့ Pending Task များကို ရင်းရင်းနှီးနှီး သတိပေးသည်။"""
+    """ညနေ ၆ နာရီတိုင်း ပြီးဖို့ ကျန်နေသေးတဲ့ Pending Task များကို သတိပေးသည်။"""
     if not ADMIN_USER_ID:
         return
     try:
@@ -1422,7 +1456,7 @@ async def scheduled_evening_task_digest_job(context: ContextTypes.DEFAULT_TYPE):
             return
 
         lines = [f"• {t['title']}" for t in pending[:10]]
-        msg = "မောင်  ဒီနေ့ ပြီးဖို့ ကျန်နေသေးတဲ့ Task လေးတွေနော်\n" + "\n".join(lines)
+        msg = "ဒီနေ့ ပြီးဖို့ ကျန်နေသေးတဲ့ Task လေးတွေနော်\n" + "\n".join(lines)
         await context.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
         save_chat_message(ADMIN_USER_ID, "assistant", msg)
     except Exception as e:
@@ -1444,7 +1478,7 @@ def handle_group_intent(user_id: int, user_message: str, route: dict, recent_ctx
     if ans and "မရှိသေးဘူး" in ans:
         queue_pending_followup(user_id, "group_query", user_message, target_group=target_group, delay_seconds=30)
         g_label = f"\"{target_group}\"" if target_group else "သက်ဆိုင်ရာ Group"
-        return f"မောင် {g_label} ရဲ့ မက်ဆေ့ခ်ျအချက်အလက်တွေ အခုထိ မရောက်သေးဘူး၊ ရောက်လာတာနဲ့ ချက်ချင်း ပြန်ပြောပေးမယ်နော်"
+        return f"{g_label} ရဲ့ မက်ဆေ့ခ်ျအချက်အလက်တွေ အခုထိ မရောက်သေးဘူး၊ ရောက်လာတာနဲ့ ချက်ချင်း ပြန်ပြောပေးမယ်နော်"
     return ans
 
 
@@ -1456,7 +1490,7 @@ def handle_advice_or_general_intent(user_id: int, user_message: str, intent_mode
     if intent_mode == "ADVICE":
         prompt = (
             f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
-            f"အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ။\n"
+            f"ပုံမှန် မာယာ ပြောသလို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ ('မောင်' ဟု မသုံးပါနှင့်)။\n"
             f"အသုံးပြုသူ၏ Profile၊ နှစ်သက်သည့်ဟန် (Style Preferences)၊ အတိတ်မှတ်ဉာဏ်နှင့် မေးခွန်းကို သုံးသပ်ပြီး "
             f"အလိုက်သိသိ မြန်မာဘာသာဖြင့် အကြံပြုပါ:\n"
             f"1. အခြေအနေ သုံးသပ်ချက်\n"
@@ -1468,7 +1502,7 @@ def handle_advice_or_general_intent(user_id: int, user_message: str, intent_mode
     else:
         prompt = (
             f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
-            f"အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ။\n"
+            f"ပုံမှန် မာယာ ပြောသလို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ ('မောင်' ဟု မသုံးပါနှင့်)။\n"
             f"အသုံးပြုသူ၏ Profile၊ နှစ်သက်သည့်ဟန် (Style Preferences)၊ အတိတ်စကားပြောဆိုမှုများနှင့် ခိုင်းစေချက်ကို သေချာမှတ်မိပြီး "
             f"အလိုက်သိသိနှင့် မြန်မာစာ သန့်သန့်ရှင်းရှင်းဖြင့် ကူညီဆောင်ရွက်ပေးပါ။\n\n"
             f"{memory_context}\n\n"
@@ -1537,14 +1571,14 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if cmd in ["/start", "/menu"]:
         await message.reply_text(
-            "မောင် Quick Menu နော်",
+            "Quick Menu နော်",
             reply_markup=build_main_menu_keyboard()
         )
         return
 
     if cmd == "/addtask":
         if not arg:
-            await message.reply_text("မောင်  /addtask <task description> လို့ ရေးပေးနော်")
+            await message.reply_text("/addtask <task description> လို့ ရေးပေးနော်")
             return
         parsed = smart_route_and_parse(arg, [])
         clean_title = parsed.get("clean_title") or _clean_task_title_fallback(arg)
@@ -1552,10 +1586,11 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reason = parsed.get("reason")
         repeat_mode = parsed.get("repeat_type", "once")
         add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
+        prefix = "မောင်ရေ — " if _is_health_or_family_task(f"{clean_title} {arg}", reason) else ""
         if remind_dt:
-            await message.reply_text(f"မောင် \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')}")
+            await message.reply_text(f"{prefix}\"{clean_title}\" မှတ်ထားလိုက်ပြီနော်\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')}")
         else:
-            await message.reply_text(f"မောင်  \"{clean_title}\" မှတ်ထားလိုက်ပြီနော်")
+            await message.reply_text(f"{prefix}\"{clean_title}\" မှတ်ထားလိုက်ပြီနော်")
         return
 
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
@@ -1692,14 +1727,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             stripped_lower = user_message.strip().lower()
             if stripped_lower in ["menu", "help"]:
-                await message.reply_text("မောင်  Quick Menu နော်", reply_markup=build_main_menu_keyboard())
+                await message.reply_text("Quick Menu နော်", reply_markup=build_main_menu_keyboard())
                 return
 
             if stripped_lower in ["မာယာ", "maya", "hi", "hello", "hey", "မင်္ဂလာပါ"]:
                 memory_ctx = await asyncio.to_thread(recall_relevant_history, message.from_user.id, user_message, 4, 2)
                 greet_prompt = (
-                    f"အသုံးပြုသူကို ရင်းရင်းနှီးနှီး 'မောင်' ဟု ခေါ်ပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ။ "
-                    f"အသုံးပြုသူက နှုတ်ဆက်/ခေါ်နေပါသည်။ လက်ရှိ လေ့လာမှတ်သားထားသော Profile/Preferences/Conversation ရှိလျှင် အလိုက်သိသိ "
+                    "ပုံမှန် မာယာ ပြောသလို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ ('မောင်' ဟု မသုံးပါနှင့်)။ "
+                    "နှုတ်ဆက်/ခေါ်နေပါသည်။ လက်ရှိ လေ့လာမှတ်သားထားသော Profile/Preferences/Conversation ရှိလျှင် အလိုက်သိသိ "
                     f"ရင်းနှီးဖော်ရွေစွာ နှုတ်ဆက်ပြီး ဘာကူညီပေးနိုင်မလဲ တိုတိုရှင်းရှင်း မြန်မာဘာသာဖြင့် ဖြေပါ။\n\n{memory_ctx}"
                 )
                 reply_text = await asyncio.to_thread(call_ai_with_3tier_fallback, greet_prompt, None, None, False)
@@ -1720,7 +1755,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if intent == "TASK":
                 reply_text = await asyncio.to_thread(handle_task_intent, user_message, route)
             elif intent == "GROUP":
-                # အကယ်၍ ရှေ့မှာ group report/query ကို task အဖြစ် မှားမှတ်ထားမိတာ ရှိရင် ပြန်ဖျက်ပေးမယ်
                 if any(w in user_message for w in ["task မဟုတ်ဘူး", "မဟုတ်ဘူးလေ"]):
                     await asyncio.to_thread(delete_latest_pending_task)
                 reply_text = await asyncio.to_thread(
@@ -1742,7 +1776,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_long_message(message, reply_text)
 
         except Exception as e:
-            await send_long_message(message, "မောင်ရေ၊ လောလောဆယ် အဖြေပြန်ထုတ်ရာမှာ ခဏအခက်အခဲ ရှိနေတယ်၊ နောက်မှ ထပ်မေးကြည့်နော်")
+            await send_long_message(message, "လောလောဆယ် အဖြေပြန်ထုတ်ရာမှာ ခဏအခက်အခဲ ရှိနေတယ်၊ နောက်မှ ထပ်မေးကြည့်နော်")
             print(f"Error in handle_message: {e}")
 
 
