@@ -420,7 +420,7 @@ def _call_json_intelligence(prompt: str) -> dict | None:
 
     try:
         completion = groq_client.with_options(timeout=4.5).chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="qwen-3.8-27b-instant",
             messages=[
                 {"role": "system", "content": json_sys},
                 {"role": "user", "content": prompt},
@@ -659,7 +659,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
     # Tier 3B: Groq
     try:
         completion = groq_client.with_options(timeout=12.0).chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="qwen-3.8-27b-versatile",
             messages=[
                 {"role": "system", "content": STRICT_MYANMAR_SYSTEM},
                 {"role": "user", "content": prompt_text}
