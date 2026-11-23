@@ -5,9 +5,7 @@ import logging
 import threading
 import asyncio
 import re
-import urllib.parse
-import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 import requests
 from datetime import datetime, timedelta, timezone, time as dt_time
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -56,16 +54,17 @@ MYANMAR_WEEKDAYS = [
 
 DEFAULT_CORE_RULES = (
     "1. 'မောင်' ဟူသော အသုံးအနှုန်းကို ဆေးသောက်ရန် နှင့် မိသားစု/ကလေးများနှင့် ပတ်သက်သော Task/Reminder များတွင်သာ သုံးရမည်။\n"
-    "2. အခြား Task များ၊ Group Summary များ၊ Web Search များနှင့် ရိုးရိုးစကားပြောမှုများတွင် ပုံမှန် မာယာ (Maya) ဟန်ဖြင့်သာ ပြောရမည်။\n"
-    "3. စကားအဆုံးတွင် 'နော်' ဟု သဘာဝကျကျ သုံးရမည် ('ပါနော်' ဟု မသုံးရ)။\n"
+    "2. အခြား Task များ၊ Group Summary များ၊ Web Search များနှင့် ရိုးရိုးစကားပြောမှုများတွင် မြန်မာမိန်းကလေးတစ်ယောက်ကဲ့သို့ သဘာဝကျကျ ပုံမှန် မာယာ (Maya) ဟန်ဖြင့်သာ ပြောရမည်။\n"
+    "3. စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ဘဲ User Profile နှင့် Style Preferences ထဲမှ လေ့လာထားသည့် သဘာဝကျသော အပြောအဆိုဟန်အတိုင်း ပြောဆိုရမည်။\n"
     "4. Group မှတ်တမ်း၊ သတင်းနှင့် Web Search အချက်အလက်များကို ဖြေဆိုသည့်အခါ [Verified] (တိုက်ရိုက်တွေ့ရှိချက်)၊ "
     "[Deduced] (ဆက်စပ်သုံးသပ်ချက်) သို့မဟုတ် [Unverified] (မသေချာသေးသည့်အချက်) tag များ ထည့်သွင်းဖော်ပြရမည်။"
 )
 
 STRICT_MYANMAR_SYSTEM = (
-    "သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။ "
-    "အမြဲတမ်း မြန်မာဘာသာ (Unicode) ဖြင့်သာ လူတစ်ယောက်ကဲ့သို့ သဘာဝကျကျ၊ ရင်းနှီးဖော်ရွေစွာ၊ ရှင်းလင်းပြတ်သားစွာ ဖြေဆိုပါ။ "
-    "စကားအဆုံးတွင် 'နော်' ဟု သဘာဝကျကျ သုံးပါ ('ပါနော်' ဟု မသုံးပါနှင့်)။ "
+    "သင်သည် 'မာယာ (Maya)' အမည်ရှိ မြန်မာမိန်းကလေးဟန် ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။ "
+    "မြန်မာဘာသာ (Unicode) ဖြင့် လူတစ်ယောက်ကဲ့သို့ သဘာဝကျကျ၊ ရင်းနှီးနွေးထွေးစွာ၊ ရှင်းလင်းပြတ်သားစွာ ဖြေဆိုပါ။ "
+    "စကားအဆုံးတွင် စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ဘဲ အခြေအနေနှင့် လိုက်ဖက်သည့် သဘာဝကျသော အသုံးအနှုန်းများ (ဥပမာ - ရှင်၊ ပါ၊ တယ် စသဖြင့် သဘာဝကျသလို) နှင့် "
+    "User Profile / Style Preferences ထဲမှ လေ့လာမှတ်သားထားသည့် စကားပြောဟန်အတိုင်း ပြောဆိုပါ။ "
     "'မောင်' ဟူသော အသုံးအနှုန်းကို ဆေးသောက်ရန် နှင့် မိသားစု/ကလေးများနှင့် ပတ်သက်သော Task/Reminder များတွင်သာ သုံးပါ။ "
     "အခြား Task များ၊ လုပ်ငန်း/Group Summary များ၊ Web Search များနှင့် အခြားစကားပြောမှုများတွင် 'မောင်' ဟု မသုံးဘဲ ပုံမှန် မာယာ ပြောသလို သဘာဝကျကျ ပြောပါ။ "
     "မလိုအပ်ဘဲ နိုင်ငံခြားစာလုံး/သင်္ကေတများ ရောနှောခြင်းကို လုံးဝ ရှောင်ကြဉ်ပါ။ "
@@ -106,7 +105,7 @@ def run_health_server():
 # --- Safe Long Message Sender ---
 async def send_long_message(message, text: str, chunk_size: int = 3500):
     if not text or not str(text).strip():
-        await message.reply_text("လောလောဆယ် အဖြေပြန်ထုတ်ရာမှာ ခဏအခက်အခဲ ရှိနေတယ်၊ နောက်မှ ထပ်မေးကြည့်နော်")
+        await message.reply_text("လောလောဆယ် အဖြေပြန်ထုတ်ရာမှာ ခဏအခက်အခဲ ရှိနေပါတယ်၊ နောက်မှ ထပ်မေးကြည့်ပါရှင်")
         return
 
     clean_text = str(text).strip()
@@ -260,6 +259,20 @@ def save_chat_message(user_id: int, role: str, content: str):
         print(f"Error saving chat message: {e}")
 
 
+def _sanitize_core_rules(raw_rules: str) -> str:
+    """အရင် DB ထဲမှာ ပုံသေ 'နော်' စည်းမျဉ်း ကျန်နေသေးရင် အလိုအလျောက် ဖယ်ရှားပေးသည်။"""
+    text = (raw_rules or "").strip()
+    if not text:
+        return DEFAULT_CORE_RULES
+    lines = []
+    for line in text.splitlines():
+        if "စကားအဆုံးတွင် 'နော်'" in line or "ပါနော်" in line:
+            continue
+        lines.append(line)
+    cleaned = "\n".join(lines).strip()
+    return cleaned or DEFAULT_CORE_RULES
+
+
 def get_user_profile_record(user_id: int) -> dict:
     """user_profile row တစ်ခုလုံး (core_rules, version, profile_summary, style_preferences) ကို ဖတ်သည်။"""
     try:
@@ -273,8 +286,7 @@ def get_user_profile_record(user_id: int) -> dict:
         rows = res.data or []
         if rows:
             row = rows[0]
-            if not (row.get("core_rules") or "").strip():
-                row["core_rules"] = DEFAULT_CORE_RULES
+            row["core_rules"] = _sanitize_core_rules(row.get("core_rules") or "")
             if not row.get("version"):
                 row["version"] = 1
             return row
@@ -313,7 +325,6 @@ def update_core_rule_version(user_id: int, new_rule_line: str, note: str = "User
         old_rules = (rec.get("core_rules") or DEFAULT_CORE_RULES).strip()
         prefs = (rec.get("style_preferences") or "").strip()
 
-        # Archive current version before updating
         try:
             supabase.table("skill_versions").insert({
                 "user_id": int(user_id),
@@ -339,7 +350,6 @@ def update_core_rule_version(user_id: int, new_rule_line: str, note: str = "User
         try:
             supabase.table("user_profile").upsert(payload, on_conflict="user_id").execute()
         except Exception:
-            # Fallback if core_rules/version columns not migrated yet
             supabase.table("user_profile").upsert({
                 "user_id": int(user_id),
                 "profile_summary": rec.get("profile_summary") or "",
@@ -347,10 +357,10 @@ def update_core_rule_version(user_id: int, new_rule_line: str, note: str = "User
                 "updated_at": datetime.now(MM_TZ).isoformat(),
             }, on_conflict="user_id").execute()
 
-        return f"Core Rule အသစ်ကို Version v{new_version} အဖြစ် မှတ်သားပြီး အရင် v{old_version} ကိုလည်း သိမ်းပေးထားပြီနော်"
+        return f"Core Rule အသစ်ကို Version v{new_version} အဖြစ် မှတ်သားပြီး အရင် v{old_version} ကိုလည်း သိမ်းပေးထားပါပြီရှင်"
     except Exception as e:
         print(f"Error updating core rule version: {e}")
-        return "Rule version သိမ်းရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားတယ်၊ ထပ်စမ်းကြည့်နော်"
+        return "Rule version သိမ်းရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားပါတယ်၊ ထပ်စမ်းကြည့်ပါရှင်"
 
 
 def get_skill_versions_summary(user_id: int) -> str:
@@ -378,7 +388,7 @@ def get_skill_versions_summary(user_id: int) -> str:
     except Exception:
         pass
 
-    lines.append("\n💡 Rule အသစ်ထည့်ချင်ရင် `/setrule <rule>` လို့ ရေးထည့်နိုင်တယ်နော်")
+    lines.append("\n💡 Rule အသစ်ထည့်ချင်ရင် `/setrule <rule>` လို့ ရေးထည့်နိုင်ပါတယ်ရှင်")
     return "\n".join(lines)
 
 
@@ -419,8 +429,8 @@ def _call_json_intelligence(prompt: str) -> dict | None:
             print(f"[JSON Intel {model_name} Error]: {e}")
 
     try:
-        completion = groq_client.with_options(timeout=4.5).chat.completions.create(
-            model="qwen-3.8-27b-instant",
+        completion = groq_client.with_options(timeout=5.0).chat.completions.create(
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": json_sys},
                 {"role": "user", "content": prompt},
@@ -453,7 +463,7 @@ Assistant: {assistant_reply[:400]}
 
 Return ONLY valid JSON with two concise fields in Burmese (max ~150 words each):
 1. "profile_summary": Key facts, work context, recurring topics, and routing clarifications. Drop outdated/contradictory trivia.
-2. "style_preferences": Dynamic formatting/tone preferences learned from conversation (do NOT contradict Locked Core Rules).
+2. "style_preferences": Natural tone/persona preferences learned from conversation (e.g. natural female Burmese assistant voice like 'ရှင်', concise formatting). Do NOT add rigid sentence-ending rules like forcing 'နော်'.
 
 JSON format:
 {{"profile_summary":"...","style_preferences":"..."}}
@@ -584,7 +594,7 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 8
     return "\n\n".join(sections)
 
 
-# --- Speed-First & Burmese-Safe 3-Tier AI Fallback Helper ---
+# --- Resilient Multi-Tier AI Fallback Helper (Gemini -> OpenRouter Multi-Free -> Groq Active) ---
 def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, use_google_search=False):
     errors = []
     contents = (
@@ -597,7 +607,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
         tools=tools,
     )
 
-    # Tier 1
+    # Tier 1: Gemini 3.5 Flash-Lite
     for attempt in range(2):
         try:
             response = gemini_client.models.generate_content(
@@ -608,13 +618,15 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
             if response and response.text and response.text.strip():
                 return response.text.strip()
         except Exception as e:
-            err_msg = f"T1({attempt+1}): {type(e).__name__} - {str(e)[:120]}"
+            err_msg = f"T1({attempt+1}): {type(e).__name__} - {str(e)[:90]}"
             print(err_msg)
             errors.append(err_msg)
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                break
             if attempt == 0:
-                time.sleep(1.2)
+                time.sleep(1.0)
 
-    # Tier 2
+    # Tier 2: Gemini 3.8 Flash
     try:
         response = gemini_client.models.generate_content(
             model="gemini-3.8-flash",
@@ -624,59 +636,72 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
         if response and response.text and response.text.strip():
             return response.text.strip()
     except Exception as e:
-        err_msg = f"T2: {type(e).__name__} - {str(e)[:120]}"
+        err_msg = f"T2: {type(e).__name__} - {str(e)[:90]}"
         print(err_msg)
         errors.append(err_msg)
 
-    # Tier 3A: OpenRouter
+    # Tier 3A: OpenRouter Free Models (Try primary then secondary free model)
     if OPENROUTER_API_KEY:
+        openrouter_models = [
+            "google/gemma-4-31b-it:free",
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "openrouter/free",
+        ]
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        for or_model in openrouter_models:
+            try:
+                data = {
+                    "model": or_model,
+                    "messages": [
+                        {"role": "system", "content": STRICT_MYANMAR_SYSTEM},
+                        {"role": "user", "content": prompt_text}
+                    ],
+                    "temperature": 0.25,
+                }
+                response = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers,
+                    json=data,
+                    timeout=12,
+                )
+                res_json = response.json()
+                if "choices" in res_json and len(res_json["choices"]) > 0:
+                    txt = (res_json["choices"][0]["message"].get("content") or "").strip()
+                    if txt:
+                        return txt
+                else:
+                    errors.append(f"T3A({or_model}): {str(res_json)[:90]}")
+            except Exception as e:
+                err_msg = f"T3A({or_model}): {type(e).__name__} - {str(e)[:90]}"
+                print(err_msg)
+                errors.append(err_msg)
+
+    # Tier 3B: Groq Active Models (Avoid deprecated 404 model IDs)
+    groq_models = ["llama-3.1-8b-instant", "gemma2-9b-it"]
+    for g_model in groq_models:
         try:
-            headers = {
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-            }
-            data = {
-                "model": "google/gemma-4-31b-it:free",
-                "messages": [
+            completion = groq_client.with_options(timeout=12.0).chat.completions.create(
+                model=g_model,
+                messages=[
                     {"role": "system", "content": STRICT_MYANMAR_SYSTEM},
                     {"role": "user", "content": prompt_text}
                 ],
-                "temperature": 0.2,
-            }
-            response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=12)
-            res_json = response.json()
-            if "choices" in res_json and len(res_json["choices"]) > 0:
-                txt = (res_json["choices"][0]["message"].get("content") or "").strip()
+                temperature=0.25,
+            )
+            if completion and completion.choices and completion.choices[0].message.content:
+                txt = completion.choices[0].message.content.strip()
                 if txt:
                     return txt
-            else:
-                errors.append(f"T3A: {str(res_json)[:120]}")
         except Exception as e:
-            err_msg = f"T3A: {type(e).__name__} - {str(e)[:120]}"
+            err_msg = f"T3B({g_model}): {type(e).__name__} - {str(e)[:90]}"
             print(err_msg)
             errors.append(err_msg)
 
-    # Tier 3B: Groq
-    try:
-        completion = groq_client.with_options(timeout=12.0).chat.completions.create(
-            model="qwen-3.8-27b-versatile",
-            messages=[
-                {"role": "system", "content": STRICT_MYANMAR_SYSTEM},
-                {"role": "user", "content": prompt_text}
-            ],
-            temperature=0.2,
-        )
-        if completion and completion.choices and completion.choices[0].message.content:
-            txt = completion.choices[0].message.content.strip()
-            if txt:
-                return txt
-    except Exception as e:
-        err_msg = f"T3B: {type(e).__name__} - {str(e)[:120]}"
-        print(err_msg)
-        errors.append(err_msg)
-
     debug_tail = "\n".join(errors[-3:])
-    return f"လောလောဆယ် AI ချိတ်ဆက်မှုမှာ Error တက်နေတယ်နော်:\n{debug_tail}"
+    return f"လောလောဆယ် AI ဆာဗာ ခဏအလုပ်များနေပါတယ်ရှင်၊ ခဏနေပြီး ထပ်စမ်းကြည့်ပေးပါ:\n{debug_tail}"
 
 
 # --- Single Smart Intelligence Classifier (TASK / GROUP / ADVICE / GENERAL / WEB_SEARCH) ---
@@ -932,7 +957,7 @@ def list_tasks() -> list:
 def get_formatted_tasks() -> str:
     tasks = list_tasks()
     if not tasks:
-        return "လက်ရှိ Task မရှိသေးဘူးနော်"
+        return "လက်ရှိ Task မရှိသေးပါဘူးရှင်"
     lines = []
     for t in tasks:
         mark = "✓" if t.get("status") == "done" else "•"
@@ -944,7 +969,7 @@ def get_formatted_tasks() -> str:
             except Exception:
                 pass
         lines.append(f"{mark} {t['title']}{r_str}")
-    return "လက်ရှိ Task စာရင်းလေးနော်\n" + "\n".join(lines)
+    return "လက်ရှိ Task စာရင်းလေးပါရှင်\n" + "\n".join(lines)
 
 
 def delete_latest_pending_task() -> str | None:
@@ -974,6 +999,7 @@ def handle_task_intent(user_message: str, route: dict) -> str:
     reason = route.get("reason")
     use_maung = _is_health_or_family_task(f"{task_title} {user_message}", reason)
     prefix = "မောင်ရေ — " if use_maung else ""
+    ending = "နော်" if use_maung else "ရှင်"
 
     if action == "list":
         return get_formatted_tasks()
@@ -981,9 +1007,11 @@ def handle_task_intent(user_message: str, route: dict) -> str:
     if action == "cancel_last":
         removed = delete_latest_pending_task()
         if removed:
-            p = "မောင်ရေ — " if _is_health_or_family_task(removed) else ""
-            return f"{p}\"{removed}\" ကို Task ထဲက ပြန်ဖျက်ပေးလိုက်ပြီနော်"
-        return f"{prefix}ပြန်ဖျက်စရာ Task မတွေ့ဘူးနော်"
+            is_hf = _is_health_or_family_task(removed)
+            p = "မောင်ရေ — " if is_hf else ""
+            e = "နော်" if is_hf else "ရှင်"
+            return f"{p}\"{removed}\" ကို Task ထဲက ပြန်ဖျက်ပေးလိုက်ပါပြီ{e}"
+        return f"{prefix}ပြန်ဖျက်စရာ Task မတွေ့ပါဘူး{ending}"
 
     if action == "done":
         try:
@@ -1003,20 +1031,23 @@ def handle_task_intent(user_message: str, route: dict) -> str:
             )
             if matched:
                 m_title = matched["title"]
-                p = "မောင်ရေ — " if _is_health_or_family_task(m_title, matched.get("reason")) else ""
+                is_hf = _is_health_or_family_task(m_title, matched.get("reason"))
+                p = "မောင်ရေ — " if is_hf else ""
+                e = "နော်" if is_hf else "ရှင်"
                 supabase.table("tasks").update({"status": "done"}).eq("id", matched["id"]).execute()
-                return f"{p}\"{m_title}\" ပြီးသွားပြီနော်၊ Done မှတ်လိုက်ပြီနော်"
+                return f"{p}\"{m_title}\" ပြီးသွားပြီမို့ Done မှတ်လိုက်ပါပြီ{e}"
 
-            return f"{prefix}ပြီးစီးကြောင်း မှတ်ရမယ့် Pending Task မတွေ့သေးဘူးနော်"
+            return f"{prefix}ပြီးစီးကြောင်း မှတ်ရမယ့် Pending Task မတွေ့သေးပါဘူး{ending}"
         except Exception as e:
             print(f"Task update error: {e}")
-            return f"{prefix}Task အခြေအနေ ပြောင်းရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားတယ်၊ ထပ်စမ်းကြည့်နော်"
+            return f"{prefix}Task အခြေအနေ ပြောင်းရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားပါတယ်၊ ထပ်စမ်းကြည့်ပါ{ending}"
 
     clean_title = task_title or _clean_task_title_fallback(user_message)
     remind_dt = route.get("remind_dt")
     repeat_mode = route.get("repeat_type", "once")
     use_maung = _is_health_or_family_task(f"{clean_title} {user_message}", reason)
     prefix = "မောင်ရေ — " if use_maung else ""
+    ending = "နော်" if use_maung else "ရှင်"
 
     is_correction = any(w in user_message for w in ["မဟုတ်ဘူး", "ပြောတယ်", "ပြင်"])
     if is_correction:
@@ -1049,7 +1080,7 @@ def handle_task_intent(user_message: str, route: dict) -> str:
     else:
         add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
 
-    reply_line = f"{prefix}\"{clean_title}\" မှတ်ထားလိုက်ပြီနော်"
+    reply_line = f"{prefix}\"{clean_title}\" မှတ်ထားလိုက်ပါပြီ{ending}"
     if remind_dt:
         reply_line += f"\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[remind_dt.weekday()]})"
     if repeat_mode == "school_days":
@@ -1133,7 +1164,7 @@ def query_specific_group_logs(
 
     if not all_logs:
         scope_d = f" ({date_label})" if date_label else ""
-        return f"သက်ဆိုင်ရာ ကာလ{scope_d} အတွင်း Group မှတ်တမ်းတွေ မရှိသေးဘူးနော်"
+        return f"သက်ဆိုင်ရာ ကာလ{scope_d} အတွင်း Group မှတ်တမ်းတွေ မရှိသေးပါဘူးရှင်"
 
     matched_group = router_group
     if not matched_group:
@@ -1153,7 +1184,7 @@ def query_specific_group_logs(
     selected_logs = [l for l in all_logs if l.get("group_name") == matched_group] if matched_group else all_logs
 
     if not selected_logs:
-        return f"{matched_group or 'သက်ဆိုင်ရာ Group'} ထဲမှာ မှတ်တမ်း မရှိသေးဘူးနော်"
+        return f"{matched_group or 'သက်ဆိုင်ရာ Group'} ထဲမှာ မှတ်တမ်း မရှိသေးပါဘူးရှင်"
 
     raw_text = "\n".join(
         [
@@ -1172,7 +1203,7 @@ def query_specific_group_logs(
     အချက် (သို့မဟုတ် သက်ဆိုင်ရာ လူပြောထားသည့် အကြောင်းအရာ) တစ်ခုတည်းကိုသာ Focus ထား၍ ပြန်ပြောပြပေးပါ။
 
     ဖြေဆိုရမည့် ပုံစံစည်းမျဉ်းများ:
-    1. ပုံမှန် မာယာ ပြောသလို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ ('မောင်' ဟု မသုံးပါနှင့်)။
+    1. မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်)။
     2. Confidence Tagging: အဓိက အချက်အလက်တိုင်း၏ အနောက်တွင် အောက်ပါ Tag တစ်ခုခု တွဲထည့်ပေးပါ —
        - [Verified] = Group မှတ်တမ်းထဲတွင် တိုက်ရိုက် ပါဝင်သော အချက်
        - [Deduced] = မှတ်တမ်းများမှ ဆက်စပ်သုံးသပ်ထားသော အချက်
@@ -1227,8 +1258,8 @@ def get_group_report(user_query: str = "", exact_group_name: str = None, day_mod
     if not logs:
         scope_desc = f" [{matched_group_name}]" if matched_group_name else ""
         if date_label:
-            return f"{date_label}{scope_desc} အတွက် မှတ်တမ်း မရှိသေးဘူးနော်"
-        return f"ဖတ်ရမယ့် မက်ဆေ့ခ်ျအသစ် မရှိသေးဘူး{scope_desc} နော်"
+            return f"{date_label}{scope_desc} အတွက် မှတ်တမ်း မရှိသေးပါဘူးရှင်"
+        return f"ဖတ်ရမယ့် မက်ဆေ့ခ်ျအသစ် မရှိသေးပါဘူး{scope_desc} ရှင်"
 
     raw_text = "\n".join(
         [f"[{l['group_name']} | {l['sender_name']} | {str(l.get('created_at', ''))[:16]}]: {l['content_summary']}" for l in logs]
@@ -1239,7 +1270,7 @@ def get_group_report(user_query: str = "", exact_group_name: str = None, day_mod
     prompt = f"""
     အောက်ပါတို့မှာ Telegram Group များမှ ရရှိထားသော မက်ဆေ့ခ်ျများနှင့် ပုံ/ဖိုင် အနှစ်ချုပ်များ ဖြစ်သည်။
     ({header_info})
-    ပုံမှန် မာယာ ပြောသလို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ ('မောင်' ဟု မသုံးပါနှင့်)။
+    မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်)။
     နေ့စဉ် တွေ့နေကျ ရိုးရိုးနှုတ်ဆက်စကားများ၊ အရေးမပါသော စကားပြောဆိုမှုများကို လုံးဝ ဖယ်ထုတ်ပါ။
     အချက်တစ်ခုချင်းစီ၏ အနောက်တွင် [Verified] (မှတ်တမ်းထဲ တိုက်ရိုက်ပါဝင်ချက်) သို့မဟုတ် [Deduced] (ဆက်စပ်သုံးသပ်ချက်) tag ထည့်ပေးပါ။
     အောက်ပါ အချက်များကိုသာ ဦးစားပေး၍ အနှစ်ချုပ် Report တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ထုတ်ပေးပါ:
@@ -1262,7 +1293,7 @@ def get_group_report(user_query: str = "", exact_group_name: str = None, day_mod
     return f"{header_info}\n\n{report_text}"
 
 
-# --- Supabase Pending Follow-ups Queue (Repeat မဖြစ်စေရန် ထိန်းချုပ်ထားသည်) ---
+# --- Supabase Pending Follow-ups Queue ---
 def queue_pending_followup(user_id: int, followup_type: str, question: str, target_group: str = None, delay_seconds: int = 30):
     try:
         if followup_type == "web_search":
@@ -1329,8 +1360,8 @@ async def check_pending_followups_job(context: ContextTypes.DEFAULT_TYPE):
                     ans = await asyncio.to_thread(
                         query_specific_group_logs, question, target_group, "recent", ""
                     )
-                    if ans and "မရှိသေးဘူး" not in ans:
-                        msg = f"ခုဏက Group အချက်အလက်လေး ပြန်ပြောပေးတာနော်\n\n{ans}"
+                    if ans and "မရှိသေးပါဘူး" not in ans:
+                        msg = f"ခုဏက Group အချက်အလက်လေး ပြန်ပြောပေးတာပါရှင်\n\n{ans}"
                         await context.bot.send_message(chat_id=user_id, text=msg[:3500])
                         save_chat_message(user_id, "assistant", msg)
                         supabase.table("pending_followups").update({"status": "completed"}).eq("id", item_id).execute()
@@ -1343,7 +1374,7 @@ async def check_pending_followups_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"Error in check_pending_followups_job: {e}")
 
 
-# --- Trusted Local & International Outlets + Focused Web Search Helpers ---
+# --- Direct Web Search Helpers (Tavily + Google Search Grounding, No RSS) ---
 def _tavily_worker(search_query: str, max_results: int = 5) -> str:
     if not TAVILY_API_KEY:
         return ""
@@ -1359,7 +1390,7 @@ def _tavily_worker(search_query: str, max_results: int = 5) -> str:
                 "max_results": max_results,
                 "include_answer": "advanced",
             },
-            timeout=6,
+            timeout=7,
         )
         if resp.status_code != 200:
             return ""
@@ -1378,58 +1409,10 @@ def _tavily_worker(search_query: str, max_results: int = 5) -> str:
         return ""
 
 
-def _rss_worker(queries: list, per_query: int = 4) -> str:
-    collected_items = []
-    seen_titles = set()
-    for q in queries:
-        try:
-            encoded_q = urllib.parse.quote(q)
-            url = f"https://news.google.com/rss/search?q={encoded_q}&hl=en-US&gl=MM&ceid=MM:en"
-            resp = requests.get(url, timeout=5)
-            resp.raise_for_status()
-            root = ET.fromstring(resp.content)
-            for item in root.findall(".//channel/item")[:per_query]:
-                title_el = item.find("title")
-                pub_el = item.find("pubDate")
-                source_el = item.find("source")
-                title = (title_el.text or "").strip() if title_el is not None and title_el.text else ""
-                published = (pub_el.text or "").strip() if pub_el is not None and pub_el.text else ""
-                source_name = (source_el.text or "").strip() if source_el is not None and source_el.text else ""
-                if title and title not in seen_titles:
-                    seen_titles.add(title)
-                    src_tag = f"[{source_name}] " if source_name else ""
-                    collected_items.append(f"- {src_tag}{title} ({published})")
-        except Exception as e:
-            print(f"RSS fast error for '{q}': {e}")
-    return "\n".join(collected_items[:8])
-
-
-def fetch_combined_web_context(tavily_query: str, rss_queries: list = None, max_results: int = 5) -> str:
-    results_map = {"tavily": "", "rss": ""}
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = {executor.submit(_tavily_worker, tavily_query, max_results): "tavily"}
-        if rss_queries:
-            futures[executor.submit(_rss_worker, rss_queries, 4)] = "rss"
-
-        for fut in as_completed(futures, timeout=7):
-            key = futures[fut]
-            try:
-                results_map[key] = fut.result() or ""
-            except Exception:
-                pass
-
-    parts = []
-    if results_map["tavily"]:
-        parts.append(f"--- Web Search (Tavily) ---\n{results_map['tavily']}")
-    if results_map["rss"]:
-        parts.append(f"--- News Headlines (RSS) ---\n{results_map['rss']}")
-    return "\n\n".join(parts)
-
-
 # --- Trusted Local & International Outlets Myanmar News Summary (/news & 9:00 AM Daily Job) ---
 def get_myanmar_news_summary() -> str:
     """
-    RSS မသုံးဘဲ Web Search (Tavily + Google Search grounding) မှတစ်ဆင့်
+    Web Search (Tavily + Google Search grounding) မှတစ်ဆင့်
     Local & Independent Outlets (Myanmar Now, The Irrawaddy, Mizzima, Frontier Myanmar, Khit Thit Media)
     နှင့် International Coverage (BBC Burmese, VOA Burmese, RFA Burmese, Reuters) သတင်းများကို
     တိုက်ရိုက် ရှာဖွေအနှစ်ချုပ်ပေးသည်။
@@ -1470,7 +1453,7 @@ def get_myanmar_news_summary() -> str:
     ပြက္ခဒိန် အချက်အလက်:
     {cal_info}
 
-    ပုံမှန် မာယာ ပြောသလို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ ('မောင်' ဟု မသုံးပါနှင့်)။
+    မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်)။
     Web Search ရလဒ်များနှင့် Google Search တို့ကို အသုံးပြု၍ လွန်ခဲ့သည့် ၂၄ နာရီအတွင်း မြန်မာပြည်နှင့် ပတ်သက်သည့်
     အရေးကြီးဆုံး သတင်းများကို ကဏ္ဍ (၂) ခုခွဲ၍ မြန်မာဘာသာဖြင့် အနှစ်ချုပ်ပေးပါ:
 
@@ -1489,16 +1472,16 @@ def get_myanmar_news_summary() -> str:
     """
 
     summary = call_ai_with_3tier_fallback(prompt, use_google_search=True)
-    if not summary or "ခဏအလုပ်များနေတယ်" in summary or "Error တက်နေတယ်" in summary:
+    if not summary or "ခဏအလုပ်များနေပါတယ်" in summary:
         if has_web_data:
             summary = call_ai_with_3tier_fallback(prompt, use_google_search=False)
 
-    if not summary or "ခဏအလုပ်များနေတယ်" in summary or "Error တက်နေတယ်" in summary:
+    if not summary or "ခဏအလုပ်များနေပါတယ်" in summary:
         return (
             f"📰 Myanmar Daily News Summary ({now_str})\n\n"
-            f"လောလောဆယ် သတင်းရှာဖွေမှု ခဏကြန့်ကြာနေတယ်နော် [Unverified]။ "
+            f"လောလောဆယ် သတင်းရှာဖွေမှု ခဏကြန့်ကြာနေပါတယ်ရှင် [Unverified]။ "
             f"Myanmar Now, The Irrawaddy, Mizzima, Frontier Myanmar, Khit Thit Media နဲ့ "
-            f"BBC Burmese, VOA Burmese, RFA Burmese, Reuters တို့မှာ တိုက်ရိုက် ကြည့်ရှုနိုင်တယ်နော်"
+            f"BBC Burmese, VOA Burmese, RFA Burmese, Reuters တို့မှာ တိုက်ရိုက် ကြည့်ရှုနိုင်ပါတယ်"
         )
 
     return f"📰 Myanmar Daily News Summary ({now_str})\n\n{summary}"
@@ -1512,7 +1495,8 @@ def answer_with_universal_search(user_id: int, user_message: str, allow_queue: b
     profile_text = get_user_profile(user_id)
 
     clean_q = re.sub(r"[?？!]", "", user_message).strip()
-    web_context = fetch_combined_web_context(clean_q, rss_queries=[clean_q], max_results=5)
+    tavily_raw = _tavily_worker(clean_q, max_results=5)
+    web_context = f"--- Web Search (Tavily) ---\n{tavily_raw}" if tavily_raw else "--- Web Search Results ---\nNone"
 
     profile_block = f"--- Learned User Profile & Locked Rules ---\n{profile_text}\n\n" if profile_text else ""
 
@@ -1520,7 +1504,7 @@ def answer_with_universal_search(user_id: int, user_message: str, allow_queue: b
         f"သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။\n"
         f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n"
         f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
-        f"ပုံမှန် မာယာ ပြောသလို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ ('မောင်' ဟု မသုံးပါနှင့်)။\n"
+        f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်)။\n"
         f"အသုံးပြုသူ၏ ရှာဖွေမေးမြန်းချက်အပေါ်သာ တိုက်ရိုက် Focus ထားပြီး ရှင်းလင်းပြတ်သားစွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ:\n"
         f"1. **တိုက်ရိုက် အဖြေချုပ် (Direct Answer):** မေးခွန်း၏ အဓိကအဖြေကို စာကြောင်း ၁–၂ ကြောင်းဖြင့် အရင်ဆုံး ဖြေပါ။\n"
         f"2. **အဓိက အချက်အလက်များ (Key Points):** သက်ဆိုင်ရာ အချက် (၃–၅ ချက်) ကို Bullet point များဖြင့် ဖော်ပြပြီး အချက်တိုင်း၏ အနောက်တွင် [Verified] (ရှာဖွေမှုရလဒ်တွင် တိုက်ရိုက်ပါဝင်ချက်)၊ [Deduced] (ဆက်စပ်သုံးသပ်ချက်) သို့မဟုတ် [Unverified] (မသေချာသေးသည့်အချက်) tag ထည့်ပေးပါ။\n"
@@ -1530,24 +1514,24 @@ def answer_with_universal_search(user_id: int, user_message: str, allow_queue: b
     full_prompt = (
         f"{system_prompt}\n"
         f"{profile_block}"
-        f"{web_context or '--- Web Search Results ---\nNone'}\n\n"
+        f"{web_context}\n\n"
         f"ရှာဖွေမေးမြန်းချက်: {user_message}"
     )
 
     reply = call_ai_with_3tier_fallback(full_prompt, use_google_search=True)
 
-    if not reply or "ခဏအလုပ်များနေတယ်" in reply:
+    if not reply or "ခဏအလုပ်များနေပါတယ်" in reply:
         fallback_prompt = (
             f"{full_prompt}\n\n"
-            f"မှတ်ချက်: Google Search tool ခဏမရသဖြင့် အထက်ပါ Web Search / RSS အချက်အလက်များကို အခြေခံ၍ "
+            f"မှတ်ချက်: Google Search tool ခဏမရသဖြင့် အထက်ပါ Web Search အချက်အလက်များကို အခြေခံ၍ "
             f"Confidence tag ([Verified] / [Deduced] / [Unverified]) များနှင့်တကွ ရှင်းလင်းစွာ ဖြေပေးပါ။"
         )
         reply_no_search = call_ai_with_3tier_fallback(fallback_prompt, use_google_search=False)
-        if reply_no_search and "ခဏအလုပ်များနေတယ်" not in reply_no_search:
+        if reply_no_search and "ခဏအလုပ်များနေပါတယ်" not in reply_no_search:
             return reply_no_search
 
-    if not reply or "ခဏအလုပ်များနေတယ်" in reply:
-        return "လောလောဆယ် Web Search ဘက်မှာ ခဏအဆင်မပြေ ဖြစ်နေတယ်၊ ခဏနေပြီး ထပ်မေးကြည့်နော်"
+    if not reply or "ခဏအလုပ်များနေပါတယ်" in reply:
+        return "လောလောဆယ် Web Search ဘက်မှာ ခဏအဆင်မပြေ ဖြစ်နေပါတယ်ရှင်၊ ခဏနေပြီး ထပ်မေးကြည့်ပါ"
 
     return reply
 
@@ -1594,7 +1578,7 @@ async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
                 if r_dt <= now_mm:
                     title = (t.get("title") or "").strip()
                     use_maung = _is_health_or_family_task(title, t.get("reason"))
-                    msg = f"မောင်ရေ — {title} အချိန်ရောက်ပြီနော်" if use_maung else f"{title} အချိန်ရောက်ပြီနော်"
+                    msg = f"မောင်ရေ — {title} အချိန်ရောက်ပြီနော်" if use_maung else f"{title} အချိန်ရောက်ပါပြီရှင်"
                     await context.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
                     save_chat_message(ADMIN_USER_ID, "assistant", msg)
                     try:
@@ -1617,7 +1601,7 @@ async def scheduled_evening_task_digest_job(context: ContextTypes.DEFAULT_TYPE):
             return
 
         lines = [f"• {t['title']}" for t in pending[:10]]
-        msg = "ဒီနေ့ ပြီးဖို့ ကျန်နေသေးတဲ့ Task လေးတွေနော်\n" + "\n".join(lines)
+        msg = "ဒီနေ့ ပြီးဖို့ ကျန်နေသေးတဲ့ Task လေးတွေပါရှင်\n" + "\n".join(lines)
         await context.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
         save_chat_message(ADMIN_USER_ID, "assistant", msg)
     except Exception as e:
@@ -1635,10 +1619,10 @@ def handle_group_intent(user_id: int, user_message: str, route: dict, recent_ctx
         return get_group_report(user_message, target_group, day_m)
 
     ans = query_specific_group_logs(user_message, target_group, period, recent_ctx)
-    if ans and "မရှိသေးဘူး" in ans:
+    if ans and "မရှိသေးပါဘူး" in ans:
         queue_pending_followup(user_id, "group_query", user_message, target_group=target_group, delay_seconds=30)
         g_label = f"\"{target_group}\"" if target_group else "သက်ဆိုင်ရာ Group"
-        return f"{g_label} ရဲ့ မက်ဆေ့ခ်ျအချက်အလက်တွေ အခုထိ မရောက်သေးဘူး၊ ရောက်လာတာနဲ့ ချက်ချင်း ပြန်ပြောပေးမယ်နော်"
+        return f"{g_label} ရဲ့ မက်ဆေ့ခ်ျအချက်အလက်တွေ အခုထိ မရောက်သေးပါဘူးရှင်၊ ရောက်လာတာနဲ့ ချက်ချင်း ပြန်ပြောပေးပါမယ်"
     return ans
 
 
@@ -1649,7 +1633,7 @@ def handle_advice_or_general_intent(user_id: int, user_message: str, intent_mode
     if intent_mode == "ADVICE":
         prompt = (
             f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
-            f"ပုံမှန် မာယာ ပြောသလို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ ('မောင်' ဟု မသုံးပါနှင့်)။\n"
+            f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်)။\n"
             f"အသုံးပြုသူ၏ Locked Core Rules၊ Profile၊ Style Preferences၊ အတိတ်မှတ်ဉာဏ်နှင့် မေးခွန်းကို သုံးသပ်ပြီး "
             f"အလိုက်သိသိ မြန်မာဘာသာဖြင့် အကြံပြုပါ:\n"
             f"1. အခြေအနေ သုံးသပ်ချက်\n"
@@ -1661,7 +1645,7 @@ def handle_advice_or_general_intent(user_id: int, user_message: str, intent_mode
     else:
         prompt = (
             f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
-            f"ပုံမှန် မာယာ ပြောသလို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ ('မောင်' ဟု မသုံးပါနှင့်)။\n"
+            f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်)။\n"
             f"အသုံးပြုသူ၏ Locked Core Rules၊ Profile၊ Style Preferences၊ အတိတ်စကားပြောဆိုမှုများနှင့် ခိုင်းစေချက်ကို သေချာမှတ်မိပြီး "
             f"အလိုက်သိသိနှင့် မြန်မာစာ သန့်သန့်ရှင်းရှင်းဖြင့် ကူညီဆောင်ရွက်ပေးပါ။\n\n"
             f"{memory_context}\n\n"
@@ -1733,7 +1717,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if cmd in ["/start", "/menu"]:
         await message.reply_text(
-            "Quick Menu နော်",
+            "Quick Menu ပါရှင်",
             reply_markup=build_main_menu_keyboard()
         )
         return
@@ -1745,7 +1729,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if cmd == "/setrule":
         if not arg:
-            await message.reply_text("/setrule <ထပ်ထည့်လိုသည့် rule> လို့ ရေးပေးနော်")
+            await message.reply_text("/setrule <ထပ်ထည့်လိုသည့် rule> လို့ ရေးပေးပါရှင်")
             return
         reply_text = await asyncio.to_thread(update_core_rule_version, message.from_user.id, arg, "Added via /setrule")
         await send_long_message(message, reply_text)
@@ -1753,7 +1737,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if cmd == "/addtask":
         if not arg:
-            await message.reply_text("/addtask <task description> လို့ ရေးပေးနော်")
+            await message.reply_text("/addtask <task description> လို့ ရေးပေးပါရှင်")
             return
         parsed = smart_route_and_parse(arg, [])
         clean_title = parsed.get("clean_title") or _clean_task_title_fallback(arg)
@@ -1761,11 +1745,13 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reason = parsed.get("reason")
         repeat_mode = parsed.get("repeat_type", "once")
         add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
-        prefix = "မောင်ရေ — " if _is_health_or_family_task(f"{clean_title} {arg}", reason) else ""
+        is_hf = _is_health_or_family_task(f"{clean_title} {arg}", reason)
+        prefix = "မောင်ရေ — " if is_hf else ""
+        ending = "နော်" if is_hf else "ရှင်"
         if remind_dt:
-            await message.reply_text(f"{prefix}\"{clean_title}\" မှတ်ထားလိုက်ပြီနော်\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')}")
+            await message.reply_text(f"{prefix}\"{clean_title}\" မှတ်ထားလိုက်ပါပြီ{ending}\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')}")
         else:
-            await message.reply_text(f"{prefix}\"{clean_title}\" မှတ်ထားလိုက်ပြီနော်")
+            await message.reply_text(f"{prefix}\"{clean_title}\" မှတ်ထားလိုက်ပါပြီ{ending}")
         return
 
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
@@ -1859,7 +1845,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_name = message.from_user.first_name if message.from_user else "Unknown"
     group_name = message.chat.title if chat_type in ["group", "supergroup"] else "Private"
 
-    # CASE A: Group Messages
+    # CASE A: Group Messages (Silent observer logger)
     if chat_type in ["group", "supergroup"]:
         content_summary = ""
 
@@ -1890,7 +1876,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # CASE B: Private Chat
+    # CASE B: Private Chat (Single-user ADMIN_USER_ID restricted)
     if chat_type == "private":
         if message.from_user.id != ADMIN_USER_ID:
             await message.reply_text("Unauthorized.")
@@ -1907,17 +1893,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             stripped_lower = user_message.strip().lower()
             if stripped_lower in ["menu", "help"]:
-                await message.reply_text("Quick Menu နော်", reply_markup=build_main_menu_keyboard())
+                await message.reply_text("Quick Menu ပါရှင်", reply_markup=build_main_menu_keyboard())
                 return
 
             if stripped_lower in ["မာယာ", "maya", "hi", "hello", "hey", "မင်္ဂလာပါ"]:
                 memory_ctx = await asyncio.to_thread(recall_relevant_history, message.from_user.id, user_message, 4, 2)
                 greet_prompt = (
-                    "ပုံမှန် မာယာ ပြောသလို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပြီး အဆုံးတွင် 'နော်' ဟု သုံးပါ ('မောင်' ဟု မသုံးပါနှင့်)။ "
+                    "မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်)။ "
                     "နှုတ်ဆက်/ခေါ်နေပါသည်။ လက်ရှိ လေ့လာမှတ်သားထားသော Locked Core Rules/Profile/Preferences/Conversation ရှိလျှင် အလိုက်သိသိ "
                     f"ရင်းနှီးဖော်ရွေစွာ နှုတ်ဆက်ပြီး ဘာကူညီပေးနိုင်မလဲ တိုတိုရှင်းရှင်း မြန်မာဘာသာဖြင့် ဖြေပါ။\n\n{memory_ctx}"
                 )
                 reply_text = await asyncio.to_thread(call_ai_with_3tier_fallback, greet_prompt, None, None, False)
+                save_chat_message(message.from_user.id, "assistant", reply_text)
+                await send_long_message(message, reply_text)
+                return
+
+            # Natural news summary request shortcut (e.g. "သတင်း အနှစ်ချုပ်", "news summary")
+            if any(k in stripped_lower for k in ["news summary", "daily news", "သတင်း အနှစ်ချုပ်", "သတင်းအနှစ်ချုပ်", "မြန်မာသတင်း အနှစ်ချုပ်"]):
+                reply_text = await asyncio.to_thread(get_myanmar_news_summary)
                 save_chat_message(message.from_user.id, "assistant", reply_text)
                 await send_long_message(message, reply_text)
                 return
@@ -1956,7 +1949,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_long_message(message, reply_text)
 
         except Exception as e:
-            await send_long_message(message, "လောလောဆယ် အဖြေပြန်ထုတ်ရာမှာ ခဏအခက်အခဲ ရှိနေတယ်၊ နောက်မှ ထပ်မေးကြည့်နော်")
+            await send_long_message(message, "လောလောဆယ် အဖြေပြန်ထုတ်ရာမှာ ခဏအခက်အခဲ ရှိနေပါတယ်ရှင်၊ နောက်မှ ထပ်မေးကြည့်ပါ")
             print(f"Error in handle_message: {e}")
 
 
@@ -2020,7 +2013,7 @@ async def main_async():
         BotCommand("setrule", "Add a new versioned core rule"),
     ])
 
-    print("🤖 Maya AI Agent (Confidence Tagging + Skill Versioning + Trusted News Outlets) started...")
+    print("🤖 Maya AI Agent (Natural Maya Persona + Confidence Tagging + Skill Versioning + Trusted News) started...")
 
     await application.start()
     await application.updater.start_polling()
