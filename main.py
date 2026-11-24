@@ -61,6 +61,7 @@ MAX_GROUP_MEDIA_AI_PER_HOUR = 15
 _NEWS_CACHE = {"ts": 0.0, "text": ""}
 _GROUP_MEDIA_AI_TIMESTAMPS: list[float] = []
 _JOB_ERROR_COUNTS: dict[str, int] = {}
+_PENDING_GITHUB_ACTIONS: dict[str, dict] = {}
 
 MYANMAR_WEEKDAYS = [
     "တနင်္လာနေ့",
