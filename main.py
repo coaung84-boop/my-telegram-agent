@@ -127,7 +127,71 @@ def _clean_maya_voice(text: str) -> str:
         return text
     text = text.replace("ကျွန်တော့်", "မာယာ့").replace("ကျွန်တော်", "မာယာ")
     text = re.sub(r"[\u0E00-\u0E7F]+", "", text)
-    return text
+    text = re.sub(r"\[meta:[^\]]*\]", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
+
+def _detect_task_category_and_priority(text: str, reason: str | None = None) -> tuple[str, str]:
+    """Task စာသားပေါ်မူတည်၍ category (health/family/work/general) နှင့် priority (urgent/normal) ခွဲခြားသည်။"""
+    combined = f"{text or ''} {reason or ''}".lower()
+
+    if any(k in combined for k in ["ဆေး", "medicine", "pill", "tablet", "ဆေးသောက်", "ကျန်းမာရေး", "health", "ဆရာဝန်", "doctor"]):
+        category = "health"
+    elif any(k in combined for k in ["မိသားစု", "family", "ကလေး", "ကလေးတွေ", "သား", "သမီး", "child", "children", "kid", "kids", "ကျောင်း", "school", "ကျောင်းလခ"]):
+        category = "family"
+    elif any(k in combined for k in ["report", "vendor", "branch", "meeting", "contract", "order", "parcel", "delivery", "လုပ်ငန်း", "ရုံး", "စာရင်း", "အစည်းအဝေး", "customer", "client", "fulfillment"]):
+        category = "work"
+    else:
+        category = "general"
+
+    is_urgent = any(
+        k in combined
+        for k in ["အရေးကြီး", "urgent", "asap", "ချက်ချင်း", "မဖြစ်မနေ", "important", "priority", "ဆေးသောက်"]
+    )
+    priority = "urgent" if is_urgent else "normal"
+    return category, priority
+
+
+def _pack_task_reason(reason: str | None, category: str, priority: str) -> str:
+    """Column မရှိသေးသည့် fallback အတွက် category/priority ကို reason ထဲ ထည့်သိမ်းသည်။"""
+    clean_r = re.sub(r"\[meta:[^\]]*\]", "", str(reason or "")).strip()
+    meta_tag = f"[meta:cat={category},prio={priority}]"
+    return f"{clean_r} {meta_tag}".strip() if clean_r else meta_tag
+
+
+def _unpack_task_meta(task_row: dict) -> tuple[str | None, str, str]:
+    """Task row မှ user reason၊ category နှင့် priority တို့ကို ခွဲထုတ်ပေးသည်။"""
+    raw_reason = str(task_row.get("reason") or "").strip()
+    title = str(task_row.get("title") or "")
+    default_cat, default_prio = _detect_task_category_and_priority(title, raw_reason)
+
+    cat = str(task_row.get("category") or "").strip().lower() or default_cat
+    prio = str(task_row.get("priority") or "").strip().lower() or default_prio
+
+    m = re.search(r"\[meta:cat=([a-z_]+),prio=([a-z_]+)\]", raw_reason)
+    if m:
+        if not task_row.get("category"):
+            cat = m.group(1)
+        if not task_row.get("priority"):
+            prio = m.group(2)
+
+    clean_reason = re.sub(r"\[meta:[^\]]*\]", "", raw_reason).strip() or None
+    return clean_reason, cat, prio
+
+
+def _category_label_mm(category: str) -> str:
+    mapping = {
+        "health": "🩺 ကျန်းမာရေး",
+        "family": "👨‍👩‍👧 မိသားစု",
+        "work": "💼 လုပ်ငန်း",
+        "general": "📌 အထွေထွေ",
+    }
+    return mapping.get(category, "📌 အထွေထွေ")
+
+
+def _priority_badge_mm(priority: str) -> str:
+    return "🔥 အရေးကြီး" if priority == "urgent" else ""
 
 
 def _is_health_or_family_task(text: str, reason: str | None = None) -> bool:
@@ -1175,26 +1239,41 @@ def add_task(
     reason: str | None = None,
     repeat_type: str = "once",
 ) -> dict:
+    category, priority = _detect_task_category_and_priority(title, reason)
+    clean_reason = re.sub(r"\[meta:[^\]]*\]", "", str(reason or "")).strip() or None
+
     payload = {
         "title": title,
         "status": "pending",
         "repeat_type": repeat_type or "once",
+        "category": category,
+        "priority": priority,
+        "reason": clean_reason,
     }
-    if reason:
-        payload["reason"] = reason
     if remind_dt:
         payload["remind_at"] = remind_dt.isoformat()
         payload["reminded"] = False
     try:
         supabase.table("tasks").insert(payload).execute()
     except Exception:
-        fallback_payload = {"title": title, "status": "pending"}
+        fallback_payload = {
+            "title": title,
+            "status": "pending",
+            "repeat_type": repeat_type or "once",
+            "reason": _pack_task_reason(clean_reason, category, priority),
+        }
         if remind_dt:
             fallback_payload["remind_at"] = remind_dt.isoformat()
             fallback_payload["reminded"] = False
-        supabase.table("tasks").insert(fallback_payload).execute()
+        try:
+            supabase.table("tasks").insert(fallback_payload).execute()
+        except Exception:
+            minimal_payload = {"title": title, "status": "pending"}
+            if remind_dt:
+                minimal_payload["remind_at"] = remind_dt.isoformat()
+                minimal_payload["reminded"] = False
+            supabase.table("tasks").insert(minimal_payload).execute()
     return {"status": "success", "message": f"Task added: {title}"}
-
 
 def list_tasks() -> list:
     cleanup_old_done_tasks()
@@ -1206,19 +1285,52 @@ def get_formatted_tasks() -> str:
     tasks = list_tasks()
     if not tasks:
         return "လက်ရှိ Task မရှိသေးပါဘူးရှင်"
-    lines = []
-    for t in tasks:
-        mark = "✓" if t.get("status") == "done" else "•"
-        r_str = ""
-        if t.get("remind_at") and t.get("status") != "done":
-            try:
-                r_dt = datetime.fromisoformat(str(t["remind_at"]).replace("Z", "+00:00")).astimezone(MM_TZ)
-                r_str = f" (⏰ {r_dt.strftime('%m-%d %H:%M')})"
-            except Exception:
-                pass
-        lines.append(f"{mark} {t['title']}{r_str}")
-    return "လက်ရှိ Task စာရင်းလေးပါရှင်\n" + "\n".join(lines)
 
+    pending_rows = []
+    done_rows = []
+    for t in tasks:
+        title = t.get("title", "")
+        clean_reason, cat, prio = _unpack_task_meta(t)
+        cat_lbl = _category_label_mm(cat)
+        prio_badge = _priority_badge_mm(prio)
+
+        if t.get("status") == "done":
+            done_rows.append(f"✓ {title} ({cat_lbl})")
+        else:
+            r_str = ""
+            if t.get("remind_at"):
+                try:
+                    r_dt = datetime.fromisoformat(str(t["remind_at"]).replace("Z", "+00:00")).astimezone(MM_TZ)
+                    r_str = f" (⏰ {r_dt.strftime('%m-%d %H:%M')})"
+                except Exception:
+                    pass
+            rep = t.get("repeat_type") or "once"
+            rep_badge = ""
+            if rep == "daily":
+                rep_badge = " · နေ့စဉ်"
+            elif rep == "weekly":
+                rep_badge = " · အပတ်စဉ်"
+            elif rep == "school_days":
+                rep_badge = " · ကျောင်းဖွင့်ရက်"
+
+            tags = " ".join([x for x in [prio_badge, f"[{cat_lbl}]"] if x])
+            line = f"• {title}{r_str}{rep_badge}"
+            if tags:
+                line += f" — {tags}"
+            if clean_reason:
+                line += f"\n   📝 {clean_reason}"
+            pending_rows.append(line)
+
+    parts = [f"လက်ရှိ Task စာရင်းပါရှင် (Pending: {len(pending_rows)} ခု)"]
+    if pending_rows:
+        parts.append("\n".join(pending_rows))
+    else:
+        parts.append("လုပ်ဆောင်ရန် ကျန်ရှိနေတဲ့ Task မရှိပါဘူးရှင်")
+
+    if done_rows:
+        parts.append("ပြီးစီးပြီး:\n" + "\n".join(done_rows[-8:]))
+
+    return "\n\n".join(parts)
 
 def delete_latest_pending_task() -> str | None:
     try:
@@ -1259,10 +1371,19 @@ def _find_matching_pending_task(pending_tasks: list, query_text: str) -> dict | 
 
 
 def _format_single_task_added(title: str, remind_dt: datetime | None, reason: str | None, repeat_mode: str, raw_ctx: str) -> str:
-    use_maung = _is_health_or_family_task(f"{title} {raw_ctx}", reason)
+    clean_reason, cat, prio = _unpack_task_meta({"title": title, "reason": reason})
+    if not reason:
+        cat, prio = _detect_task_category_and_priority(f"{title} {raw_ctx}", None)
+
+    use_maung = (cat in ("health", "family")) or _is_health_or_family_task(f"{title} {raw_ctx}", clean_reason)
     prefix = "မောင်ရေ — " if use_maung else ""
     ending = "နော်" if use_maung else "ရှင်"
-    line = f"{prefix}\"{title}\" မှတ်ထားလိုက်ပါပြီ{ending}"
+
+    cat_lbl = _category_label_mm(cat)
+    prio_badge = _priority_badge_mm(prio)
+    meta_line = f"{cat_lbl}" + (f" · {prio_badge}" if prio_badge else "")
+
+    line = f"{prefix}\"{title}\" မှတ်ထားလိုက်ပါပြီ{ending}\n{meta_line}"
     if remind_dt:
         line += f"\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[remind_dt.weekday()]})"
     if repeat_mode == "school_days":
@@ -1271,8 +1392,8 @@ def _format_single_task_added(title: str, remind_dt: datetime | None, reason: st
         line += " · အပတ်စဉ်"
     elif repeat_mode == "daily":
         line += " · နေ့စဉ်"
-    if reason:
-        line += f"\n📝 {reason}"
+    if clean_reason:
+        line += f"\n📝 {clean_reason}"
     return line
 
 
@@ -2508,8 +2629,9 @@ async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
             status_val = str(t.get("status") or "pending").strip().lower()
             if status_val != "pending":
                 continue
-            if t.get("reminded") is True:
-                continue
+
+            repeat_type = str(t.get("repeat_type") or "once").strip().lower()
+            is_repeatable = repeat_type in {"daily", "weekly", "school_days"}
 
             r_at = t.get("remind_at")
             if not r_at:
@@ -2522,11 +2644,28 @@ async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
                 else:
                     r_dt = r_dt.astimezone(MM_TZ)
 
+                if is_repeatable and r_dt > now_mm and t.get("reminded") is True:
+                    try:
+                        supabase.table("tasks").update({"reminded": False}).eq("id", t["id"]).execute()
+                    except Exception:
+                        pass
+                    continue
+
+                if t.get("reminded") is True and not is_repeatable:
+                    continue
+
                 if r_dt <= now_mm:
                     title = (t.get("title") or "").strip()
-                    repeat_type = str(t.get("repeat_type") or "once").strip().lower()
-                    use_maung = _is_health_or_family_task(title, t.get("reason"))
-                    msg = f"မောင်ရေ — {title} အချိန်ရောက်ပြီနော်" if use_maung else f"{title} အချိန်ရောက်ပါပြီရှင်"
+                    clean_reason, cat, prio = _unpack_task_meta(t)
+                    use_maung = (cat in ("health", "family")) or _is_health_or_family_task(title, clean_reason)
+                    prio_prefix = "🔥 အရေးကြီး — " if prio == "urgent" else ""
+                    msg = (
+                        f"{prio_prefix}မောင်ရေ — {title} အချိန်ရောက်ပြီနော်"
+                        if use_maung
+                        else f"{prio_prefix}{title} အချိန်ရောက်ပါပြီရှင်"
+                    )
+                    if clean_reason:
+                        msg += f"\n📝 {clean_reason}"
 
                     next_dt = _compute_next_repeat_datetime(r_dt, repeat_type, now_mm)
                     if next_dt:
@@ -2538,6 +2677,7 @@ async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
                     try:
                         if next_dt:
                             supabase.table("tasks").update({
+                                "status": "pending",
                                 "remind_at": next_dt.isoformat(),
                                 "reminded": False,
                             }).eq("id", t["id"]).execute()
