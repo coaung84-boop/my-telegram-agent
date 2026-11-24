@@ -2884,6 +2884,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await message.reply_text(f"❌ Patch မအောင်မြင်ပါရှင်:\n{res.get('error')}")
+            return
         clean_old = old_part.strip("\r\n")
         clean_new = new_part.strip("\r\n")
         if target_file.endswith(".py"):
