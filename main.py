@@ -41,9 +41,15 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("MY_TELEGRAM_USER_ID", "0"))
 
-# Myanmar Standard Time (UTC+6:30) and 30-Day Retention
+# Myanmar Standard Time (UTC+6:30), Retention & Quota Savers
 MM_TZ = timezone(timedelta(hours=6, minutes=30))
 RETENTION_DAYS = 30
+NEWS_CACHE_TTL_SECONDS = 1800  # 30 minutes cache for /news & text summary
+MAX_GROUP_MEDIA_AI_PER_HOUR = 15
+
+_NEWS_CACHE = {"ts": 0.0, "text": ""}
+_GROUP_MEDIA_AI_TIMESTAMPS: list[float] = []
+_JOB_ERROR_COUNTS: dict[str, int] = {}
 
 MYANMAR_WEEKDAYS = [
     "တနင်္လာနေ့",
@@ -117,7 +123,6 @@ def _clean_maya_voice(text: str) -> str:
     if not text:
         return text
     text = text.replace("ကျွန်တော့်", "မာယာ့").replace("ကျွန်တော်", "မာယာ")
-    # Remove accidental Thai characters if any LLM mixes Thai script
     text = re.sub(r"[\u0E00-\u0E7F]+", "", text)
     return text
 
@@ -131,6 +136,36 @@ def _is_health_or_family_task(text: str, reason: str | None = None) -> bool:
         "ကျောင်း", "school"
     ]
     return any(k in combined for k in keywords)
+
+
+def _can_use_group_media_ai() -> bool:
+    """Group media summary အတွက် AI quota ကုန်မသွားစေရန် hourly cap စစ်သည်။"""
+    now_ts = time.time()
+    cutoff = now_ts - 3600.0
+    while _GROUP_MEDIA_AI_TIMESTAMPS and _GROUP_MEDIA_AI_TIMESTAMPS[0] < cutoff:
+        _GROUP_MEDIA_AI_TIMESTAMPS.pop(0)
+    if len(_GROUP_MEDIA_AI_TIMESTAMPS) >= MAX_GROUP_MEDIA_AI_PER_HOUR:
+        return False
+    _GROUP_MEDIA_AI_TIMESTAMPS.append(now_ts)
+    return True
+
+
+async def _alert_job_failure(context: ContextTypes.DEFAULT_TYPE, job_name: str, err: Exception):
+    """Scheduled job ဆက်တိုက် error တက်ပါက Admin ဆီ short status alert ပို့သည်။"""
+    count = _JOB_ERROR_COUNTS.get(job_name, 0) + 1
+    _JOB_ERROR_COUNTS[job_name] = count
+    if count in (2, 5) and ADMIN_USER_ID and context and context.bot:
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_USER_ID,
+                text=f"⚠️ Background job '{job_name}' မှာ ခဏအခက်အခဲ ရှိနေပါတယ်ရှင် ({type(err).__name__})"
+            )
+        except Exception:
+            pass
+
+
+def _reset_job_failure(job_name: str):
+    _JOB_ERROR_COUNTS[job_name] = 0
 
 
 # --- Dummy Health Check Server for Render ---
@@ -166,13 +201,33 @@ async def send_long_message(message, text: str, chunk_size: int = 3500):
         await message.reply_text(part)
 
 
-# --- Auto-Cleanup Old Raw Logs (Older than 30 days) ---
+# --- Auto-Cleanup Old Raw Logs & Old Done Tasks (30-Day Retention) ---
 def cleanup_old_raw_logs():
     try:
         cutoff_dt = datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)
         supabase.table("raw_logs").delete().lt("created_at", cutoff_dt.isoformat()).execute()
     except Exception as e:
         print(f"Error cleaning up old raw_logs: {e}")
+
+
+def cleanup_old_done_tasks():
+    """ပြီးသွားသော (status='done') task များကို ရက် ၃၀ (၁ လ) ကျော်လျှင် storage သက်သာစေရန် ဖျက်သည်။"""
+    try:
+        cutoff_dt = datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)
+        res = supabase.table("tasks").select("id, status, updated_at, created_at, remind_at").eq("status", "done").execute()
+        for t in (res.data or []):
+            ts_raw = t.get("updated_at") or t.get("remind_at") or t.get("created_at")
+            if not ts_raw:
+                continue
+            try:
+                dt_obj = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                dt_mm = dt_obj.replace(tzinfo=MM_TZ) if dt_obj.tzinfo is None else dt_obj.astimezone(MM_TZ)
+                if dt_mm < cutoff_dt:
+                    supabase.table("tasks").delete().eq("id", t["id"]).execute()
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"Error cleaning up old done tasks: {e}")
 
 
 # --- Pure Python Myanmar Calendar Helper (Primarily for Tasks & Calendar Queries) ---
@@ -455,7 +510,7 @@ def _extract_json_from_text(raw_text: str) -> dict | None:
 
 
 def _call_json_intelligence(prompt: str) -> dict | None:
-    """စကားပြော system prompt မရောဘဲ သန့်ရှင်းတဲ့ JSON ကိုသာ ထုတ်ယူသည့် Intelligence helper။"""
+    """စကားပြော system prompt မရောဘဲ သန့်ရှင်းတဲ့ JSON ကိုသာ ထုတ်ယူသည့် Intelligence helper (Qwen 3.8 27B fallback ပါဝင်)။"""
     json_sys = "You are a strict JSON intent & entity parser. Return ONLY valid JSON with no markdown or extra text."
 
     for model_name in ("gemini-3.5-flash-lite", "gemini-3.8-flash"):
@@ -476,20 +531,50 @@ def _call_json_intelligence(prompt: str) -> dict | None:
         except Exception as e:
             print(f"[JSON Intel {model_name} Error]: {e}")
 
-    try:
-        completion = groq_client.with_options(timeout=5.0).chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": json_sys},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.0,
-            max_tokens=320,
-        )
-        raw_groq = (completion.choices[0].message.content or "").strip()
-        return _extract_json_from_text(raw_groq)
-    except Exception as e:
-        print(f"[JSON Intel Groq Fallback Error]: {e}")
+    # Free/Low-cost fallback: Qwen 3.8 27B (OpenRouter -> Groq) -> Llama 3.1
+    if OPENROUTER_API_KEY:
+        for or_model in ("qwen/qwen3.8-27b", "google/gemma-4-31b-it:free"):
+            try:
+                resp = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
+                    json={
+                        "model": or_model,
+                        "messages": [
+                            {"role": "system", "content": json_sys},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "temperature": 0.0,
+                        "max_tokens": 320,
+                    },
+                    timeout=8,
+                )
+                res_json = resp.json()
+                if "choices" in res_json and res_json["choices"]:
+                    txt = (res_json["choices"][0]["message"].get("content") or "").strip()
+                    parsed = _extract_json_from_text(txt)
+                    if parsed is not None:
+                        return parsed
+            except Exception as e:
+                print(f"[JSON Intel OpenRouter {or_model} Error]: {e}")
+
+    for g_model in ("qwen/qwen3.8-27b", "llama-3.1-8b-instant"):
+        try:
+            completion = groq_client.with_options(timeout=6.0).chat.completions.create(
+                model=g_model,
+                messages=[
+                    {"role": "system", "content": json_sys},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                max_tokens=320,
+            )
+            raw_groq = (completion.choices[0].message.content or "").strip()
+            parsed = _extract_json_from_text(raw_groq)
+            if parsed is not None:
+                return parsed
+        except Exception as e:
+            print(f"[JSON Intel Groq {g_model} Error]: {e}")
 
     return None
 
@@ -839,6 +924,29 @@ def parse_reminder_datetime_mmt(text: str) -> datetime | None:
     return candidate
 
 
+def _compute_next_repeat_datetime(current_rem_dt: datetime, repeat_type: str, now_mm: datetime) -> datetime | None:
+    """Repeat task (daily / weekly / school_days) ပြီးသွားလျှင် နောက်တစ်ကြိမ် remind_at ကို တွက်ပေးသည်။"""
+    r_type = (repeat_type or "once").strip().lower()
+    if r_type not in {"daily", "weekly", "school_days"}:
+        return None
+
+    next_dt = current_rem_dt
+    if r_type == "daily":
+        next_dt = current_rem_dt + timedelta(days=1)
+        while next_dt <= now_mm:
+            next_dt += timedelta(days=1)
+    elif r_type == "weekly":
+        next_dt = current_rem_dt + timedelta(days=7)
+        while next_dt <= now_mm:
+            next_dt += timedelta(days=7)
+    elif r_type == "school_days":
+        next_dt = current_rem_dt + timedelta(days=1)
+        while next_dt.weekday() >= 5 or next_dt <= now_mm:
+            next_dt += timedelta(days=1)
+
+    return next_dt
+
+
 def _clean_task_title_fallback(raw_text: str) -> str:
     t = raw_text.strip()
     t = re.sub(r"^(?:မဟုတ်ဘူးလေ|မဟုတ်ဘူး|Task\s*[-–—:]?)", "", t, flags=re.IGNORECASE)
@@ -1009,6 +1117,7 @@ def add_task(
 
 
 def list_tasks() -> list:
+    cleanup_old_done_tasks()
     res = supabase.table("tasks").select("*").order("id").execute()
     return res.data
 
@@ -1093,8 +1202,12 @@ def handle_task_intent(user_message: str, route: dict) -> str:
                 is_hf = _is_health_or_family_task(m_title, matched.get("reason"))
                 p = "မောင်ရေ — " if is_hf else ""
                 e = "နော်" if is_hf else "ရှင်"
-                supabase.table("tasks").update({"status": "done"}).eq("id", matched["id"]).execute()
-                return f"{p}\"{m_title}\" ပြီးသွားပြီမို့ Done မှတ်လိုက်ပါပြီ{e}"
+                done_payload = {"status": "done", "reminded": True, "updated_at": datetime.now(MM_TZ).isoformat()}
+                try:
+                    supabase.table("tasks").update(done_payload).eq("id", matched["id"]).execute()
+                except Exception:
+                    supabase.table("tasks").update({"status": "done", "reminded": True}).eq("id", matched["id"]).execute()
+                return f"{p}\"{m_title}\" ပြီးသွားပြီမို့ Done မှတ်လိုက်ပါပြီ (နောက်ထပ် remind မလုပ်တော့ပါ){e}"
 
             return f"{prefix}ပြီးစီးကြောင်း မှတ်ရမယ့် Pending Task မတွေ့သေးပါဘူး{ending}"
         except Exception as e:
@@ -1385,6 +1498,7 @@ async def check_pending_followups_job(context: ContextTypes.DEFAULT_TYPE):
         )
         rows = res.data or []
         if not rows:
+            _reset_job_failure("pending_followups")
             return
 
         now_mm = datetime.now(MM_TZ)
@@ -1429,8 +1543,10 @@ async def check_pending_followups_job(context: ContextTypes.DEFAULT_TYPE):
                             "attempts": attempts + 1
                         }).eq("id", item_id).execute()
 
+        _reset_job_failure("pending_followups")
     except Exception as e:
         print(f"Error in check_pending_followups_job: {e}")
+        await _alert_job_failure(context, "pending_followups", e)
 
 
 # --- 3-Source Hybrid News Fetchers (Telegram Public Channels + Direct RSS/XML + Tavily Domain Search) ---
@@ -1514,7 +1630,6 @@ def _fetch_single_rss_feed(source_label: str, feed_url: str, max_items: int = 5)
         cutoff_dt = datetime.now(MM_TZ) - timedelta(hours=36)
         results = []
 
-        # Standard RSS <item>
         rss_items = root.findall(".//item")
         for it in rss_items:
             title = _strip_html(it.findtext("title") or "")
@@ -1537,7 +1652,6 @@ def _fetch_single_rss_feed(source_label: str, feed_url: str, max_items: int = 5)
             if len(results) >= max_items:
                 break
 
-        # Atom <entry> fallback (e.g. VOA/Atom feeds)
         if not results:
             ns = {"atom": "http://www.w3.org/2005/Atom"}
             entries = root.findall(".//atom:entry", ns) or root.findall(".//entry")
@@ -1619,14 +1733,12 @@ def _tavily_worker(
         return ""
 
 
-# --- 3-Source Hybrid Myanmar News Summary (Telegram Channels + RSS Feeds + Domain Search) ---
-def get_myanmar_news_summary() -> str:
-    """
-    1) Public Telegram News Channels (@theirrawaddy, @MyanmarNowNews, @khitthitmedianews)
-    2) Direct RSS/XML Feeds (Irrawaddy, Myanmar Now, Mizzima, Frontier, BBC Burmese, RFA, VOA)
-    3) Tavily include_domains (days=1) for trusted outlets + Reuters
-    တို့ကို တစ်ပြိုင်နက် ဆွဲယူပြီး လွန်ခဲ့သည့် ၂၄ နာရီအတွင်း သတင်းဖြစ်ရပ်အစစ်များကို အနှစ်ချုပ်ပေးသည်။
-    """
+# --- 3-Source Hybrid Myanmar News Summary (With 30-Min Cache for Speed & Quota Saving) ---
+def get_myanmar_news_summary(force_refresh: bool = False) -> str:
+    now_ts = time.time()
+    if not force_refresh and _NEWS_CACHE["text"] and (now_ts - _NEWS_CACHE["ts"]) < NEWS_CACHE_TTL_SECONDS:
+        return _NEWS_CACHE["text"]
+
     now_mm = datetime.now(MM_TZ)
     now_str = now_mm.strftime("%Y-%m-%d %H:%M MMT")
 
@@ -1737,7 +1849,13 @@ def get_myanmar_news_summary() -> str:
         summary = call_ai_with_3tier_fallback(prompt, use_google_search=True)
 
     summary = _clean_maya_voice(summary)
-    return f"📰 Myanmar Daily News Summary ({now_str})\n\n{summary}"
+    final_output = f"📰 Myanmar Daily News Summary ({now_str})\n\n{summary}"
+
+    if summary and "ခဏအလုပ်များနေပါတယ်" not in summary:
+        _NEWS_CACHE["ts"] = time.time()
+        _NEWS_CACHE["text"] = final_output
+
+    return final_output
 
 
 # --- Web Search Helper (Context-Aware + Confidence Tagging) ---
@@ -1805,23 +1923,26 @@ def answer_with_universal_search(
     return _clean_maya_voice(reply)
 
 
-# --- Scheduled Jobs (9:00 AM News, Due Reminders, 6:00 PM Pending Digest, 30s Follow-up Watcher) ---
+# --- Scheduled Jobs (9:00 AM News, Due Reminders + Repeat Reschedule + 30d Cleanup, 6:00 PM Digest, 30s Follow-up) ---
 async def scheduled_morning_news_job(context: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_USER_ID:
         return
     try:
-        news_text = await asyncio.to_thread(get_myanmar_news_summary)
+        news_text = await asyncio.to_thread(get_myanmar_news_summary, True)
         save_chat_message(ADMIN_USER_ID, "assistant", news_text)
         for i in range(0, len(news_text), 3500):
             await context.bot.send_message(chat_id=ADMIN_USER_ID, text=news_text[i:i + 3500])
+        _reset_job_failure("morning_news")
     except Exception as e:
         print(f"Error sending scheduled morning news: {e}")
+        await _alert_job_failure(context, "morning_news", e)
 
 
 async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_USER_ID:
         return
     try:
+        cleanup_old_done_tasks()
         now_mm = datetime.now(MM_TZ)
         res = supabase.table("tasks").select("*").execute()
         tasks = res.data or []
@@ -1846,18 +1967,34 @@ async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
 
                 if r_dt <= now_mm:
                     title = (t.get("title") or "").strip()
+                    repeat_type = str(t.get("repeat_type") or "once").strip().lower()
                     use_maung = _is_health_or_family_task(title, t.get("reason"))
                     msg = f"မောင်ရေ — {title} အချိန်ရောက်ပြီနော်" if use_maung else f"{title} အချိန်ရောက်ပါပြီရှင်"
+
+                    next_dt = _compute_next_repeat_datetime(r_dt, repeat_type, now_mm)
+                    if next_dt:
+                        msg += f"\n🔁 နောက်တစ်ကြိမ်: {next_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[next_dt.weekday()]})"
+
                     await context.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
                     save_chat_message(ADMIN_USER_ID, "assistant", msg)
+
                     try:
-                        supabase.table("tasks").update({"reminded": True}).eq("id", t["id"]).execute()
+                        if next_dt:
+                            supabase.table("tasks").update({
+                                "remind_at": next_dt.isoformat(),
+                                "reminded": False,
+                            }).eq("id", t["id"]).execute()
+                        else:
+                            supabase.table("tasks").update({"reminded": True}).eq("id", t["id"]).execute()
                     except Exception:
                         pass
             except Exception as item_err:
                 print(f"[Reminder Item Error] id={t.get('id')}: {item_err}")
+
+        _reset_job_failure("due_task_reminders")
     except Exception as e:
         print(f"Error in check_due_task_reminders_job: {e}")
+        await _alert_job_failure(context, "due_task_reminders", e)
 
 
 async def scheduled_evening_task_digest_job(context: ContextTypes.DEFAULT_TYPE):
@@ -1867,14 +2004,17 @@ async def scheduled_evening_task_digest_job(context: ContextTypes.DEFAULT_TYPE):
         res = supabase.table("tasks").select("*").eq("status", "pending").order("id").execute()
         pending = res.data or []
         if not pending:
+            _reset_job_failure("evening_digest")
             return
 
         lines = [f"• {t['title']}" for t in pending[:10]]
         msg = "ဒီနေ့ ပြီးဖို့ ကျန်နေသေးတဲ့ Task လေးတွေပါရှင်\n" + "\n".join(lines)
         await context.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
         save_chat_message(ADMIN_USER_ID, "assistant", msg)
+        _reset_job_failure("evening_digest")
     except Exception as e:
         print(f"Error in scheduled_evening_task_digest_job: {e}")
+        await _alert_job_failure(context, "evening_digest", e)
 
 
 # --- Dedicated 5-Intent Handlers (TASK / GROUP / ADVICE / GENERAL / WEB_SEARCH) ---
@@ -2038,7 +2178,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, markup = build_groups_keyboard()
         await message.reply_text(text, reply_markup=markup)
     elif cmd == "/news":
-        reply_text = await asyncio.to_thread(get_myanmar_news_summary)
+        reply_text = await asyncio.to_thread(get_myanmar_news_summary, False)
         await send_long_message(message, reply_text)
     elif cmd == "/tasks":
         await send_long_message(message, get_formatted_tasks())
@@ -2085,7 +2225,7 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
     elif data == "cmd_yesterday_summary":
         reply_text = get_group_report("yesterday summary", day_mode="yesterday")
     elif data == "cmd_news_summary":
-        reply_text = await asyncio.to_thread(get_myanmar_news_summary)
+        reply_text = await asyncio.to_thread(get_myanmar_news_summary, False)
     elif data == "cmd_list_tasks":
         reply_text = get_formatted_tasks()
     elif data.startswith("grp_day_"):
@@ -2114,25 +2254,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_name = message.from_user.first_name if message.from_user else "Unknown"
     group_name = message.chat.title if chat_type in ["group", "supergroup"] else "Private"
 
-    # CASE A: Group Messages (Silent observer logger)
+    # CASE A: Group Messages (Silent observer logger with quota-saving media cap)
     if chat_type in ["group", "supergroup"]:
         content_summary = ""
 
         if message.text:
             content_summary = message.text
         elif message.photo:
-            photo_file = await message.photo[-1].get_file()
-            photo_bytes = await photo_file.download_as_bytearray()
-            img_prompt = "ဒီပုံထဲမှာ ပါဝင်တဲ့ အဓိက အချက်အလက်များ၊ စာသားများ သို့မဟုတ် လုပ်ငန်းဆိုင်ရာ အခြေအနေများကို အတိုချုံး ဖော်ပြပေးပါ။"
-            img_summary = call_ai_with_3tier_fallback(img_prompt, image_bytes=photo_bytes, mime_type='image/jpeg')
-            content_summary = f"[Photo] {img_summary}"
+            if _can_use_group_media_ai():
+                photo_file = await message.photo[-1].get_file()
+                photo_bytes = await photo_file.download_as_bytearray()
+                img_prompt = "ဒီပုံထဲမှာ ပါဝင်တဲ့ အဓိက အချက်အလက်များ၊ စာသားများ သို့မဟုတ် လုပ်ငန်းဆိုင်ရာ အခြေအနေများကို အတိုချုံး ဖော်ပြပေးပါ။"
+                img_summary = call_ai_with_3tier_fallback(img_prompt, image_bytes=photo_bytes, mime_type='image/jpeg')
+                content_summary = f"[Photo] {img_summary}"
+            else:
+                content_summary = "[Photo] (AI quota saving: media logged without AI vision call)"
         elif message.document:
-            doc_file = await message.document.get_file()
-            doc_bytes = await doc_file.download_as_bytearray()
-            doc_prompt = "ဒီဖိုင်ထဲပါတဲ့ အဓိက အကြောင်းအရာနဲ့ အရေးကြီးတဲ့ အချက်တွေကို အနှစ်ချုပ်ပေးပါ။"
-            doc_summary = call_ai_with_3tier_fallback(doc_prompt, image_bytes=doc_bytes,
-                                                      mime_type=message.document.mime_type or 'application/pdf')
-            content_summary = f"[Document: {message.document.file_name}] {doc_summary}"
+            if _can_use_group_media_ai():
+                doc_file = await message.document.get_file()
+                doc_bytes = await doc_file.download_as_bytearray()
+                doc_prompt = "ဒီဖိုင်ထဲပါတဲ့ အဓိက အကြောင်းအရာနဲ့ အရေးကြီးတဲ့ အချက်တွေကို အနှစ်ချုပ်ပေးပါ။"
+                doc_summary = call_ai_with_3tier_fallback(doc_prompt, image_bytes=doc_bytes,
+                                                          mime_type=message.document.mime_type or 'application/pdf')
+                content_summary = f"[Document: {message.document.file_name}] {doc_summary}"
+            else:
+                content_summary = f"[Document: {message.document.file_name}] (AI quota saving: file logged without AI call)"
 
         if content_summary:
             supabase.table("raw_logs").insert({
@@ -2179,7 +2325,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # Dedicated news summary shortcut
             if any(k in stripped_lower for k in ["news summary", "daily news", "သတင်း အနှစ်ချုပ်", "သတင်းအနှစ်ချုပ်", "မြန်မာသတင်း အနှစ်ချုပ်"]):
-                reply_text = await asyncio.to_thread(get_myanmar_news_summary)
+                reply_text = await asyncio.to_thread(get_myanmar_news_summary, False)
                 save_chat_message(message.from_user.id, "assistant", reply_text)
                 await send_long_message(message, reply_text)
                 return
@@ -2288,7 +2434,7 @@ async def main_async():
         BotCommand("setrule", "Add a new versioned core rule"),
     ])
 
-    print("🤖 Maya AI Agent (3-Source Hybrid News + Qwen 3.8 27B + Confidence Tagging + Skill Versioning) started...")
+    print("🤖 Maya AI Agent (Full Workflow + Repeat Reschedule + 30d Cleanup + Quota Savers) started...")
 
     await application.start()
     await application.updater.start_polling()
