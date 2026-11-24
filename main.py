@@ -44,6 +44,14 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("MY_TELEGRAM_USER_ID", "0"))
 
+import ast
+import base64
+
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
+GITHUB_REPO = os.getenv("GITHUB_REPO", "").strip()
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip() or "main"
+ALLOWED_GITHUB_FILES = {"main.py", "database.py"}
+
 # Myanmar Standard Time (UTC+6:30), Retention & Quota Savers
 MM_TZ = timezone(timedelta(hours=6, minutes=30))
 RETENTION_DAYS = 30
@@ -2841,6 +2849,42 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_long_message(message, reply_text)
         return
 
+    if cmd == "/patch":
+        # Format:
+        # /patch main.py | commit message
+        # <<<OLD>>>
+        # old code
+        # <<<NEW>>>
+        # new code
+        if "<<<OLD>>>" not in arg or "<<<NEW>>>" not in arg:
+            await message.reply_text(
+                "အသုံးပြုပုံ:\n"
+                "/patch main.py | commit message\n"
+                "<<<OLD>>>\nမူရင်း code\n<<<NEW>>>\nအသစ်ပြင်မယ့် code"
+            )
+            return
+        header_part, rest_part = arg.split("<<<OLD>>>", 1)
+        old_part, new_part = rest_part.split("<<<NEW>>>", 1)
+        header_tokens = [x.strip() for x in header_part.strip().split("|", 1)]
+        target_file = header_tokens[0] or "main.py"
+        c_msg = header_tokens[1] if len(header_tokens) > 1 and header_tokens[1] else f"Patch {target_file} via Maya"
+
+        res = await asyncio.to_thread(
+            replace_github_snippet,
+            target_file,
+            old_part.strip("\r\n"),
+            new_part.strip("\r\n"),
+            c_msg,
+            GITHUB_BRANCH,
+        )
+        if res.get("ok"):
+            await message.reply_text(
+                f"✅ '{res['path']}' ကို ပြင်ဆင်ပြီး `{res['branch']}` ပေါ် commit တင်ပြီးပါပြီရှင် (Commit: `{res['commit']}`)"
+            )
+        else:
+            await message.reply_text(f"❌ Patch မအောင်မြင်ပါရှင်:\n{res.get('error')}")
+        return
+
     if cmd == "/addtask":
         if not arg:
             await message.reply_text("/addtask <task description> လို့ ရေးပေးပါရှင်")
@@ -3009,6 +3053,145 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     await send_long_message(query.message, reply_text)
 
+# --- GitHub Direct Code Update Helpers (No Supabase Storage Used) ---
+def _github_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def get_github_file(file_path: str, branch: str | None = None) -> dict:
+    clean_path = (file_path or "").strip().lstrip("/")
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return {"ok": False, "error": "GITHUB_TOKEN သို့မဟုတ် GITHUB_REPO မသတ်မှတ်ရသေးပါရှင်"}
+    if not clean_path:
+        return {"ok": False, "error": "File path လိုအပ်ပါတယ်ရှင်"}
+
+    ref = branch or GITHUB_BRANCH
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{clean_path}"
+    try:
+        resp = requests.get(url, headers=_github_headers(), params={"ref": ref}, timeout=10)
+        if resp.status_code != 200:
+            return {"ok": False, "error": f"GitHub read failed ({resp.status_code}): {resp.text[:180]}"}
+        data = resp.json()
+        raw_b64 = (data.get("content") or "").replace("\n", "")
+        content_str = base64.b64decode(raw_b64).decode("utf-8") if raw_b64 else ""
+        return {"ok": True, "path": clean_path, "sha": data.get("sha"), "content": content_str}
+    except Exception as e:
+        return {"ok": False, "error": f"GitHub read error: {type(e).__name__}: {str(e)[:150]}"}
+
+
+def upsert_github_file(
+    file_path: str,
+    new_content: str,
+    commit_message: str = "Update file via Maya AI Agent",
+    branch: str | None = None,
+) -> dict:
+    clean_path = (file_path or "").strip().lstrip("/")
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return {"ok": False, "error": "GITHUB_TOKEN သို့မဟုတ် GITHUB_REPO မသတ်မှတ်ရသေးပါရှင်"}
+    if clean_path not in ALLOWED_GITHUB_FILES:
+        return {"ok": False, "error": f"'{clean_path}' ကို ခွင့်ပြုထားသည့် file စာရင်းထဲ ထည့်မထားပါရှင်"}
+
+    if clean_path.endswith(".py"):
+        try:
+            ast.parse(new_content)
+        except SyntaxError as se:
+            return {"ok": False, "error": f"Python syntax error ရှိနေလို့ commit မတင်ခဲ့ပါဘူး — line {se.lineno}: {se.msg}"}
+
+    ref = branch or GITHUB_BRANCH
+    existing = get_github_file(clean_path, branch=ref)
+    sha = existing.get("sha") if existing.get("ok") else None
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{clean_path}"
+    encoded = base64.b64encode(new_content.encode("utf-8")).decode("ascii")
+    payload = {
+        "message": commit_message[:120] or "Update file via Maya AI Agent",
+        "content": encoded,
+        "branch": ref,
+    }
+    if sha:
+        payload["sha"] = sha
+
+    try:
+        resp = requests.put(url, headers=_github_headers(), json=payload, timeout=15)
+        if resp.status_code not in (200, 201):
+            return {"ok": False, "error": f"GitHub commit failed ({resp.status_code}): {resp.text[:180]}"}
+        res_json = resp.json()
+        commit_sha = ((res_json.get("commit") or {}).get("sha") or "")[:7]
+        return {"ok": True, "path": clean_path, "commit": commit_sha, "branch": ref}
+    except Exception as e:
+        return {"ok": False, "error": f"GitHub commit error: {type(e).__name__}: {str(e)[:150]}"}
+
+
+def replace_github_snippet(
+    file_path: str,
+    old_text: str,
+    new_text: str,
+    commit_message: str = "Patch via Maya AI Agent",
+    branch: str | None = None,
+) -> dict:
+    clean_path = (file_path or "").strip().lstrip("/")
+    if clean_path not in ALLOWED_GITHUB_FILES:
+        return {"ok": False, "error": f"'{clean_path}' ကို ခွင့်ပြုထားသည့် file စာရင်းထဲ ထည့်မထားပါရှင်"}
+    if not old_text:
+        return {"ok": False, "error": "အစားထိုးမယ့် မူရင်းစာသား (old_text) လိုအပ်ပါတယ်ရှင်"}
+
+    current = get_github_file(clean_path, branch=branch)
+    if not current.get("ok"):
+        return current
+
+    original_content = current.get("content", "")
+    match_count = original_content.count(old_text)
+    if match_count == 0:
+        return {"ok": False, "error": "အစားထိုးမယ့် မူရင်းစာသားကို file ထဲမှာ မတွေ့ပါဘူးရှင်"}
+    if match_count > 1:
+        return {"ok": False, "error": f"တူညီနေတဲ့ စာသား {match_count} နေရာ တွေ့နေပါတယ်၊ ပိုတိကျအောင် ထည့်ပေးပါရှင်"}
+
+    updated_content = original_content.replace(old_text, new_text, 1)
+    return upsert_github_file(clean_path, updated_content, commit_message=commit_message, branch=branch)
+
+
+async def _handle_py_document_github_upload(message, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    doc = message.document
+    if not doc:
+        return False
+
+    file_name = (doc.file_name or "").strip()
+    if not file_name.endswith(".py"):
+        return False
+
+    if file_name not in ALLOWED_GITHUB_FILES:
+        await message.reply_text(
+            f"'{file_name}' ကို GitHub upload ခွင့်ပြုထားသည့် ဖိုင်စာရင်းထဲ ထည့်မထားပါရှင် "
+            f"({', '.join(sorted(ALLOWED_GITHUB_FILES))})"
+        )
+        return True
+
+    await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
+    try:
+        tg_file = await doc.get_file()
+        raw_bytes = bytes(await tg_file.download_as_bytearray())
+        code_text = raw_bytes.decode("utf-8")
+    except Exception as e:
+        await message.reply_text(f"ဖိုင်ကို ဖတ်ယူရာမှာ အခက်အခဲ ရှိနေပါတယ်ရှင်: {type(e).__name__}")
+        return True
+
+    caption = (message.caption or "").strip()
+    commit_msg = caption[:120] if caption else f"Update {file_name} via Maya"
+    result = await asyncio.to_thread(upsert_github_file, file_name, code_text, commit_msg, GITHUB_BRANCH)
+
+    if result.get("ok"):
+        await message.reply_text(
+            f"✅ '{result['path']}' ကို `{result['branch']}` branch ပေါ်သို့ GitHub တင်ပြီးပါပြီရှင် "
+            f"(Commit: `{result['commit']}`, Storage မသုံးပါ)"
+        )
+    else:
+        await message.reply_text(f"❌ GitHub တင်ရာမှာ အဆင်မပြေ ဖြစ်သွားပါတယ်ရှင်:\n{result.get('error')}")
+    return True
+
 
 # --- General Telegram Message Handler (Single Smart 5-Intent Intelligence) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3057,11 +3240,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # CASE B: Private Chat (Single-user ADMIN_USER_ID restricted)
+# CASE B: Private Chat (Single-user ADMIN_USER_ID restricted)
     if chat_type == "private":
         if message.from_user.id != ADMIN_USER_ID:
             await message.reply_text("Unauthorized.")
             return
+
+        if message.document:
+            handled = await _handle_py_document_github_upload(message, context)
+            if handled:
+                return
 
         user_message = message.text
         if not user_message:
@@ -3147,7 +3335,7 @@ async def main_async():
     # Slash Commands
     application.add_handler(
         CommandHandler(
-            ["start", "menu", "summary", "today", "yesterday", "groups", "news", "tasks", "addtask", "rules", "setrule"],
+            ["start", "menu", "summary", "today", "yesterday", "groups", "news", "tasks", "addtask", "rules", "setrule","patch"],
             handle_command,
         )
     )
