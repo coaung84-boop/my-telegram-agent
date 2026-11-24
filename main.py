@@ -2478,6 +2478,23 @@ async def scheduled_morning_news_job(context: ContextTypes.DEFAULT_TYPE):
         await _alert_job_failure(context, "morning_news", e)
 
 
+async def _send_reminder_with_actions(context: ContextTypes.DEFAULT_TYPE, chat_id: int, task_id: int | None, text_msg: str):
+    reply_markup = None
+    if task_id is not None:
+        reply_markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Done", callback_data=f"task_done:{task_id}"),
+                InlineKeyboardButton("⏰ ၁၅ မိနစ် ကြာမှ", callback_data=f"task_snooze15:{task_id}"),
+            ]
+        ])
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text_msg,
+        reply_markup=reply_markup,
+    )
+
+
 async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_USER_ID:
         return
@@ -2515,7 +2532,7 @@ async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
                     if next_dt:
                         msg += f"\n🔁 နောက်တစ်ကြိမ်: {next_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[next_dt.weekday()]})"
 
-                    await context.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
+                    await _send_reminder_with_actions(context, ADMIN_USER_ID, t.get("id"), msg)
                     save_chat_message(ADMIN_USER_ID, "assistant", msg)
 
                     try:
@@ -2728,7 +2745,82 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     await query.answer()
-    data = query.data
+    data = (query.data or "").strip()
+
+    # Reminder Quick Action Buttons: Done / Snooze 15 mins
+    if data.startswith("task_done:") or data.startswith("task_snooze15:"):
+        action_key, raw_id = data.split(":", 1)
+        try:
+            task_id = int(raw_id)
+        except ValueError:
+            await query.edit_message_reply_markup(reply_markup=None)
+            return
+
+        try:
+            res = supabase.table("tasks").select("*").eq("id", task_id).limit(1).execute()
+            rows = res.data or []
+            if not rows:
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.message.reply_text("ဒီ Task ကို မတွေ့တော့ပါဘူးရှင်")
+                return
+
+            row = rows[0]
+            title = row.get("title", "Task")
+            reason = row.get("reason")
+            is_hf = _is_health_or_family_task(title, reason)
+            p = "မောင်ရေ — " if is_hf else ""
+            e = "နော်" if is_hf else "ရှင်"
+
+            if action_key == "task_done":
+                now_mm = datetime.now(MM_TZ)
+                repeat_type = (row.get("repeat_type") or "once").strip().lower()
+                base_dt = now_mm
+                if row.get("remind_at"):
+                    try:
+                        parsed_r = datetime.fromisoformat(str(row["remind_at"]).replace("Z", "+00:00"))
+                        base_dt = parsed_r.replace(tzinfo=MM_TZ) if parsed_r.tzinfo is None else parsed_r.astimezone(MM_TZ)
+                    except Exception:
+                        base_dt = now_mm
+
+                next_dt = _compute_next_repeat_datetime(base_dt, repeat_type, now_mm)
+                if next_dt:
+                    supabase.table("tasks").update({
+                        "status": "pending",
+                        "remind_at": next_dt.isoformat(),
+                        "reminded": False,
+                    }).eq("id", task_id).execute()
+                    confirm_text = f"{p}\"{title}\" ပြီးသွားပြီမို့ မှတ်ထားလိုက်ပါပြီ — နောက်တစ်ကြိမ် ⏰ {next_dt.strftime('%m-%d %H:%M')} မှာ ထပ်သတိပေးပါမယ်{e}"
+                else:
+                    try:
+                        supabase.table("tasks").update({
+                            "status": "done",
+                            "reminded": True,
+                            "updated_at": now_mm.isoformat(),
+                        }).eq("id", task_id).execute()
+                    except Exception:
+                        supabase.table("tasks").update({
+                            "status": "done",
+                            "reminded": True,
+                        }).eq("id", task_id).execute()
+                    confirm_text = f"{p}\"{title}\" ပြီးသွားပြီမို့ Done မှတ်လိုက်ပါပြီ{e}"
+
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.message.reply_text(confirm_text)
+
+            elif action_key == "task_snooze15":
+                snooze_dt = datetime.now(MM_TZ) + timedelta(minutes=15)
+                supabase.table("tasks").update({
+                    "status": "pending",
+                    "remind_at": snooze_dt.isoformat(),
+                    "reminded": False,
+                }).eq("id", task_id).execute()
+                confirm_text = f"{p}\"{title}\" ကို ၁၅ မိနစ် ရွှေ့လိုက်ပါပြီ — ⏰ {snooze_dt.strftime('%H:%M')} မှာ ပြန်သတိပေးပါမယ်{e}"
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.message.reply_text(confirm_text)
+        except Exception as err:
+            print(f"[Reminder Callback Error]: {err}")
+            await query.message.reply_text("Button လုပ်ဆောင်ရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားပါတယ်ရှင်")
+        return
 
     if data == "cmd_list_groups":
         text, markup = build_groups_keyboard()
