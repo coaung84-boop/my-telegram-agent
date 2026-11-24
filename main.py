@@ -1888,10 +1888,6 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await message.reply_text("အသံကို နားထောင်ရာမှာ ခဏပြတ်တောက်သွားပါတယ်ရှင်၊ ထပ်ပြောကြည့်ပေးပါ")
             return
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> faa37dd (Update main.py)
         save_chat_message(message.from_user.id, "user", f"[Voice] {transcript}")
 
         recent_ctx = await asyncio.to_thread(get_recent_history_for_router, message.from_user.id, 6)
@@ -2855,15 +2851,12 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if cmd == "/patch":
-<<<<<<< HEAD
         # Format:
         # /patch main.py | commit message
         # <<<OLD>>>
         # old code
         # <<<NEW>>>
         # new code
-=======
->>>>>>> faa37dd (Update main.py)
         if "<<<OLD>>>" not in arg or "<<<NEW>>>" not in arg:
             await message.reply_text(
                 "အသုံးပြုပုံ:\n"
@@ -2877,7 +2870,6 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_file = header_tokens[0] or "main.py"
         c_msg = header_tokens[1] if len(header_tokens) > 1 and header_tokens[1] else f"Patch {target_file} via Maya"
 
-<<<<<<< HEAD
         res = await asyncio.to_thread(
             replace_github_snippet,
             target_file,
@@ -2892,7 +2884,6 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await message.reply_text(f"❌ Patch မအောင်မြင်ပါရှင်:\n{res.get('error')}")
-=======
         clean_old = old_part.strip("\r\n")
         clean_new = new_part.strip("\r\n")
         if target_file.endswith(".py"):
@@ -2926,7 +2917,6 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ])
         await message.reply_text(preview_msg, reply_markup=kb)
->>>>>>> faa37dd (Update main.py)
         return
 
     if cmd == "/getfile":
@@ -2993,8 +2983,7 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     await query.answer()
     data = (query.data or "").strip()
-<<<<<<< HEAD
-=======
+
     if data.startswith("gh_ok:") or data.startswith("gh_no:"):
         action_type, req_id = data.split(":", 1)
         pending = _PENDING_GITHUB_ACTIONS.pop(req_id, None)
@@ -3038,7 +3027,6 @@ async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_T
         else:
             await query.message.reply_text(f"❌ Commit မအောင်မြင်ပါရှင်:\n{res.get('error')}")
         return
->>>>>>> faa37dd (Update main.py)
 
     # Reminder Quick Action Buttons: Done / Snooze 15 mins
     if data.startswith("task_done:") or data.startswith("task_snooze15:"):
@@ -3290,7 +3278,6 @@ async def _handle_py_document_github_upload(message, context: ContextTypes.DEFAU
 
     caption = (message.caption or "").strip()
     commit_msg = caption[:120] if caption else f"Update {file_name} via Maya"
-<<<<<<< HEAD
     result = await asyncio.to_thread(upsert_github_file, file_name, code_text, commit_msg, GITHUB_BRANCH)
 
     if result.get("ok"):
@@ -3302,33 +3289,6 @@ async def _handle_py_document_github_upload(message, context: ContextTypes.DEFAU
         await message.reply_text(f"❌ GitHub တင်ရာမှာ အဆင်မပြေ ဖြစ်သွားပါတယ်ရှင်:\n{result.get('error')}")
     return True
 
-
-=======
-    import uuid
-    req_id = uuid.uuid4().hex[:10]
-    _PENDING_GITHUB_ACTIONS[req_id] = {
-        "kind": "upload",
-        "file_path": file_name,
-        "content": code_text,
-        "commit_message": commit_msg,
-        "branch": GITHUB_BRANCH,
-        "created_ts": time.time(),
-    }
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Confirm Commit", callback_data=f"gh_ok:{req_id}"),
-            InlineKeyboardButton("❌ Cancel", callback_data=f"gh_no:{req_id}"),
-        ]
-    ])
-    await message.reply_text(
-        f"⚠️ `{file_name}` ကို `{GITHUB_BRANCH}` branch ပေါ် commit တင်ဖို့ အတည်ပြုပေးပါရှင်\n"
-        f"• Commit: `{commit_msg}`\n"
-        f"• Size: {len(code_text)} chars",
-        reply_markup=kb,
-    )
-    return True
-
->>>>>>> faa37dd (Update main.py)
 # --- General Telegram Message Handler (Single Smart 5-Intent Intelligence) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -3350,11 +3310,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo_file = await message.photo[-1].get_file()
                 photo_bytes = await photo_file.download_as_bytearray()
                 img_prompt = "ဒီပုံထဲမှာ ပါဝင်တဲ့ အဓိက အချက်အလက်များ၊ စာသားများ သို့မဟုတ် လုပ်ငန်းဆိုင်ရာ အခြေအနေများကို အတိုချုံး ဖော်ပြပေးပါ။"
-<<<<<<< HEAD
+
                 img_summary = call_ai_with_3tier_fallback(img_prompt, image_bytes=photo_bytes, mime_type='image/jpeg')
-=======
+
                 img_summary = await asyncio.to_thread(call_ai_with_3tier_fallback, img_prompt, image_bytes=photo_bytes, mime_type='image/jpeg')
->>>>>>> faa37dd (Update main.py)
+             
                 content_summary = f"[Photo] {img_summary}"
             else:
                 content_summary = "[Photo] (AI quota saving: media logged without AI vision call)"
@@ -3363,14 +3323,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 doc_file = await message.document.get_file()
                 doc_bytes = await doc_file.download_as_bytearray()
                 doc_prompt = "ဒီဖိုင်ထဲပါတဲ့ အဓိက အကြောင်းအရာနဲ့ အရေးကြီးတဲ့ အချက်တွေကို အနှစ်ချုပ်ပေးပါ။"
-<<<<<<< HEAD
-                doc_summary = call_ai_with_3tier_fallback(doc_prompt, image_bytes=doc_bytes,
-                                                          mime_type=message.document.mime_type or 'application/pdf')
-=======
                 doc_summary = await asyncio.to_thread(call_ai_with_3tier_fallback,
                 doc_prompt, image_bytes=doc_bytes, mime_type=message.document.mime_type 
                 or 'application/pdf')
->>>>>>> faa37dd (Update main.py)
+               
                 content_summary = f"[Document: {message.document.file_name}] {doc_summary}"
             else:
                 content_summary = f"[Document: {message.document.file_name}] (AI quota saving: file logged without AI call)"
@@ -3388,11 +3344,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # CASE B: Private Chat (Single-user ADMIN_USER_ID restricted)
     if chat_type == "private":
-<<<<<<< HEAD
-=======
->>>>>>> f678868 (Update main.py)
-=======
->>>>>>> faa37dd (Update main.py)
+    
         if message.from_user.id != ADMIN_USER_ID:
             await message.reply_text("Unauthorized.")
             return
@@ -3541,17 +3493,7 @@ async def main_async():
         BotCommand("setrule", "Add a new versioned core rule"),
     ])
 
-<<<<<<< HEAD
-<<<<<<< HEAD
     print("🤖 Maya AI Agent started...")
-=======
-        အောက်ပါတို့မှာ Telegram Group ထဲမှ စကားပြောဆိုမှု မှတ်တမ်းများ ဖြစ်သည်။
-        အရှေ့နောက် စကားပြောဆိုမှု (Recent Context) နှင့် လက်ရှိ မေးခွန်းကို နားလည်ပြီး အသုံးပြုသူ မေးထားသည့်
-        အချက် (သို့မဟုတ် သက်ဆိုင်ရာ လူပြောထားသည့် အကြောင်းအရာ) တစ်ခုတည်းကိုသာ Focus ထား၍ ပြန်ပြောပြပေးပါ။
->>>>>>> f678868 (Update main.py)
-=======
-    print("🤖 Maya AI Agent started...")
->>>>>>> faa37dd (Update main.py)
 
     await application.start()
 
