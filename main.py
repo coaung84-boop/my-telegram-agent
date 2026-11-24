@@ -1319,18 +1319,90 @@ def handle_task_intent(user_message: str, route: dict) -> str:
 
 
 # --- Voice-In & Natural Female Burmese Voice-Out Helpers ---
-def _prepare_spoken_text(reply_text: str, max_chars: int = 460) -> str:
-    """စာသားထဲက markdown/tag/symbol များကို ဖယ်ရှားပြီး မိန်းကလေးတစ်ယောက် ပြောသလို သဘာဝကျကျ ဖတ်နိုင်အောင် ပြင်ဆင်သည်။"""
+def _humanize_timestamps_for_speech(text: str) -> str:
+    """ISO/YYYY-MM-DD HH:MM နှင့် 24-hour time များကို သာမန်အရပ်ထဲ ပြောသလို တိုတိုရှင်းရှင်း ပြောင်းပေးသည်။"""
+    mm_digits = str.maketrans("0123456789", "၀၁၂၃၄၅၆၇၈၉")
+
+    def _fmt_hour_min(h: int, m: int) -> str:
+        if 5 <= h < 12:
+            period = "မနက် "
+            disp_h = h
+        elif h == 12:
+            period = "နေ့လယ် "
+            disp_h = 12
+        elif 12 < h < 17:
+            period = "ညနေ "
+            disp_h = h - 12
+        elif 17 <= h < 19:
+            period = "ညနေ "
+            disp_h = h - 12
+        else:
+            period = "ည "
+            disp_h = h - 12 if h > 12 else h
+
+        h_mm = str(disp_h).translate(mm_digits)
+        if m == 0:
+            return f"{period}{h_mm}နာရီ"
+        if m == 30:
+            return f"{period}{h_mm}နာရီခွဲ"
+        m_mm = str(m).translate(mm_digits)
+        return f"{period}{h_mm}နာရီ {m_mm}မိနစ်"
+
+    # Replace 'YYYY-MM-DD HH:MM' -> natural time phrase (skip repeating full date/year out loud)
+    def _dt_repl(match):
+        h, m = int(match.group(2)), int(match.group(3))
+        return _fmt_hour_min(h, m)
+
+    text = re.sub(r"\b(\d{4}-\d{2}-\d{2})\s+(\d{1,2}):(\d{2})\b", _dt_repl, text)
+
+    # Replace standalone 'HH:MM'
+    def _hm_repl(match):
+        h, m = int(match.group(1)), int(match.group(2))
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return _fmt_hour_min(h, m)
+        return match.group(0)
+
+    text = re.sub(r"\b(\d{1,2}):(\d{2})\b", _hm_repl, text)
+    # Remove standalone 4-digit year numbers so TTS doesn't read '2026' awkwardly
+    text = re.sub(r"\b(19|20)\d{2}\b", "", text)
+    return text
+
+def _prepare_spoken_text(reply_text: str, max_chars: int = 440) -> tuple[str, str]:
+    """စာသားကို အသံထွက် ပိုသဘာဝကျစေရန် ပြင်ဆင်ပြီး pacing style ('fast_task', 'calm_care', 'normal') ပြန်ပေးသည်။"""
     if not reply_text:
-        return ""
-    spoken = _clean_maya_voice(reply_text)
+        return "", "normal"
+
+    raw = str(reply_text)
+    is_task_confirm = ("မှတ်ထားလိုက်ပါပြီ" in raw) or ("ပြန်ဖျက်ပေးလိုက်ပါပြီ" in raw) or ("Done မှတ်လိုက်ပါပြီ" in raw)
+    is_care_tone = ("မောင်ရေ" in raw) or ("ဆေးသောက်" in raw)
+
+    spoken = _clean_maya_voice(raw)
     spoken = re.sub(r"\[(Verified|Deduced|Unverified)\]", "", spoken)
+    spoken = re.sub(r"\(\s*(?:တနင်္လာနေ့|အင်္ဂါနေ့|ဗုဒ္ဓဟူးနေ့|ကြာသပတေးနေ့|သောကြာနေ့|စနေနေ့|တနင်္ဂနွေနေ့)\s*\)", "", spoken)
+    spoken = _humanize_timestamps_for_speech(spoken)
+
+    # Convert numbered list items like '1. ' or newlines into natural pause boundaries
+    spoken = re.sub(r"(?:^|\n)\s*\d+[\.\)]\s*", "\n\n", spoken)
     spoken = re.sub(r"[⏰📝🔁•✓📰🎙️⚠️📌🗂️💡]+", " ", spoken)
     spoken = re.sub(r"[*_`#>\-]+", " ", spoken)
-    spoken = re.sub(r"\s+", " ", spoken).strip()
-    if len(spoken) > max_chars:
-        spoken = spoken[:max_chars].rsplit(" ", 1)[0] + "။ ကျန်တဲ့ အသေးစိတ်ကိုတော့ စာနဲ့ ထည့်ပို့ပေးထားပါတယ်ရှင်။"
-    return spoken
+
+    # Split into paragraphs/lines and add natural spacing between clauses/paragraphs
+    paragraphs = [re.sub(r"\s+", " ", p).strip(" ၊။") for p in re.split(r"\n+", spoken) if p.strip()]
+    if not paragraphs:
+        return "", "normal"
+
+    joined = "။ ... ".join(paragraphs)
+    joined = re.sub(r"(?:။\s*){2,}", "။ ... ", joined).strip()
+
+    if len(joined) > max_chars:
+        cut = joined[:max_chars]
+        last_stop = max(cut.rfind("။"), cut.rfind("..."), cut.rfind(" "))
+        if last_stop > 80:
+            cut = cut[:last_stop].strip()
+        joined = f"{cut}။ ... ကျန်တာကိုတော့ စာနဲ့ ထည့်ပို့ပေးထားပါတယ်ရှင်။"
+
+    style = "fast_task" if is_task_confirm else ("calm_care" if is_care_tone else "normal")
+    return joined, style
 
 
 def transcribe_voice_bytes(audio_bytes: bytes, mime_type: str = "audio/ogg") -> str:
@@ -1355,20 +1427,50 @@ def transcribe_voice_bytes(audio_bytes: bytes, mime_type: str = "audio/ogg") -> 
     return ""
 
 
-async def _synthesize_edge_tts_mp3(spoken_text: str) -> bytes | None:
-    """Edge TTS Myanmar female neural voice (my-MM-NilarNeural) ဖြင့် သဘာဝကျသော မိန်းကလေးအသံ ထုတ်သည်။"""
+async def _synthesize_edge_tts_mp3(spoken_text: str, style: str = "normal") -> bytes | None:
+    """Edge TTS Myanmar female voice (my-MM-NilarNeural) ကို natural rate & pitch ဖြင့် ထုတ်ပေးသည်။"""
+    rate_map = {
+        "fast_task": "+10%",
+        "calm_care": "-3%",
+        "normal": "+3%",
+    }
+    pitch_map = {
+        "fast_task": "+5Hz",
+        "calm_care": "+3Hz",
+        "normal": "+4Hz",
+    }
+
+    # Split on pause marker '... ' so Edge TTS naturally pauses between segments
+    segments = [seg.strip() for seg in spoken_text.split("...") if seg.strip()]
+    if not segments:
+        segments = [spoken_text]
+
+    rate_str = rate_map.get(style, "+3%")
+    pitch_str = pitch_map.get(style, "+4Hz")
+
     try:
-        communicate = edge_tts.Communicate(
-            text=spoken_text,
-            voice="my-MM-NilarNeural",
-            rate="+0%",
-            pitch="+4Hz",
-        )
-        buf = io.BytesIO()
-        async for chunk in communicate.stream():
-            if chunk.get("type") == "audio" and chunk.get("data"):
-                buf.write(chunk["data"])
-        data = buf.getvalue()
+        out_buf = io.BytesIO()
+        for idx, seg in enumerate(segments):
+            # Slightly brisker on short filler/transition segments, slightly gentler on main points
+            seg_rate = rate_str
+            if len(seg) < 28 and style != "calm_care":
+                seg_rate = "+12%"
+
+            communicate = edge_tts.Communicate(
+                text=seg,
+                voice="my-MM-NilarNeural",
+                rate=seg_rate,
+                pitch=pitch_str,
+            )
+            async for chunk in communicate.stream():
+                if chunk.get("type") == "audio" and chunk.get("data"):
+                    out_buf.write(chunk["data"])
+
+            # Brief natural pause between segments (except after the very last one)
+            if idx < len(segments) - 1:
+                await asyncio.sleep(0.08)
+
+        data = out_buf.getvalue()
         return data if data else None
     except Exception as e:
         print(f"[Edge TTS Error]: {e}")
@@ -1376,15 +1478,15 @@ async def _synthesize_edge_tts_mp3(spoken_text: str) -> bytes | None:
 
 
 def synthesize_myanmar_voice_mp3(text: str) -> bytes | None:
-    """Edge TTS (Natural Female Voice) ကို ဦးစားပေးသုံးပြီး မရပါက gTTS ဖြင့် fallback ပြန်ပေးသည်။"""
-    spoken = _prepare_spoken_text(text)
+    """Edge TTS (Natural Female Voice + Dynamic Pacing) ကို ဦးစားပေးသုံးပြီး မရပါက gTTS ဖြင့် fallback ပြန်ပေးသည်။"""
+    spoken, style = _prepare_spoken_text(text)
     if not spoken:
         return None
 
     try:
         loop = asyncio.new_event_loop()
         try:
-            edge_audio = loop.run_until_complete(_synthesize_edge_tts_mp3(spoken))
+            edge_audio = loop.run_until_complete(_synthesize_edge_tts_mp3(spoken, style=style))
         finally:
             loop.close()
         if edge_audio:
@@ -1393,7 +1495,8 @@ def synthesize_myanmar_voice_mp3(text: str) -> bytes | None:
         print(f"[Edge TTS Loop Error]: {e}")
 
     try:
-        tts = gTTS(text=spoken, lang="my", slow=False)
+        clean_for_gtts = spoken.replace("...", " ")
+        tts = gTTS(text=clean_for_gtts, lang="my", slow=False)
         buf = io.BytesIO()
         tts.write_to_fp(buf)
         buf.seek(0)
