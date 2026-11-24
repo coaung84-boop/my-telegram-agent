@@ -1,4 +1,5 @@
 import os
+import io
 import json
 import time
 import html
@@ -24,6 +25,8 @@ from telegram.ext import (
 from google import genai
 from google.genai import types
 from groq import Groq
+from gtts import gTTS
+import edge_tts
 from database import supabase
 from dotenv import load_dotenv
 
@@ -531,7 +534,6 @@ def _call_json_intelligence(prompt: str) -> dict | None:
         except Exception as e:
             print(f"[JSON Intel {model_name} Error]: {e}")
 
-    # Free/Low-cost fallback: Qwen 3.8 27B (OpenRouter -> Groq) -> Llama 3.1
     if OPENROUTER_API_KEY:
         for or_model in ("qwen/qwen3.8-27b", "google/gemma-4-31b-it:free"):
             try:
@@ -545,7 +547,7 @@ def _call_json_intelligence(prompt: str) -> dict | None:
                             {"role": "user", "content": prompt},
                         ],
                         "temperature": 0.0,
-                        "max_tokens": 320,
+                        "max_tokens": 500,
                     },
                     timeout=8,
                 )
@@ -567,7 +569,7 @@ def _call_json_intelligence(prompt: str) -> dict | None:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.0,
-                max_tokens=320,
+                max_tokens=500,
             )
             raw_groq = (completion.choices[0].message.content or "").strip()
             parsed = _extract_json_from_text(raw_groq)
@@ -837,7 +839,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
     return f"လောလောဆယ် AI ဆာဗာ ခဏအလုပ်များနေပါတယ်ရှင်၊ ခဏနေပြီး ထပ်စမ်းကြည့်ပေးပါ:\n{debug_tail}"
 
 
-# --- Single Smart Intelligence Classifier (TASK / GROUP / ADVICE / GENERAL / WEB_SEARCH) ---
+# --- Single Smart Intelligence Classifier (TASK / GROUP / ADVICE / GENERAL / WEB_SEARCH + Multi-Task) ---
 def _extract_weekday_target(text: str) -> int | None:
     t = text.lower()
     mapping = {
@@ -986,17 +988,18 @@ Recent Conversation:
 Latest User Message: "{user_message}"
 
 Classify into ONE primary intent:
-- "TASK": Setting/updating/completing/listing personal reminders or to-dos, or correcting a task entry.
+- "TASK": Setting/updating/completing/listing personal reminders or to-dos, or correcting a task entry (including multiple tasks in one message).
 - "GROUP": Asking about anything discussed/reported/shared in Telegram groups, asking for a group summary/report, or correcting a misrouted group query.
 - "ADVICE": Seeking recommendations, options, how-to guidance, or decision support.
 - "GENERAL": Translating, drafting, explaining concepts, recalling personal chat/profile, or casual chat.
 - "WEB_SEARCH": Looking up external/live/current facts, news, sports/scores, weather, prices, or web info not from private/group logs.
 
 If intent is "WEB_SEARCH", also output:
-- "search_query": A self-contained search query combining Recent Conversation context if the user says a follow-up like "Yes, ရှာပေးပါ" or "အသေးစိတ် ရှာပေးပါ" (e.g. "Chelsea match result yesterday").
+- "search_query": A self-contained search query combining Recent Conversation context if the user says a follow-up like "Yes, ရှာပေးပါ" or "အသေးစိတ် ရှာပေးပါ".
 
 If intent is "TASK", also extract:
 - "task_action": "add" | "done" | "list" | "cancel_last"
+- "tasks": list of task objects if adding one or more tasks: [{{"clean_title": "...", "reason": null, "repeat_type": "once|daily|weekly|school_days", "remind_iso": "YYYY-MM-DDTHH:MM:SS+06:30 or null"}}]
 - "clean_title": pure action in Burmese without time/schedule/reason/filler words
 - "reason": short reason if stated, else null
 - "repeat_type": "once" | "daily" | "weekly" | "school_days"
@@ -1012,6 +1015,7 @@ Return ONLY valid JSON:
   "intent": "TASK|GROUP|ADVICE|GENERAL|WEB_SEARCH",
   "search_query": null,
   "task_action": "add",
+  "tasks": [],
   "clean_title": null,
   "reason": null,
   "repeat_type": "once",
@@ -1027,6 +1031,7 @@ Return ONLY valid JSON:
             "intent": "GENERAL",
             "search_query": None,
             "task_action": "add",
+            "tasks": [],
             "clean_title": _clean_task_title_fallback(user_message),
             "reason": None,
             "repeat_type": "once",
@@ -1065,6 +1070,35 @@ Return ONLY valid JSON:
                 days_ahead = 7
             rem_dt += timedelta(days=days_ahead)
 
+    normalized_tasks = []
+    raw_tasks = parsed.get("tasks")
+    if isinstance(raw_tasks, list) and raw_tasks:
+        for item in raw_tasks[:8]:
+            if not isinstance(item, dict):
+                continue
+            item_title = _clean_task_title_fallback(str(item.get("clean_title") or ""))
+            if not item_title:
+                continue
+            item_rep = str(item.get("repeat_type") or repeat_type or "once").strip()
+            if item_rep not in {"once", "daily", "weekly", "school_days"}:
+                item_rep = "once"
+            item_rem_dt = None
+            if item.get("remind_iso"):
+                try:
+                    d_o = datetime.fromisoformat(str(item["remind_iso"]))
+                    item_rem_dt = d_o.replace(tzinfo=MM_TZ) if d_o.tzinfo is None else d_o.astimezone(MM_TZ)
+                except Exception:
+                    item_rem_dt = parse_reminder_datetime_mmt(item_title)
+            else:
+                item_rem_dt = parse_reminder_datetime_mmt(item_title)
+            item_reason = str(item.get("reason")).strip() if item.get("reason") else None
+            normalized_tasks.append({
+                "clean_title": item_title,
+                "reason": item_reason,
+                "repeat_type": item_rep,
+                "remind_dt": item_rem_dt,
+            })
+
     raw_title = parsed.get("clean_title")
     clean_title = (str(raw_title).strip() if raw_title else "") or _clean_task_title_fallback(user_message)
     clean_title = _clean_task_title_fallback(clean_title) or _clean_task_title_fallback(user_message)
@@ -1079,6 +1113,7 @@ Return ONLY valid JSON:
         "intent": intent,
         "search_query": search_query,
         "task_action": str(parsed.get("task_action") or "add").lower().strip(),
+        "tasks": normalized_tasks,
         "clean_title": clean_title,
         "reason": reason,
         "repeat_type": repeat_type,
@@ -1161,6 +1196,24 @@ def delete_latest_pending_task() -> str | None:
     return None
 
 
+def _format_single_task_added(title: str, remind_dt: datetime | None, reason: str | None, repeat_mode: str, raw_ctx: str) -> str:
+    use_maung = _is_health_or_family_task(f"{title} {raw_ctx}", reason)
+    prefix = "မောင်ရေ — " if use_maung else ""
+    ending = "နော်" if use_maung else "ရှင်"
+    line = f"{prefix}\"{title}\" မှတ်ထားလိုက်ပါပြီ{ending}"
+    if remind_dt:
+        line += f"\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[remind_dt.weekday()]})"
+    if repeat_mode == "school_days":
+        line += " · ကျောင်းဖွင့်ရက်"
+    elif repeat_mode == "weekly":
+        line += " · အပတ်စဉ်"
+    elif repeat_mode == "daily":
+        line += " · နေ့စဉ်"
+    if reason:
+        line += f"\n📝 {reason}"
+    return line
+
+
 def handle_task_intent(user_message: str, route: dict) -> str:
     action = (route.get("task_action") or "add").lower().strip()
     task_title = (route.get("clean_title") or "").strip()
@@ -1214,12 +1267,22 @@ def handle_task_intent(user_message: str, route: dict) -> str:
             print(f"Task update error: {e}")
             return f"{prefix}Task အခြေအနေ ပြောင်းရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားပါတယ်၊ ထပ်စမ်းကြည့်ပါ{ending}"
 
-    clean_title = task_title or _clean_task_title_fallback(user_message)
-    remind_dt = route.get("remind_dt")
-    repeat_mode = route.get("repeat_type", "once")
-    use_maung = _is_health_or_family_task(f"{clean_title} {user_message}", reason)
-    prefix = "မောင်ရေ — " if use_maung else ""
-    ending = "နော်" if use_maung else "ရှင်"
+    multi_tasks = route.get("tasks") or []
+    if len(multi_tasks) > 1:
+        added_lines = []
+        for idx, mt in enumerate(multi_tasks, start=1):
+            t_title = mt["clean_title"]
+            t_rem = mt.get("remind_dt")
+            t_reason = mt.get("reason")
+            t_rep = mt.get("repeat_type", "once")
+            add_task(t_title, t_rem, reason=t_reason, repeat_type=t_rep)
+            added_lines.append(f"{idx}. {_format_single_task_added(t_title, t_rem, t_reason, t_rep, user_message)}")
+        return "\n\n".join(added_lines)
+
+    clean_title = (multi_tasks[0]["clean_title"] if multi_tasks else task_title) or _clean_task_title_fallback(user_message)
+    remind_dt = (multi_tasks[0].get("remind_dt") if multi_tasks else route.get("remind_dt"))
+    repeat_mode = (multi_tasks[0].get("repeat_type") if multi_tasks else route.get("repeat_type", "once"))
+    reason = (multi_tasks[0].get("reason") if multi_tasks else reason)
 
     is_correction = any(w in user_message for w in ["မဟုတ်ဘူး", "ပြောတယ်", "ပြင်"])
     if is_correction:
@@ -1252,18 +1315,167 @@ def handle_task_intent(user_message: str, route: dict) -> str:
     else:
         add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
 
-    reply_line = f"{prefix}\"{clean_title}\" မှတ်ထားလိုက်ပါပြီ{ending}"
-    if remind_dt:
-        reply_line += f"\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[remind_dt.weekday()]})"
-    if repeat_mode == "school_days":
-        reply_line += " · ကျောင်းဖွင့်ရက်"
-    elif repeat_mode == "weekly":
-        reply_line += " · အပတ်စဉ်"
-    elif repeat_mode == "daily":
-        reply_line += " · နေ့စဉ်"
-    if reason:
-        reply_line += f"\n📝 {reason}"
-    return reply_line
+    return _format_single_task_added(clean_title, remind_dt, reason, repeat_mode, user_message)
+
+
+# --- Voice-In & Natural Female Burmese Voice-Out Helpers ---
+def _prepare_spoken_text(reply_text: str, max_chars: int = 460) -> str:
+    """စာသားထဲက markdown/tag/symbol များကို ဖယ်ရှားပြီး မိန်းကလေးတစ်ယောက် ပြောသလို သဘာဝကျကျ ဖတ်နိုင်အောင် ပြင်ဆင်သည်။"""
+    if not reply_text:
+        return ""
+    spoken = _clean_maya_voice(reply_text)
+    spoken = re.sub(r"\[(Verified|Deduced|Unverified)\]", "", spoken)
+    spoken = re.sub(r"[⏰📝🔁•✓📰🎙️⚠️📌🗂️💡]+", " ", spoken)
+    spoken = re.sub(r"[*_`#>\-]+", " ", spoken)
+    spoken = re.sub(r"\s+", " ", spoken).strip()
+    if len(spoken) > max_chars:
+        spoken = spoken[:max_chars].rsplit(" ", 1)[0] + "။ ကျန်တဲ့ အသေးစိတ်ကိုတော့ စာနဲ့ ထည့်ပို့ပေးထားပါတယ်ရှင်။"
+    return spoken
+
+
+def transcribe_voice_bytes(audio_bytes: bytes, mime_type: str = "audio/ogg") -> str:
+    """Voice/Audio bytes ကို Gemini multimodal audio understanding ဖြင့် စာသားပြောင်းသည်။"""
+    audio_part = types.Part.from_bytes(data=bytes(audio_bytes), mime_type=mime_type or "audio/ogg")
+    prompt = (
+        "ဒီအသံဖိုင်ထဲမှာ ပြောထားတဲ့ စကားကို ကြားသည့်အတိုင်း တိတိကျကျ စာသား (Transcript) ပြန်ရေးပေးပါ။ "
+        "မြန်မာစကားဆိုရင် မြန်မာစာ (Unicode) နဲ့ ရေးပြီး၊ အင်္ဂလိပ်စကားလုံး/ကိန်းဂဏန်း ပါရင်လည်း မှန်ကန်အောင် ထည့်ရေးပါ။ "
+        "အပိုရှင်းလင်းချက် မထည့်ဘဲ ပြောတဲ့စကားကိုသာ တိုက်ရိုက် ထုတ်ပေးပါ။"
+    )
+    for model_name in ("gemini-3.5-flash-lite", "gemini-3.8-flash"):
+        try:
+            resp = gemini_client.models.generate_content(
+                model=model_name,
+                contents=[audio_part, prompt],
+                config=types.GenerateContentConfig(temperature=0.0),
+            )
+            if resp and resp.text and resp.text.strip():
+                return resp.text.strip()
+        except Exception as e:
+            print(f"[Voice STT {model_name} Error]: {e}")
+    return ""
+
+
+async def _synthesize_edge_tts_mp3(spoken_text: str) -> bytes | None:
+    """Edge TTS Myanmar female neural voice (my-MM-NilarNeural) ဖြင့် သဘာဝကျသော မိန်းကလေးအသံ ထုတ်သည်။"""
+    try:
+        communicate = edge_tts.Communicate(
+            text=spoken_text,
+            voice="my-MM-NilarNeural",
+            rate="+0%",
+            pitch="+4Hz",
+        )
+        buf = io.BytesIO()
+        async for chunk in communicate.stream():
+            if chunk.get("type") == "audio" and chunk.get("data"):
+                buf.write(chunk["data"])
+        data = buf.getvalue()
+        return data if data else None
+    except Exception as e:
+        print(f"[Edge TTS Error]: {e}")
+        return None
+
+
+def synthesize_myanmar_voice_mp3(text: str) -> bytes | None:
+    """Edge TTS (Natural Female Voice) ကို ဦးစားပေးသုံးပြီး မရပါက gTTS ဖြင့် fallback ပြန်ပေးသည်။"""
+    spoken = _prepare_spoken_text(text)
+    if not spoken:
+        return None
+
+    try:
+        loop = asyncio.new_event_loop()
+        try:
+            edge_audio = loop.run_until_complete(_synthesize_edge_tts_mp3(spoken))
+        finally:
+            loop.close()
+        if edge_audio:
+            return edge_audio
+    except Exception as e:
+        print(f"[Edge TTS Loop Error]: {e}")
+
+    try:
+        tts = gTTS(text=spoken, lang="my", slow=False)
+        buf = io.BytesIO()
+        tts.write_to_fp(buf)
+        buf.seek(0)
+        data = buf.read()
+        return data if data else None
+    except Exception as e:
+        print(f"[gTTS Fallback Error]: {e}")
+        return None
+
+
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Private chat မှ Voice Note / Audio ဖြင့် ခိုင်းစေမှုကို နားထောင်ပြီး စာသား + မိန်းကလေးအသံ နှစ်မျိုးလုံးဖြင့် ပြန်ဖြေသည်။"""
+    message = update.message
+    if not message or message.chat.type != "private":
+        return
+
+    if message.from_user.id != ADMIN_USER_ID:
+        await message.reply_text("Unauthorized.")
+        return
+
+    voice_obj = message.voice or message.audio
+    if not voice_obj:
+        return
+
+    await context.bot.send_chat_action(chat_id=message.chat_id, action="record_voice")
+
+    try:
+        tg_file = await voice_obj.get_file()
+        audio_bytes = bytes(await tg_file.download_as_bytearray())
+        mime_type = getattr(voice_obj, "mime_type", None) or ("audio/ogg" if message.voice else "audio/mpeg")
+
+        transcript = await asyncio.to_thread(transcribe_voice_bytes, audio_bytes, mime_type)
+        if not transcript:
+            await message.reply_text("အသံကို နားထောင်ရာမှာ ခဏပြတ်တောက်သွားပါတယ်ရှင်၊ ထပ်ပြောကြည့်ပေးပါ")
+            return
+
+        save_chat_message(message.from_user.id, "user", f"[Voice] {transcript}")
+
+        recent_ctx = await asyncio.to_thread(get_recent_history_for_router, message.from_user.id, 6)
+        available_groups = await asyncio.to_thread(get_available_groups)
+        user_pref_ctx = await asyncio.to_thread(get_user_profile, message.from_user.id)
+
+        route = await asyncio.to_thread(
+            smart_route_and_parse, transcript, available_groups, recent_ctx, user_pref_ctx
+        )
+        intent = route.get("intent", "GENERAL")
+
+        if intent == "TASK":
+            reply_text = await asyncio.to_thread(handle_task_intent, transcript, route)
+        elif intent == "GROUP":
+            reply_text = await asyncio.to_thread(
+                handle_group_intent, message.from_user.id, transcript, route, recent_ctx
+            )
+        elif intent == "WEB_SEARCH":
+            reply_text = await asyncio.to_thread(
+                answer_with_universal_search,
+                message.from_user.id,
+                transcript,
+                recent_ctx,
+                route.get("search_query"),
+            )
+        elif intent == "ADVICE":
+            reply_text = await asyncio.to_thread(
+                handle_advice_or_general_intent, message.from_user.id, transcript, "ADVICE"
+            )
+        else:
+            reply_text = await asyncio.to_thread(
+                handle_advice_or_general_intent, message.from_user.id, transcript, "GENERAL"
+            )
+
+        save_chat_message(message.from_user.id, "assistant", reply_text)
+        asyncio.create_task(asyncio.to_thread(evolve_user_profile, message.from_user.id, transcript, reply_text))
+
+        await send_long_message(message, f"🎙️ \"{transcript}\"\n\n{reply_text}")
+
+        mp3_bytes = await asyncio.to_thread(synthesize_myanmar_voice_mp3, reply_text)
+        if mp3_bytes:
+            await message.reply_voice(voice=io.BytesIO(mp3_bytes))
+
+    except Exception as e:
+        print(f"Error in handle_voice_message: {e}")
+        await message.reply_text("အသံနဲ့ ပြန်ဖြေရာမှာ ခဏအခက်အခဲ ရှိနေပါတယ်ရှင်၊ နောက်မှ ထပ်စမ်းကြည့်ပါ")
 
 
 # --- 2. Group Summary, Report & Confidence-Tagged Natural Group Q&A Tools ---
@@ -2154,13 +2366,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reason = parsed.get("reason")
         repeat_mode = parsed.get("repeat_type", "once")
         add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
-        is_hf = _is_health_or_family_task(f"{clean_title} {arg}", reason)
-        prefix = "မောင်ရေ — " if is_hf else ""
-        ending = "နော်" if is_hf else "ရှင်"
-        if remind_dt:
-            await message.reply_text(f"{prefix}\"{clean_title}\" မှတ်ထားလိုက်ပါပြီ{ending}\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')}")
-        else:
-            await message.reply_text(f"{prefix}\"{clean_title}\" မှတ်ထားလိုက်ပါပြီ{ending}")
+        await message.reply_text(_format_single_task_added(clean_title, remind_dt, reason, repeat_mode, arg))
         return
 
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
@@ -2323,7 +2529,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_long_message(message, reply_text)
                 return
 
-            # Dedicated news summary shortcut
             if any(k in stripped_lower for k in ["news summary", "daily news", "သတင်း အနှစ်ချုပ်", "သတင်းအနှစ်ချုပ်", "မြန်မာသတင်း အနှစ်ချုပ်"]):
                 reply_text = await asyncio.to_thread(get_myanmar_news_summary, False)
                 save_chat_message(message.from_user.id, "assistant", reply_text)
@@ -2388,10 +2593,12 @@ async def main_async():
     )
     # Inline Button Clicks
     application.add_handler(CallbackQueryHandler(handle_button_callback))
+    # Voice / Audio Messages
+    application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice_message))
     # Normal Messages
-    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.VOICE & ~filters.AUDIO, handle_message))
 
-    # Scheduled Jobs (9:00 AM News, Due Reminders, 6:00 PM Pending Digest, 30s Follow-up Watcher)
+    # Scheduled Jobs (9:00 AM News, Due Reminders + Repeat Reschedule + 30d Cleanup, 6:00 PM Digest, 30s Follow-up)
     if application.job_queue:
         morning_9_mmt = dt_time(hour=9, minute=0, second=0, tzinfo=MM_TZ)
         application.job_queue.run_daily(
@@ -2434,7 +2641,7 @@ async def main_async():
         BotCommand("setrule", "Add a new versioned core rule"),
     ])
 
-    print("🤖 Maya AI Agent (Full Workflow + Repeat Reschedule + 30d Cleanup + Quota Savers) started...")
+    print("🤖 Maya AI Agent (Voice-In/Out Female TTS + Multi-Task + 3-Source Hybrid News + Quota Savers) started...")
 
     await application.start()
     await application.updater.start_polling()
