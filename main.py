@@ -1427,7 +1427,7 @@ def _humanize_timestamps_for_speech(text: str) -> str:
 
 
 def _prepare_spoken_text(reply_text: str, max_chars: int = 440) -> tuple[str, str]:
-    """စာသားကို အရပ်ထဲ ရင်းရင်းနှီးနှီး ပြောသလို သဘာဝကျကျ ပြင်ဆင်ပြီး pacing style ပြန်ပေးသည်။"""
+    """စာသားကို ။၊ , နှင့် စာခြားနေရာများတွင် ရပ်နား/နှေးပြီး တစ်ဆက်တည်းနေရာများတွင် သွက်သွက်ပြောနိုင်ရန် ပြင်ဆင်သည်။"""
     if not reply_text:
         return "", "normal"
 
@@ -1441,27 +1441,26 @@ def _prepare_spoken_text(reply_text: str, max_chars: int = 440) -> tuple[str, st
     spoken = re.sub(r"\(\s*(?:တနင်္လာနေ့|အင်္ဂါနေ့|ဗုဒ္ဓဟူးနေ့|ကြာသပတေးနေ့|သောကြာနေ့|စနေနေ့|တနင်္ဂနွေနေ့)\s*\)", "", spoken)
     spoken = _humanize_timestamps_for_speech(spoken)
 
+    # Numbered list items or newlines -> strong pause boundary
     spoken = re.sub(r"(?:^|\n)\s*\d+[\.\)]\s*", "\n\n", spoken)
     spoken = re.sub(r"[⏰📝🔁•✓📰🎙️⚠️📌🗂️💡]+", " ", spoken)
     spoken = re.sub(r"[*_`#>\-]+", " ", spoken)
 
-    paragraphs = [re.sub(r"\s+", " ", p).strip(" ၊။") for p in re.split(r"\n+", spoken) if p.strip()]
-    if not paragraphs:
-        return "", "normal"
+    # Mark clause/sentence/line breaks so speech slows/pauses naturally at ။, ၊, , and line breaks
+    spoken = re.sub(r"\n+", " ||PAUSE_LONG|| ", spoken)
+    spoken = re.sub(r"[။]+", " ||PAUSE_LONG|| ", spoken)
+    spoken = re.sub(r"[၊,]+", " ||PAUSE_SHORT|| ", spoken)
+    spoken = re.sub(r"\s+", " ", spoken).strip()
 
-    joined = "။ ... ".join(paragraphs)
-    joined = re.sub(r"(?:။\s*){2,}", "။ ... ", joined).strip()
-
-    if len(joined) > max_chars:
-        cut = joined[:max_chars]
-        last_stop = max(cut.rfind("။"), cut.rfind("..."), cut.rfind(" "))
+    if len(spoken) > max_chars:
+        cut = spoken[:max_chars]
+        last_stop = max(cut.rfind("||PAUSE_LONG||"), cut.rfind("||PAUSE_SHORT||"), cut.rfind(" "))
         if last_stop > 80:
             cut = cut[:last_stop].strip()
-        joined = f"{cut}။ ... ကျန်တာကိုတော့ စာနဲ့ ထည့်ပို့ပေးထားပါတယ်ရှင်။"
+        spoken = f"{cut} ||PAUSE_LONG|| ကျန်တာကိုတော့ စာနဲ့ ထည့်ပို့ပေးထားပါတယ်ရှင်"
 
     style = "fast_task" if is_task_confirm else ("calm_care" if is_care_tone else "normal")
-    return joined, style
-
+    return spoken, style
 
 def transcribe_voice_bytes(audio_bytes: bytes, mime_type: str = "audio/ogg") -> str:
     """Voice/Audio bytes ကို Gemini multimodal audio understanding ဖြင့် စာသားပြောင်းသည်။"""
@@ -1511,11 +1510,11 @@ async def _synthesize_edge_tts_mp3(
     style: str = "normal",
     user_id: int | None = None,
 ) -> bytes | None:
-    """Edge TTS Myanmar female voice (my-MM-NilarNeural) ကို ပိုငယ်ပြီး သွက်လက်တဲ့ မိန်းကလေးအသံအဖြစ် ထုတ်ပေးသည်။"""
+    """တစ်ဆက်တည်း ပြောရမည့်နေရာများတွင် မြန်ပြီး၊ ။၊ , နှင့် စာခြားနေရာများတွင် နှေး/ရပ်နား၍ ထုတ်ပေးသည်။"""
     base_rate_map = {
-        "fast_task": 24,
-        "calm_care": 10,
-        "normal": 17,
+        "fast_task": 26,
+        "calm_care": 12,
+        "normal": 22,
     }
     base_pitch_map = {
         "fast_task": 10,
@@ -1524,24 +1523,49 @@ async def _synthesize_edge_tts_mp3(
     }
 
     rate_delta, pitch_delta = _get_learned_voice_adjustments(user_id)
-    base_rate = max(-10, min(35, base_rate_map.get(style, 17) + rate_delta))
+    fast_rate = max(-10, min(38, base_rate_map.get(style, 22) + rate_delta))
+    slow_rate = max(-15, min(20, fast_rate - 14))
     pitch_val = max(-5, min(16, base_pitch_map.get(style, 9) + pitch_delta))
     pitch_str = f"{pitch_val:+d}Hz"
 
-    segments = [seg.strip() for seg in spoken_text.split("...") if seg.strip()]
+    # Tokenize text into spoken segments and pause markers
+    tokens = re.split(r"(\|\|PAUSE_LONG\|\||\|\|PAUSE_SHORT\|\|)", spoken_text)
+    segments: list[tuple[str, str, float]] = []  # (kind: 'speak'|'pause', text_or_empty, rate_or_sleep)
+
+    for idx, tok in enumerate(tokens):
+        t = tok.strip()
+        if not t:
+            continue
+        if t == "||PAUSE_LONG||":
+            segments.append(("pause", "", 0.22))
+        elif t == "||PAUSE_SHORT||":
+            segments.append(("pause", "", 0.12))
+        else:
+            next_tok = tokens[idx + 1].strip() if (idx + 1) < len(tokens) else ""
+            # If the very next token is a pause, slow down slightly at the end of this clause
+            if next_tok in ("||PAUSE_LONG||", "||PAUSE_SHORT||"):
+                r_val = slow_rate
+            elif len(t) < 28 and style != "calm_care":
+                r_val = fast_rate + 3
+            else:
+                r_val = fast_rate
+            segments.append(("speak", t, float(r_val)))
+
     if not segments:
-        segments = [spoken_text]
+        segments = [("speak", spoken_text, float(fast_rate))]
 
     try:
         out_buf = io.BytesIO()
-        for seg in segments:
-            seg_rate_val = base_rate + (4 if len(seg) < 30 and style != "calm_care" else 0)
-            seg_rate_str = f"{seg_rate_val:+d}%"
+        for kind, payload, val in segments:
+            if kind == "pause":
+                await asyncio.sleep(val)
+                continue
 
+            rate_str = f"{int(val):+d}%"
             communicate = edge_tts.Communicate(
-                text=seg,
+                text=payload,
                 voice="my-MM-NilarNeural",
-                rate=seg_rate_str,
+                rate=rate_str,
                 pitch=pitch_str,
             )
             async for chunk in communicate.stream():
