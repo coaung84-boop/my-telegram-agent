@@ -2885,6 +2885,25 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text(f"❌ Patch မအောင်မြင်ပါရှင်:\n{res.get('error')}")
         return
 
+    if cmd == "/getfile":
+        target_file = arg or "main.py"
+        await context.bot.send_chat_action(chat_id=message.chat_id, action="upload_document")
+        res = await asyncio.to_thread(get_github_file, target_file, GITHUB_BRANCH)
+        if not res.get("ok"):
+            await message.reply_text(f"❌ File ပြန်ယူရာမှာ အဆင်မပြေ ဖြစ်သွားပါတယ်ရှင်:\n{res.get('error')}")
+            return
+
+        content_bytes = (res.get("content") or "").encode("utf-8")
+        safe_filename = os.path.basename(res.get("path") or target_file) or "file.txt"
+        bio = io.BytesIO(content_bytes)
+        bio.name = safe_filename
+        await message.reply_document(
+            document=bio,
+            filename=safe_filename,
+            caption=f"📄 {res.get('path')} ({GITHUB_BRANCH}) — GitHub မှ ပြန်ယူပေးထားပါတယ်ရှင်",
+        )
+        return
+
     if cmd == "/addtask":
         if not arg:
             await message.reply_text("/addtask <task description> လို့ ရေးပေးပါရှင်")
