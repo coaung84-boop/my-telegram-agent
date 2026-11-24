@@ -1477,8 +1477,78 @@ async def _synthesize_edge_tts_mp3(spoken_text: str, style: str = "normal") -> b
         return None
 
 
-def synthesize_myanmar_voice_mp3(text: str) -> bytes | None:
-    """Edge TTS (Natural Female Voice + Dynamic Pacing) ကို ဦးစားပေးသုံးပြီး မရပါက gTTS ဖြင့် fallback ပြန်ပေးသည်။"""
+def _get_learned_voice_adjustments(user_id: int | None) -> tuple[int, int]:
+    """Learned style_preferences ထဲမှ voice speed/pitch/youthful tone preference ရှိမရှိ စစ်ပြီး offset (rate_delta, pitch_delta) ပြန်ပေးသည်။"""
+    if not user_id:
+        return 0, 0
+    try:
+        rec = get_user_profile_record(user_id)
+        prefs = f"{rec.get('style_preferences') or ''} {rec.get('core_rules') or ''}".lower()
+        rate_delta = 0
+        pitch_delta = 0
+
+        if any(k in prefs for k in ["မြန်မြန်", "သွက်သွက်", "ပိုမြန်", "fast", "brisk", "quick"]):
+            rate_delta += 5
+        if any(k in prefs for k in ["ဖြည်းဖြည်း", "နှေးနှေး", "slow", "gentle"]):
+            rate_delta -= 5
+        if any(k in prefs for k in ["ပိုငယ်", "ငယ်ငယ်", "နုပျို", "young", "youthful", "cute", "ချိုချို", "နူးညံ့"]):
+            pitch_delta += 2
+        return rate_delta, pitch_delta
+    except Exception:
+        return 0, 0
+
+
+async def _synthesize_edge_tts_mp3(
+    spoken_text: str,
+    style: str = "normal",
+    user_id: int | None = None,
+) -> bytes | None:
+    """Edge TTS Myanmar female voice (my-MM-NilarNeural) ကို ပိုငယ်ပြီး သွက်လက်တဲ့ မိန်းကလေးအသံအဖြစ် ထုတ်ပေးသည်။"""
+    base_rate_map = {
+        "fast_task": 24,
+        "calm_care": 10,
+        "normal": 17,
+    }
+    base_pitch_map = {
+        "fast_task": 10,
+        "calm_care": 8,
+        "normal": 9,
+    }
+
+    rate_delta, pitch_delta = _get_learned_voice_adjustments(user_id)
+    base_rate = max(-10, min(35, base_rate_map.get(style, 17) + rate_delta))
+    pitch_val = max(-5, min(16, base_pitch_map.get(style, 9) + pitch_delta))
+    pitch_str = f"{pitch_val:+d}Hz"
+
+    segments = [seg.strip() for seg in spoken_text.split("...") if seg.strip()]
+    if not segments:
+        segments = [spoken_text]
+
+    try:
+        out_buf = io.BytesIO()
+        for seg in segments:
+            seg_rate_val = base_rate + (4 if len(seg) < 30 and style != "calm_care" else 0)
+            seg_rate_str = f"{seg_rate_val:+d}%"
+
+            communicate = edge_tts.Communicate(
+                text=seg,
+                voice="my-MM-NilarNeural",
+                rate=seg_rate_str,
+                pitch=pitch_str,
+            )
+            async for chunk in communicate.stream():
+                if chunk.get("type") == "audio" and chunk.get("data"):
+                    out_buf.write(chunk["data"])
+
+        data = out_buf.getvalue()
+        return data if data else None
+    except Exception as e:
+        print(f"[Edge TTS Error]: {e}")
+        return None
+
+
+def synthesize_myanmar_voice_mp3(text: str, user_id: int | None = None) -> bytes | None:
+    """Edge TTS (Brisk Natural Female Voice + Learned Style) ကို ဦးစားပေးသုံးပြီး gTTS fallback ထားသည်။"""
     spoken, style = _prepare_spoken_text(text)
     if not spoken:
         return None
@@ -1486,7 +1556,9 @@ def synthesize_myanmar_voice_mp3(text: str) -> bytes | None:
     try:
         loop = asyncio.new_event_loop()
         try:
-            edge_audio = loop.run_until_complete(_synthesize_edge_tts_mp3(spoken, style=style))
+            edge_audio = loop.run_until_complete(
+                _synthesize_edge_tts_mp3(spoken, style=style, user_id=user_id)
+            )
         finally:
             loop.close()
         if edge_audio:
@@ -1505,7 +1577,6 @@ def synthesize_myanmar_voice_mp3(text: str) -> bytes | None:
     except Exception as e:
         print(f"[gTTS Fallback Error]: {e}")
         return None
-
 
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Private chat မှ Voice Note / Audio ဖြင့် ခိုင်းစေမှုကို နားထောင်ပြီး စာသား + မိန်းကလေးအသံ နှစ်မျိုးလုံးဖြင့် ပြန်ဖြေသည်။"""
@@ -1572,7 +1643,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         await send_long_message(message, f"🎙️ \"{transcript}\"\n\n{reply_text}")
 
-        mp3_bytes = await asyncio.to_thread(synthesize_myanmar_voice_mp3, reply_text)
+        mp3_bytes = await asyncio.to_thread(synthesize_myanmar_voice_mp3, reply_text, message.from_user.id)
         if mp3_bytes:
             await message.reply_voice(voice=io.BytesIO(mp3_bytes))
 
