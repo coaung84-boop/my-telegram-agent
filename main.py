@@ -1382,17 +1382,16 @@ def _humanize_timestamps_for_speech(text: str) -> str:
             pass
         return f"{_number_to_burmese_words(day_val)}ရက်နေ့"
 
-    # 1) Full datetime: YYYY-MM-DD HH:MM or MM-DD HH:MM
     def _full_dt_repl(match):
         g1 = match.group(1)
         g2 = match.group(2) or match.group(4)
         g3 = match.group(3) or match.group(5)
         h, m = int(match.group(6)), int(match.group(7))
         time_spoken = _fmt_hour_min(h, m)
-        if g1 is not None:  # YYYY-MM-DD
+        if g1 is not None:
             y_v, m_v, d_v = int(g1), int(g2), int(g3)
             day_spoken = _fmt_day_label(m_v, d_v, y_v)
-        else:  # MM-DD
+        else:
             m_v, d_v = int(g2), int(g3)
             day_spoken = _fmt_day_label(m_v, d_v, None)
         return f"{day_spoken} {time_spoken}"
@@ -1403,7 +1402,6 @@ def _humanize_timestamps_for_speech(text: str) -> str:
         text,
     )
 
-    # 2) Standalone MM-DD (e.g. 11-24)
     def _mmdd_repl(match):
         m_v, d_v = int(match.group(1)), int(match.group(2))
         if 1 <= m_v <= 12 and 1 <= d_v <= 31:
@@ -1412,7 +1410,6 @@ def _humanize_timestamps_for_speech(text: str) -> str:
 
     text = re.sub(r"\b(\d{1,2})-(\d{1,2})\b", _mmdd_repl, text)
 
-    # 3) Standalone HH:MM
     def _hm_repl(match):
         h, m = int(match.group(1)), int(match.group(2))
         if 0 <= h <= 23 and 0 <= m <= 59:
@@ -1420,9 +1417,11 @@ def _humanize_timestamps_for_speech(text: str) -> str:
         return match.group(0)
 
     text = re.sub(r"\b(\d{1,2}):(\d{2})\b", _hm_repl, text)
-
-    # 4) Remove standalone 4-digit years
     text = re.sub(r"\b(19|20)\d{2}\b", "", text)
+
+    # Clean duplicate time-of-day or 'နာရီ' words if a phrase was already humanized
+    text = re.sub(r"\b(မနက်|နေ့လယ်|ညနေ|ည)\s+(မနက်|နေ့လယ်|ညနေ|ည)\b", r"\1", text)
+    text = re.sub(r"(နာရီ)\s+နာရီ", r"\1", text)
     return text
 
 
@@ -1441,12 +1440,10 @@ def _prepare_spoken_text(reply_text: str, max_chars: int = 440) -> tuple[str, st
     spoken = re.sub(r"\(\s*(?:တနင်္လာနေ့|အင်္ဂါနေ့|ဗုဒ္ဓဟူးနေ့|ကြာသပတေးနေ့|သောကြာနေ့|စနေနေ့|တနင်္ဂနွေနေ့)\s*\)", "", spoken)
     spoken = _humanize_timestamps_for_speech(spoken)
 
-    # Numbered list items or newlines -> strong pause boundary
     spoken = re.sub(r"(?:^|\n)\s*\d+[\.\)]\s*", "\n\n", spoken)
     spoken = re.sub(r"[⏰📝🔁•✓📰🎙️⚠️📌🗂️💡]+", " ", spoken)
     spoken = re.sub(r"[*_`#>\-]+", " ", spoken)
 
-    # Mark clause/sentence/line breaks so speech slows/pauses naturally at ။, ၊, , and line breaks
     spoken = re.sub(r"\n+", " ||PAUSE_LONG|| ", spoken)
     spoken = re.sub(r"[။]+", " ||PAUSE_LONG|| ", spoken)
     spoken = re.sub(r"[၊,]+", " ||PAUSE_SHORT|| ", spoken)
@@ -1510,11 +1507,11 @@ async def _synthesize_edge_tts_mp3(
     style: str = "normal",
     user_id: int | None = None,
 ) -> bytes | None:
-    """တစ်ဆက်တည်း ပြောရမည့်နေရာများတွင် မြန်ပြီး၊ ။၊ , နှင့် စာခြားနေရာများတွင် နှေး/ရပ်နား၍ ထုတ်ပေးသည်။"""
+    """တစ်ဆက်တည်း ပြောရမည့်နေရာများတွင် ပိုမြန်ပြီး၊ ။၊ , နှင့် စာခြားနေရာများတွင် နှေး/ရပ်နား၍ ထုတ်ပေးသည်။"""
     base_rate_map = {
-        "fast_task": 26,
-        "calm_care": 12,
-        "normal": 22,
+        "fast_task": 32,
+        "calm_care": 16,
+        "normal": 28,
     }
     base_pitch_map = {
         "fast_task": 10,
@@ -1523,32 +1520,30 @@ async def _synthesize_edge_tts_mp3(
     }
 
     rate_delta, pitch_delta = _get_learned_voice_adjustments(user_id)
-    fast_rate = max(-10, min(38, base_rate_map.get(style, 22) + rate_delta))
-    slow_rate = max(-15, min(20, fast_rate - 14))
+    fast_rate = max(-10, min(42, base_rate_map.get(style, 28) + rate_delta))
+    slow_rate = max(-15, min(22, fast_rate - 16))
     pitch_val = max(-5, min(16, base_pitch_map.get(style, 9) + pitch_delta))
     pitch_str = f"{pitch_val:+d}Hz"
 
-    # Tokenize text into spoken segments and pause markers
     tokens = re.split(r"(\|\|PAUSE_LONG\|\||\|\|PAUSE_SHORT\|\|)", spoken_text)
-    segments: list[tuple[str, str, float]] = []  # (kind: 'speak'|'pause', text_or_empty, rate_or_sleep)
+    segments: list[tuple[str, str, float]] = []
 
     for idx, tok in enumerate(tokens):
         t = tok.strip()
         if not t:
             continue
         if t == "||PAUSE_LONG||":
-            segments.append(("pause", "", 0.22))
+            segments.append(("pause", "", 0.16))
         elif t == "||PAUSE_SHORT||":
-            segments.append(("pause", "", 0.12))
+            segments.append(("pause", "", 0.08))
         else:
             next_tok = tokens[idx + 1].strip() if (idx + 1) < len(tokens) else ""
-            # If the very next token is a pause, slow down slightly at the end of this clause
             if next_tok in ("||PAUSE_LONG||", "||PAUSE_SHORT||"):
                 r_val = slow_rate
             elif len(t) < 28 and style != "calm_care":
-                r_val = fast_rate + 3
+                r_val = fast_rate + 4
             else:
-                r_val = fast_rate
+                r_val = fast_rate + 2
             segments.append(("speak", t, float(r_val)))
 
     if not segments:
