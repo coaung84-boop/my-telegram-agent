@@ -1322,16 +1322,8 @@ def handle_task_intent(user_message: str, route: dict) -> str:
 def _number_to_burmese_words(n: int) -> str:
     """0-99 ဂဏန်းများကို ရင်းနှီးသော မြန်မာစကားပြောဟန်အတိုင်း ပြောင်းပေးသည်။"""
     units = {
-        0: "သုည",
-        1: "တစ်",
-        2: "နှစ်",
-        3: "သုံး",
-        4: "လေး",
-        5: "ငါး",
-        6: "ခြောက်",
-        7: "ခုနစ်",
-        8: "ရှစ်",
-        9: "ကိုး",
+        0: "သုည", 1: "တစ်", 2: "နှစ်", 3: "သုံး", 4: "လေး",
+        5: "ငါး", 6: "ခြောက်", 7: "ခုနစ်", 8: "ရှစ်", 9: "ကိုး",
     }
     if n < 0:
         return str(n)
@@ -1342,18 +1334,11 @@ def _number_to_burmese_words(n: int) -> str:
     if n < 20:
         return f"ဆယ့်{units[n % 10]}"
     tens_map = {
-        2: "နှစ်ဆယ်",
-        3: "သုံးဆယ်",
-        4: "လေးဆယ်",
-        5: "ငါးဆယ်",
-        6: "ခြောက်ဆယ်",
-        7: "ခုနစ်ဆယ်",
-        8: "ရှစ်ဆယ်",
-        9: "ကိုးဆယ်",
+        2: "နှစ်ဆယ်", 3: "သုံးဆယ်", 4: "လေးဆယ်", 5: "ငါးဆယ်",
+        6: "ခြောက်ဆယ်", 7: "ခုနစ်ဆယ်", 8: "ရှစ်ဆယ်", 9: "ကိုးဆယ်",
     }
-    ten_part = tens_map[n // 10]
     rem = n % 10
-    return f"{ten_part}{units[rem]}" if rem else ten_part
+    return f"{tens_map[n // 10]}{units[rem]}" if rem else tens_map[n // 10]
 
 
 def _humanize_timestamps_for_speech(text: str) -> str:
@@ -1399,8 +1384,10 @@ def _humanize_timestamps_for_speech(text: str) -> str:
 
     # 1) Full datetime: YYYY-MM-DD HH:MM or MM-DD HH:MM
     def _full_dt_repl(match):
-        g1, g2, g3, h_s, m_s = match.groups()
-        h, m = int(h_s), int(m_s)
+        g1 = match.group(1)
+        g2 = match.group(2) or match.group(4)
+        g3 = match.group(3) or match.group(5)
+        h, m = int(match.group(6)), int(match.group(7))
         time_spoken = _fmt_hour_min(h, m)
         if g1 is not None:  # YYYY-MM-DD
             y_v, m_v, d_v = int(g1), int(g2), int(g3)
@@ -1412,13 +1399,7 @@ def _humanize_timestamps_for_speech(text: str) -> str:
 
     text = re.sub(
         r"(?:\b(\d{4})-(\d{1,2})-(\d{1,2})\b|\b(\d{1,2})-(\d{1,2})\b)\s+(\d{1,2}):(\d{2})",
-        lambda m: _full_dt_repl((
-            m.group(1),
-            m.group(2) or m.group(4),
-            m.group(3) or m.group(5),
-            m.group(6),
-            m.group(7),
-        )),
+        _full_dt_repl,
         text,
     )
 
@@ -1481,6 +1462,7 @@ def _prepare_spoken_text(reply_text: str, max_chars: int = 440) -> tuple[str, st
     style = "fast_task" if is_task_confirm else ("calm_care" if is_care_tone else "normal")
     return joined, style
 
+
 def transcribe_voice_bytes(audio_bytes: bytes, mime_type: str = "audio/ogg") -> str:
     """Voice/Audio bytes ကို Gemini multimodal audio understanding ဖြင့် စာသားပြောင်းသည်။"""
     audio_part = types.Part.from_bytes(data=bytes(audio_bytes), mime_type=mime_type or "audio/ogg")
@@ -1501,56 +1483,6 @@ def transcribe_voice_bytes(audio_bytes: bytes, mime_type: str = "audio/ogg") -> 
         except Exception as e:
             print(f"[Voice STT {model_name} Error]: {e}")
     return ""
-
-
-async def _synthesize_edge_tts_mp3(spoken_text: str, style: str = "normal") -> bytes | None:
-    """Edge TTS Myanmar female voice (my-MM-NilarNeural) ကို natural rate & pitch ဖြင့် ထုတ်ပေးသည်။"""
-    rate_map = {
-        "fast_task": "+10%",
-        "calm_care": "-3%",
-        "normal": "+3%",
-    }
-    pitch_map = {
-        "fast_task": "+5Hz",
-        "calm_care": "+3Hz",
-        "normal": "+4Hz",
-    }
-
-    # Split on pause marker '... ' so Edge TTS naturally pauses between segments
-    segments = [seg.strip() for seg in spoken_text.split("...") if seg.strip()]
-    if not segments:
-        segments = [spoken_text]
-
-    rate_str = rate_map.get(style, "+3%")
-    pitch_str = pitch_map.get(style, "+4Hz")
-
-    try:
-        out_buf = io.BytesIO()
-        for idx, seg in enumerate(segments):
-            # Slightly brisker on short filler/transition segments, slightly gentler on main points
-            seg_rate = rate_str
-            if len(seg) < 28 and style != "calm_care":
-                seg_rate = "+12%"
-
-            communicate = edge_tts.Communicate(
-                text=seg,
-                voice="my-MM-NilarNeural",
-                rate=seg_rate,
-                pitch=pitch_str,
-            )
-            async for chunk in communicate.stream():
-                if chunk.get("type") == "audio" and chunk.get("data"):
-                    out_buf.write(chunk["data"])
-
-            # Brief natural pause between segments (except after the very last one)
-            if idx < len(segments) - 1:
-                await asyncio.sleep(0.08)
-
-        data = out_buf.getvalue()
-        return data if data else None
-    except Exception as e:
-        print(f"[Edge TTS Error]: {e}")
-        return None
 
 
 def _get_learned_voice_adjustments(user_id: int | None) -> tuple[int, int]:
@@ -1619,7 +1551,7 @@ async def _synthesize_edge_tts_mp3(
         data = out_buf.getvalue()
         return data if data else None
     except Exception as e:
-        print(f"[Edge TTS Error]: {e}")
+        print(f"[Edge TTS Error]: {type(e).__name__}: {e}")
         return None
 
 
@@ -1630,17 +1562,13 @@ def synthesize_myanmar_voice_mp3(text: str, user_id: int | None = None) -> bytes
         return None
 
     try:
-        loop = asyncio.new_event_loop()
-        try:
-            edge_audio = loop.run_until_complete(
-                _synthesize_edge_tts_mp3(spoken, style=style, user_id=user_id)
-            )
-        finally:
-            loop.close()
+        edge_audio = asyncio.run(
+            _synthesize_edge_tts_mp3(spoken, style=style, user_id=user_id)
+        )
         if edge_audio:
             return edge_audio
     except Exception as e:
-        print(f"[Edge TTS Loop Error]: {e}")
+        print(f"[Edge TTS Loop Error]: {type(e).__name__}: {e}")
 
     try:
         clean_for_gtts = spoken.replace("...", " ")
@@ -1651,7 +1579,7 @@ def synthesize_myanmar_voice_mp3(text: str, user_id: int | None = None) -> bytes
         data = buf.read()
         return data if data else None
     except Exception as e:
-        print(f"[gTTS Fallback Error]: {e}")
+        print(f"[gTTS Fallback Error]: {type(e).__name__}: {e}")
         return None
 
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
