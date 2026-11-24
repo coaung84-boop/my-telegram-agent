@@ -3389,7 +3389,7 @@ async def main_async():
         BotCommand("setrule", "Add a new versioned core rule"),
     ])
 
-    print("🤖 Maya AI Agent (Voice-In/Out Female TTS + Multi-Task + 3-Source Hybrid News + Quota Savers) started...")
+    print("🤖 Maya AI Agent started...")
 
     await application.start()
     await application.updater.start_polling()
