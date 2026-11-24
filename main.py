@@ -1319,9 +1319,48 @@ def handle_task_intent(user_message: str, route: dict) -> str:
 
 
 # --- Voice-In & Natural Female Burmese Voice-Out Helpers ---
+def _number_to_burmese_words(n: int) -> str:
+    """0-99 ဂဏန်းများကို ရင်းနှီးသော မြန်မာစကားပြောဟန်အတိုင်း ပြောင်းပေးသည်။"""
+    units = {
+        0: "သုည",
+        1: "တစ်",
+        2: "နှစ်",
+        3: "သုံး",
+        4: "လေး",
+        5: "ငါး",
+        6: "ခြောက်",
+        7: "ခုနစ်",
+        8: "ရှစ်",
+        9: "ကိုး",
+    }
+    if n < 0:
+        return str(n)
+    if n < 10:
+        return units[n]
+    if n == 10:
+        return "တစ်ဆယ်"
+    if n < 20:
+        return f"ဆယ့်{units[n % 10]}"
+    tens_map = {
+        2: "နှစ်ဆယ်",
+        3: "သုံးဆယ်",
+        4: "လေးဆယ်",
+        5: "ငါးဆယ်",
+        6: "ခြောက်ဆယ်",
+        7: "ခုနစ်ဆယ်",
+        8: "ရှစ်ဆယ်",
+        9: "ကိုးဆယ်",
+    }
+    ten_part = tens_map[n // 10]
+    rem = n % 10
+    return f"{ten_part}{units[rem]}" if rem else ten_part
+
+
 def _humanize_timestamps_for_speech(text: str) -> str:
-    """ISO/YYYY-MM-DD HH:MM နှင့် 24-hour time များကို သာမန်အရပ်ထဲ ပြောသလို တိုတိုရှင်းရှင်း ပြောင်းပေးသည်။"""
-    mm_digits = str.maketrans("0123456789", "၀၁၂၃၄၅၆၇၈၉")
+    """ရက်စွဲနှင့် အချိန်များကို အရပ်ထဲ ရင်းရင်းနှီးနှီး ပြောသလို ဘယ်နှရက်နေ့၊ ဘယ်နှနာရီ စသဖြင့် ပြောင်းပေးသည်။"""
+    now_mm = datetime.now(MM_TZ)
+    today_date = now_mm.date()
+    tomorrow_date = (now_mm + timedelta(days=1)).date()
 
     def _fmt_hour_min(h: int, m: int) -> str:
         if 5 <= h < 12:
@@ -1330,32 +1369,69 @@ def _humanize_timestamps_for_speech(text: str) -> str:
         elif h == 12:
             period = "နေ့လယ် "
             disp_h = 12
-        elif 12 < h < 17:
-            period = "ညနေ "
-            disp_h = h - 12
-        elif 17 <= h < 19:
+        elif 12 < h < 19:
             period = "ညနေ "
             disp_h = h - 12
         else:
             period = "ည "
             disp_h = h - 12 if h > 12 else h
 
-        h_mm = str(disp_h).translate(mm_digits)
+        h_word = _number_to_burmese_words(disp_h)
         if m == 0:
-            return f"{period}{h_mm}နာရီ"
+            return f"{period}{h_word}နာရီ"
         if m == 30:
-            return f"{period}{h_mm}နာရီခွဲ"
-        m_mm = str(m).translate(mm_digits)
-        return f"{period}{h_mm}နာရီ {m_mm}မိနစ်"
+            return f"{period}{h_word}နာရီခွဲ"
+        m_word = _number_to_burmese_words(m)
+        return f"{period}{h_word}နာရီ {m_word}မိနစ်"
 
-    # Replace 'YYYY-MM-DD HH:MM' -> natural time phrase (skip repeating full date/year out loud)
-    def _dt_repl(match):
-        h, m = int(match.group(2)), int(match.group(3))
-        return _fmt_hour_min(h, m)
+    def _fmt_day_label(month_val: int | None, day_val: int, year_val: int | None = None) -> str:
+        try:
+            y_check = year_val or today_date.year
+            m_check = month_val or today_date.month
+            d_obj = datetime(y_check, m_check, day_val).date()
+            if d_obj == today_date:
+                return "ဒီနေ့"
+            if d_obj == tomorrow_date:
+                return "မနက်ဖြန်"
+        except Exception:
+            pass
+        return f"{_number_to_burmese_words(day_val)}ရက်နေ့"
 
-    text = re.sub(r"\b(\d{4}-\d{2}-\d{2})\s+(\d{1,2}):(\d{2})\b", _dt_repl, text)
+    # 1) Full datetime: YYYY-MM-DD HH:MM or MM-DD HH:MM
+    def _full_dt_repl(match):
+        g1, g2, g3, h_s, m_s = match.groups()
+        h, m = int(h_s), int(m_s)
+        time_spoken = _fmt_hour_min(h, m)
+        if g1 is not None:  # YYYY-MM-DD
+            y_v, m_v, d_v = int(g1), int(g2), int(g3)
+            day_spoken = _fmt_day_label(m_v, d_v, y_v)
+        else:  # MM-DD
+            m_v, d_v = int(g2), int(g3)
+            day_spoken = _fmt_day_label(m_v, d_v, None)
+        return f"{day_spoken} {time_spoken}"
 
-    # Replace standalone 'HH:MM'
+    text = re.sub(
+        r"(?:\b(\d{4})-(\d{1,2})-(\d{1,2})\b|\b(\d{1,2})-(\d{1,2})\b)\s+(\d{1,2}):(\d{2})",
+        lambda m: _full_dt_repl((
+            m.group(1),
+            m.group(2) or m.group(4),
+            m.group(3) or m.group(5),
+            m.group(6),
+            m.group(7),
+        )),
+        text,
+    )
+
+    # 2) Standalone MM-DD (e.g. 11-24)
+    def _mmdd_repl(match):
+        m_v, d_v = int(match.group(1)), int(match.group(2))
+        if 1 <= m_v <= 12 and 1 <= d_v <= 31:
+            return _fmt_day_label(m_v, d_v, None)
+        return match.group(0)
+
+    text = re.sub(r"\b(\d{1,2})-(\d{1,2})\b", _mmdd_repl, text)
+
+    # 3) Standalone HH:MM
     def _hm_repl(match):
         h, m = int(match.group(1)), int(match.group(2))
         if 0 <= h <= 23 and 0 <= m <= 59:
@@ -1363,30 +1439,31 @@ def _humanize_timestamps_for_speech(text: str) -> str:
         return match.group(0)
 
     text = re.sub(r"\b(\d{1,2}):(\d{2})\b", _hm_repl, text)
-    # Remove standalone 4-digit year numbers so TTS doesn't read '2026' awkwardly
+
+    # 4) Remove standalone 4-digit years
     text = re.sub(r"\b(19|20)\d{2}\b", "", text)
     return text
 
+
 def _prepare_spoken_text(reply_text: str, max_chars: int = 440) -> tuple[str, str]:
-    """စာသားကို အသံထွက် ပိုသဘာဝကျစေရန် ပြင်ဆင်ပြီး pacing style ('fast_task', 'calm_care', 'normal') ပြန်ပေးသည်။"""
+    """စာသားကို အရပ်ထဲ ရင်းရင်းနှီးနှီး ပြောသလို သဘာဝကျကျ ပြင်ဆင်ပြီး pacing style ပြန်ပေးသည်။"""
     if not reply_text:
         return "", "normal"
 
     raw = str(reply_text)
     is_task_confirm = ("မှတ်ထားလိုက်ပါပြီ" in raw) or ("ပြန်ဖျက်ပေးလိုက်ပါပြီ" in raw) or ("Done မှတ်လိုက်ပါပြီ" in raw)
-    is_care_tone = ("မောင်ရေ" in raw) or ("ဆေးသောက်" in raw)
+    is_care_tone = ("မောင်ရေ" in raw) or ("ဆေးသောက်" in raw) or ("ကလေး" in raw)
 
     spoken = _clean_maya_voice(raw)
+    spoken = spoken.replace("လက်ရှိ Task စာရင်းလေးပါရှင်", "လက်ရှိ Task တွေက ဒါလေးတွေပါ")
     spoken = re.sub(r"\[(Verified|Deduced|Unverified)\]", "", spoken)
     spoken = re.sub(r"\(\s*(?:တနင်္လာနေ့|အင်္ဂါနေ့|ဗုဒ္ဓဟူးနေ့|ကြာသပတေးနေ့|သောကြာနေ့|စနေနေ့|တနင်္ဂနွေနေ့)\s*\)", "", spoken)
     spoken = _humanize_timestamps_for_speech(spoken)
 
-    # Convert numbered list items like '1. ' or newlines into natural pause boundaries
     spoken = re.sub(r"(?:^|\n)\s*\d+[\.\)]\s*", "\n\n", spoken)
     spoken = re.sub(r"[⏰📝🔁•✓📰🎙️⚠️📌🗂️💡]+", " ", spoken)
     spoken = re.sub(r"[*_`#>\-]+", " ", spoken)
 
-    # Split into paragraphs/lines and add natural spacing between clauses/paragraphs
     paragraphs = [re.sub(r"\s+", " ", p).strip(" ၊။") for p in re.split(r"\n+", spoken) if p.strip()]
     if not paragraphs:
         return "", "normal"
@@ -1403,7 +1480,6 @@ def _prepare_spoken_text(reply_text: str, max_chars: int = 440) -> tuple[str, st
 
     style = "fast_task" if is_task_confirm else ("calm_care" if is_care_tone else "normal")
     return joined, style
-
 
 def transcribe_voice_bytes(audio_bytes: bytes, mime_type: str = "audio/ogg") -> str:
     """Voice/Audio bytes ကို Gemini multimodal audio understanding ဖြင့် စာသားပြောင်းသည်။"""
