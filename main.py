@@ -3311,7 +3311,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo_bytes = await photo_file.download_as_bytearray()
                 img_prompt = "ဒီပုံထဲမှာ ပါဝင်တဲ့ အဓိက အချက်အလက်များ၊ စာသားများ သို့မဟုတ် လုပ်ငန်းဆိုင်ရာ အခြေအနေများကို အတိုချုံး ဖော်ပြပေးပါ။"
 
-                img_summary = call_ai_with_3tier_fallback(img_prompt, image_bytes=photo_bytes, mime_type='image/jpeg')
+                
 
                 img_summary = await asyncio.to_thread(call_ai_with_3tier_fallback, img_prompt, image_bytes=photo_bytes, mime_type='image/jpeg')
              
