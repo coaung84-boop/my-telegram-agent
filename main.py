@@ -1,10 +1,13 @@
 import os
 import json
 import time
+import html
 import logging
 import threading
 import asyncio
 import re
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 from concurrent.futures import ThreadPoolExecutor
 import requests
 from datetime import datetime, timedelta, timezone, time as dt_time
@@ -52,9 +55,45 @@ MYANMAR_WEEKDAYS = [
     "တနင်္ဂနွေနေ့",
 ]
 
+# --- Trusted News Sources (Telegram Channels + Website Feeds + Domain Search) ---
+TELEGRAM_NEWS_CHANNELS = [
+    ("The Irrawaddy", "theirrawaddy"),
+    ("Myanmar Now", "MyanmarNowNews"),
+    ("Khit Thit Media", "khitthitmedianews"),
+]
+
+LOCAL_RSS_FEEDS = [
+    ("The Irrawaddy", "https://www.irrawaddy.com/feed"),
+    ("Myanmar Now (MM)", "https://myanmar-now.org/mm/feed/"),
+    ("Myanmar Now (EN)", "https://myanmar-now.org/en/feed/"),
+    ("Mizzima", "https://www.mizzima.com/feed"),
+    ("Frontier Myanmar", "https://www.frontiermyanmar.net/en/feed/"),
+]
+
+INTL_RSS_FEEDS = [
+    ("BBC Burmese", "https://feeds.bbci.co.uk/burmese/rss.xml"),
+    ("RFA Burmese", "https://www.rfa.org/burmese/rss2.xml"),
+    ("VOA Burmese", "https://burmese.voanews.com/api/epiqq"),
+]
+
+LOCAL_TRUSTED_DOMAINS = [
+    "irrawaddy.com",
+    "myanmar-now.org",
+    "mizzima.com",
+    "frontiermyanmar.net",
+    "khitthitnews.com",
+]
+
+INTL_TRUSTED_DOMAINS = [
+    "bbc.com",
+    "rfa.org",
+    "voaburmese.com",
+    "reuters.com",
+]
+
 DEFAULT_CORE_RULES = (
     "1. 'မောင်' ဟူသော အသုံးအနှုန်းကို ဆေးသောက်ရန် နှင့် မိသားစု/ကလေးများနှင့် ပတ်သက်သော Task/Reminder များတွင်သာ သုံးရမည်။\n"
-    "2. အခြား Task များ၊ Group Summary များ၊ Web Search များနှင့် ရိုးရိုးစကားပြောမှုများတွင် မြန်မာမိန်းကလေးတစ်ယောက်ကဲ့သို့ သဘာဝကျကျ ပုံမှန် မာယာ (Maya) ဟန်ဖြင့်သာ ပြောရမည်။\n"
+    "2. အခြား Task များ၊ Group Summary များ၊ News Summary များ၊ Web Search များနှင့် ရိုးရိုးစကားပြောမှုများတွင် မြန်မာမိန်းကလေးတစ်ယောက်ကဲ့သို့ သဘာဝကျကျ ပုံမှန် မာယာ (Maya) ဟန်ဖြင့်သာ ပြောရမည်။\n"
     "3. စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ဘဲ User Profile နှင့် Style Preferences ထဲမှ လေ့လာထားသည့် သဘာဝကျသော အပြောအဆိုဟန်အတိုင်း ပြောဆိုရမည်။\n"
     "4. Group မှတ်တမ်း၊ သတင်းနှင့် Web Search အချက်အလက်များကို ဖြေဆိုသည့်အခါ [Verified] (တိုက်ရိုက်တွေ့ရှိချက်)၊ "
     "[Deduced] (ဆက်စပ်သုံးသပ်ချက်) သို့မဟုတ် [Unverified] (မသေချာသေးသည့်အချက်) tag များ ထည့်သွင်းဖော်ပြရမည်။"
@@ -62,23 +101,24 @@ DEFAULT_CORE_RULES = (
 
 STRICT_MYANMAR_SYSTEM = (
     "သင်သည် 'မာယာ (Maya)' အမည်ရှိ မြန်မာမိန်းကလေးဟန် ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။ "
-    "မြန်မာဘာသာ (Unicode) ဖြင့် လူတစ်ယောက်ကဲ့သို့ သဘာဝကျကျ၊ ရင်းနှီးနွေးထွေးစွာ၊ ရှင်းလင်းပြတ်သားစွာ ဖြေဆိုပါ။ "
-    "စကားအဆုံးတွင် စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ဘဲ အခြေအနေနှင့် လိုက်ဖက်သည့် သဘာဝကျသော အသုံးအနှုန်းများ (ဥပမာ - ရှင်၊ ပါ၊ တယ် စသဖြင့် သဘာဝကျသလို) နှင့် "
+    "မြန်မာဘာသာ (Unicode) နှင့် လိုအပ်သော အင်္ဂလိပ်အသုံးအနှုန်းများဖြင့်သာ လူတစ်ယောက်ကဲ့သို့ သဘာဝကျကျ၊ ရင်းနှီးနွေးထွေးစွာ၊ ရှင်းလင်းပြတ်သားစွာ ဖြေဆိုပါ။ "
+    "စကားအဆုံးတွင် စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ဘဲ အခြေအနေနှင့် လိုက်ဖက်သည့် သဘာဝကျသော အသုံးအနှုန်းများနှင့် "
     "User Profile / Style Preferences ထဲမှ လေ့လာမှတ်သားထားသည့် စကားပြောဟန်အတိုင်း ပြောဆိုပါ။ "
     "'မောင်' ဟူသော အသုံးအနှုန်းကို ဆေးသောက်ရန် နှင့် မိသားစု/ကလေးများနှင့် ပတ်သက်သော Task/Reminder များတွင်သာ သုံးပါ။ "
-    "အခြား Task များ၊ လုပ်ငန်း/Group Summary များ၊ Web Search များနှင့် အခြားစကားပြောမှုများတွင် 'မောင်' ဟု မသုံးဘဲ ပုံမှန် မာယာ ပြောသလို သဘာဝကျကျ ပြောပါ။ "
-    "မိမိကိုယ်ကို 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်။ "
+    "အခြား Task များ၊ News Summary များ၊ Group Summary များ၊ Web Search များနှင့် အခြားစကားပြောမှုများတွင် 'မောင်' ဟု လုံးဝ မသုံးပါနှင့်။ "
+    "မိမိကိုယ်ကို 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်။ ထိုင်းစာ/တရုတ်စာ စသည့် မဆိုင်သော ဘာသာစကားစာလုံးများ ရောနှောခြင်းကို လုံးဝ ရှောင်ကြဉ်ပါ။ "
     "အသုံးပြုသူ၏ Locked Core Rules၊ Profile၊ Style Preferences၊ အတိတ်မှတ်တမ်းနှင့် မြန်မာပြက္ခဒိန်အချက်အလက်များကို "
-    "သေချာမှတ်မိပြီး အလိုက်သိသိနှင့် ဖြေပါ။ "
-    "မေးခွန်းနှင့် မသက်ဆိုင်သော Search အချက်အလက်များကို လုံးဝ မသုံးပါနှင့်။ မသေချာပါက မသိကြောင်း ရိုးသားစွာ ဖြေပါ။"
+    "သေချာမှတ်မိပြီး အလိုက်သိသိနှင့် ဖြေပါ။"
 )
 
 
 def _clean_maya_voice(text: str) -> str:
-    """Fallback model များက ယောက်ျားလေးအသုံးအနှုန်း မှားသုံးမိရင် မာယာဟန် ပြန်ပြင်ပေးသည်။"""
+    """Fallback model များက ယောက်ျားလေးအသုံးအနှုန်း သို့မဟုတ် ထိုင်းစာလုံး ရောမိရင် သန့်ရှင်းပေးသည်။"""
     if not text:
         return text
     text = text.replace("ကျွန်တော့်", "မာယာ့").replace("ကျွန်တော်", "မာယာ")
+    # Remove accidental Thai characters if any LLM mixes Thai script
+    text = re.sub(r"[\u0E00-\u0E7F]+", "", text)
     return text
 
 
@@ -1393,8 +1433,157 @@ async def check_pending_followups_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"Error in check_pending_followups_job: {e}")
 
 
-# --- Direct Web Search Helper (Tavily + Google Search Grounding) ---
-def _tavily_worker(search_query: str, max_results: int = 6, exclude_social: bool = True) -> str:
+# --- 3-Source Hybrid News Fetchers (Telegram Public Channels + Direct RSS/XML + Tavily Domain Search) ---
+def _strip_html(raw_html: str) -> str:
+    if not raw_html:
+        return ""
+    no_br = re.sub(r"<br\s*/?>", " ", raw_html, flags=re.IGNORECASE)
+    no_tags = re.sub(r"<[^>]+>", " ", no_br)
+    unescaped = html.unescape(no_tags)
+    return re.sub(r"\s+", " ", unescaped).strip()
+
+
+def _fetch_telegram_channel_news(source_label: str, channel_username: str, max_posts: int = 6) -> str:
+    """Public Telegram channel (https://t.me/s/<username>) မှ လတ်တလော post များကို တိုက်ရိုက် ဖတ်ယူသည်။"""
+    url = f"https://t.me/s/{channel_username}"
+    try:
+        resp = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; MayaNewsBot/1.0)"},
+            timeout=6,
+        )
+        if resp.status_code != 200 or not resp.text:
+            return ""
+
+        page = resp.text
+        blocks = re.findall(
+            r'<div class="tgme_widget_message_wrap[^"]*".*?(?=<div class="tgme_widget_message_wrap|</section>)',
+            page,
+            flags=re.DOTALL,
+        )
+        if not blocks:
+            return ""
+
+        cutoff_dt = datetime.now(MM_TZ) - timedelta(hours=36)
+        items = []
+        for blk in reversed(blocks):
+            text_m = re.search(
+                r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>',
+                blk,
+                flags=re.DOTALL,
+            )
+            if not text_m:
+                continue
+            clean_txt = _strip_html(text_m.group(1))
+            if len(clean_txt) < 35:
+                continue
+
+            time_m = re.search(r'<time[^>]+datetime="([^"]+)"', blk)
+            ts_label = ""
+            if time_m:
+                try:
+                    dt_obj = datetime.fromisoformat(time_m.group(1).replace("Z", "+00:00")).astimezone(MM_TZ)
+                    if dt_obj < cutoff_dt:
+                        continue
+                    ts_label = dt_obj.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    pass
+
+            items.append(f"- [{source_label} Telegram | {ts_label}]: {clean_txt[:420]}")
+            if len(items) >= max_posts:
+                break
+
+        return "\n".join(items)
+    except Exception as e:
+        print(f"Telegram channel fetch error ({channel_username}): {e}")
+        return ""
+
+
+def _fetch_single_rss_feed(source_label: str, feed_url: str, max_items: int = 5) -> str:
+    """Direct RSS/XML feed မှ လွန်ခဲ့သည့် ၃၆ နာရီအတွင်း သတင်းခေါင်းစဉ်နှင့် အကျဉ်းချုပ်များ ဖတ်ယူသည်။"""
+    try:
+        resp = requests.get(
+            feed_url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; MayaNewsBot/1.0)"},
+            timeout=6,
+        )
+        if resp.status_code != 200 or not resp.content:
+            return ""
+
+        root = ET.fromstring(resp.content)
+        cutoff_dt = datetime.now(MM_TZ) - timedelta(hours=36)
+        results = []
+
+        # Standard RSS <item>
+        rss_items = root.findall(".//item")
+        for it in rss_items:
+            title = _strip_html(it.findtext("title") or "")
+            desc = _strip_html(it.findtext("description") or "")
+            pub_raw = (it.findtext("pubDate") or "").strip()
+            pub_label = ""
+            if pub_raw:
+                try:
+                    dt_obj = parsedate_to_datetime(pub_raw)
+                    dt_mm = dt_obj.replace(tzinfo=MM_TZ) if dt_obj.tzinfo is None else dt_obj.astimezone(MM_TZ)
+                    if dt_mm < cutoff_dt:
+                        continue
+                    pub_label = dt_mm.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    pub_label = pub_raw[:16]
+
+            if title:
+                snippet = f" — {desc[:240]}" if desc and desc.lower() != title.lower() else ""
+                results.append(f"- [{source_label} | {pub_label}]: {title}{snippet}")
+            if len(results) >= max_items:
+                break
+
+        # Atom <entry> fallback (e.g. VOA/Atom feeds)
+        if not results:
+            ns = {"atom": "http://www.w3.org/2005/Atom"}
+            entries = root.findall(".//atom:entry", ns) or root.findall(".//entry")
+            for ent in entries:
+                title = _strip_html(ent.findtext("atom:title", default="", namespaces=ns) or ent.findtext("title") or "")
+                summary = _strip_html(
+                    ent.findtext("atom:summary", default="", namespaces=ns)
+                    or ent.findtext("summary")
+                    or ent.findtext("atom:content", default="", namespaces=ns)
+                    or ""
+                )
+                upd = (
+                    ent.findtext("atom:updated", default="", namespaces=ns)
+                    or ent.findtext("updated")
+                    or ent.findtext("published")
+                    or ""
+                ).strip()
+                pub_label = upd[:16]
+                if upd:
+                    try:
+                        dt_obj = datetime.fromisoformat(upd.replace("Z", "+00:00")).astimezone(MM_TZ)
+                        if dt_obj < cutoff_dt:
+                            continue
+                        pub_label = dt_obj.strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        pass
+
+                if title:
+                    snippet = f" — {summary[:240]}" if summary else ""
+                    results.append(f"- [{source_label} | {pub_label}]: {title}{snippet}")
+                if len(results) >= max_items:
+                    break
+
+        return "\n".join(results)
+    except Exception as e:
+        print(f"RSS fetch error ({source_label}): {e}")
+        return ""
+
+
+def _tavily_worker(
+    search_query: str,
+    max_results: int = 6,
+    exclude_social: bool = True,
+    include_domains: list | None = None,
+    days: int = 2,
+) -> str:
     if not TAVILY_API_KEY:
         return ""
     try:
@@ -1403,11 +1592,13 @@ def _tavily_worker(search_query: str, max_results: int = 6, exclude_social: bool
             "query": search_query,
             "search_depth": "advanced",
             "topic": "news",
-            "days": 2,
+            "days": days,
             "max_results": max_results,
             "include_answer": "advanced",
         }
-        if exclude_social:
+        if include_domains:
+            payload["include_domains"] = include_domains
+        elif exclude_social:
             payload["exclude_domains"] = ["youtube.com", "m.youtube.com", "facebook.com", "tiktok.com"]
 
         resp = requests.post("https://api.tavily.com/search", json=payload, timeout=9)
@@ -1420,7 +1611,7 @@ def _tavily_worker(search_query: str, max_results: int = 6, exclude_social: bool
         for r in data.get("results", []):
             title = r.get("title", "")
             url = r.get("url", "")
-            content = (r.get("content", "") or "")[:400]
+            content = (r.get("content", "") or "")[:360]
             lines.append(f"- {title} ({url}): {content}")
         return "\n".join(lines)
     except Exception as e:
@@ -1428,42 +1619,91 @@ def _tavily_worker(search_query: str, max_results: int = 6, exclude_social: bool
         return ""
 
 
-# --- Dedicated Myanmar News Summary (Local & Independent + International Coverage) ---
+# --- 3-Source Hybrid Myanmar News Summary (Telegram Channels + RSS Feeds + Domain Search) ---
 def get_myanmar_news_summary() -> str:
     """
-    Web Search (Tavily + Google Search grounding) မှတစ်ဆင့်
-    Local & Independent Outlets (Myanmar Now, The Irrawaddy, Mizzima, Frontier Myanmar, Khit Thit Media)
-    နှင့် International Coverage (BBC Burmese, VOA Burmese, RFA Burmese, Reuters) သတင်းဖြစ်ရပ်များကို
-    ရှာဖွေအနှစ်ချုပ်ပေးသည်။
+    1) Public Telegram News Channels (@theirrawaddy, @MyanmarNowNews, @khitthitmedianews)
+    2) Direct RSS/XML Feeds (Irrawaddy, Myanmar Now, Mizzima, Frontier, BBC Burmese, RFA, VOA)
+    3) Tavily include_domains (days=1) for trusted outlets + Reuters
+    တို့ကို တစ်ပြိုင်နက် ဆွဲယူပြီး လွန်ခဲ့သည့် ၂၄ နာရီအတွင်း သတင်းဖြစ်ရပ်အစစ်များကို အနှစ်ချုပ်ပေးသည်။
     """
     now_mm = datetime.now(MM_TZ)
     now_str = now_mm.strftime("%Y-%m-%d %H:%M MMT")
 
-    local_query = (
-        "Myanmar news conflict economy politics "
-        "Irrawaddy Myanmar Now Mizzima Frontier Khit Thit"
-    )
-    intl_query = (
-        "Myanmar news today "
-        "BBC Burmese VOA RFA Reuters"
-    )
+    local_chunks = []
+    intl_chunks = []
 
-    local_web_raw = ""
-    intl_web_raw = ""
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        tg_futures = [
+            (label, executor.submit(_fetch_telegram_channel_news, label, handle, 6))
+            for label, handle in TELEGRAM_NEWS_CHANNELS
+        ]
+        local_rss_futures = [
+            (label, executor.submit(_fetch_single_rss_feed, label, url, 5))
+            for label, url in LOCAL_RSS_FEEDS
+        ]
+        intl_rss_futures = [
+            (label, executor.submit(_fetch_single_rss_feed, label, url, 5))
+            for label, url in INTL_RSS_FEEDS
+        ]
+        f_tavily_local = executor.submit(
+            _tavily_worker,
+            "Myanmar latest news conflict economy politics",
+            6,
+            True,
+            LOCAL_TRUSTED_DOMAINS,
+            1,
+        )
+        f_tavily_intl = executor.submit(
+            _tavily_worker,
+            "Myanmar news latest developments",
+            6,
+            True,
+            INTL_TRUSTED_DOMAINS,
+            1,
+        )
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        f_local = executor.submit(_tavily_worker, local_query, 7, True)
-        f_intl = executor.submit(_tavily_worker, intl_query, 7, True)
+        for _, fut in tg_futures:
+            try:
+                res = fut.result()
+                if res:
+                    local_chunks.append(res)
+            except Exception:
+                pass
+
+        for _, fut in local_rss_futures:
+            try:
+                res = fut.result()
+                if res:
+                    local_chunks.append(res)
+            except Exception:
+                pass
+
         try:
-            local_web_raw = f_local.result() or ""
-        except Exception as e:
-            print(f"Local news web search error: {e}")
-        try:
-            intl_web_raw = f_intl.result() or ""
-        except Exception as e:
-            print(f"Intl news web search error: {e}")
+            t_loc = f_tavily_local.result()
+            if t_loc:
+                local_chunks.append(t_loc)
+        except Exception:
+            pass
 
-    has_web_data = bool((local_web_raw or "").strip() or (intl_web_raw or "").strip())
+        for _, fut in intl_rss_futures:
+            try:
+                res = fut.result()
+                if res:
+                    intl_chunks.append(res)
+            except Exception:
+                pass
+
+        try:
+            t_intl = f_tavily_intl.result()
+            if t_intl:
+                intl_chunks.append(t_intl)
+        except Exception:
+            pass
+
+    local_raw = "\n".join(local_chunks).strip()
+    intl_raw = "\n".join(intl_chunks).strip()
+    has_data = bool(local_raw or intl_raw)
 
     prompt = f"""
     လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)
@@ -1471,31 +1711,30 @@ def get_myanmar_news_summary() -> str:
     သင်သည် မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ၊ ရိုးရိုးရှင်းရှင်းနဲ့ ရင်းနှီးဖော်ရွေစွာ ပြောဆိုသည့် 'မာယာ' ဖြစ်သည်။
     - 'မောင်' ဟု လုံးဝ မသုံးပါနှင့်။
     - 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်။
+    - ထိုင်းစာ/တရုတ်စာ စသည့် မဆိုင်သော ဘာသာစကားစာလုံးများ လုံးဝ မရောပါနှင့် (မြန်မာစာ Unicode နှင့် အင်္ဂလိပ်ဌာနအမည်များသာ သုံးပါ)။
     - စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်။
-    - မိတ်ဆက်စကား၊ ရှင်းလင်းချက်ရှည်ကြီးများ မရေးဘဲ သတင်းအနှစ်ချုပ်ကိုသာ တိုက်ရိုက် ဖော်ပြပါ။
+    - မိတ်ဆက်စကားရှည်ကြီးများ မရေးဘဲ သတင်းအနှစ်ချုပ်ကိုသာ တိုက်ရိုက် ဖော်ပြပါ။
 
-    အောက်ပါ သတင်းရလဒ်များနှင့် Google Search တို့မှ လွန်ခဲ့သည့် ၂၄ နာရီအတွင်း မြန်မာပြည်နှင့် ပတ်သက်သည့်
-    သတင်းဖြစ်ရပ်များကို ကဏ္ဍ (၂) ခုခွဲ၍ မြန်မာဘာသာဖြင့် အနှစ်ချုပ်ပေးပါ:
+    အောက်ပါ Telegram News Channels၊ Direct RSS Feeds နှင့် သတင်းဌာန Website ရလဒ်များမှ လွန်ခဲ့သည့် ၂၄ နာရီအတွင်း
+    မြန်မာပြည်နှင့် ပတ်သက်သည့် **တကယ့် သတင်းဖြစ်ရပ် အကြောင်းအရာများ** ကို ကဏ္ဍ (၂) ခုခွဲ၍ မြန်မာဘာသာဖြင့် အနှစ်ချုပ်ပေးပါ:
 
     ၁။ **ပြည်တွင်းနှင့် လွတ်လပ်သော သတင်းဌာနများ (Myanmar Now, The Irrawaddy, Mizzima, Frontier Myanmar, Khit Thit Media)**
     ၂။ **နိုင်ငံတကာ သတင်းဌာနများ (BBC Burmese, VOA Burmese, RFA Burmese, Reuters)**
 
     စည်းမျဉ်းများ:
-    - သတင်းဌာနများ၏ ယေဘုယျသမိုင်း/လုပ်ငန်းဆောင်တာ ရှင်းလင်းချက်များကို မရေးပါနှင့်။ တကယ့် သတင်းဖြစ်ရပ်/အကြောင်းအရာများကိုသာ Bullet point ဖြင့် တိုတိုရှင်းရှင်း ရေးပါ။
+    - သတင်းဌာနများ၏ ယေဘုယျသမိုင်း/လုပ်ငန်းဆောင်တာ ရှင်းလင်းချက်များကို လုံးဝ မရေးပါနှင့်။ တကယ့် သတင်းဖြစ်ရပ် (ဘယ်နေရာမှာ ဘာဖြစ်သလဲ၊ ဘယ်သူတွေ ပါသလဲ) ကိုသာ Bullet point ဖြင့် တိုတိုရှင်းရှင်း ရေးပါ။
     - သတင်းတစ်ပုဒ်ချင်းစီ၏ အနောက်တွင် [သတင်းဌာနအမည်] နှင့် [Verified] (တိုက်ရိုက်တွေ့ရှိချက်) သို့မဟုတ် [Deduced] (ဆက်စပ်သုံးသပ်ချက်) ထည့်ပေးပါ။
-    - သတင်းရလဒ် အလွန်နည်းနေပါက ရှည်ရှည်ဝေးဝေး မရှင်းပြဘဲ ရရှိသမျှ သတင်းကိုသာ တိုတိုဖော်ပြပြီး ထပ်မေးလိုရင် ခေါ်ဆိုနိုင်ကြောင်း တိုတိုသာ ပြောပါ။
 
-    --- Local & Independent Outlets ---
-    {local_web_raw or "None"}
+    --- Local & Independent Outlets (Telegram Channels + RSS + Domains) ---
+    {local_raw[:7500] or "None"}
 
-    --- International Coverage ---
-    {intl_web_raw or "None"}
+    --- International Coverage (RSS + Domains) ---
+    {intl_raw[:5500] or "None"}
     """
 
-    summary = call_ai_with_3tier_fallback(prompt, use_google_search=True)
+    summary = call_ai_with_3tier_fallback(prompt, use_google_search=(not has_data))
     if not summary or "ခဏအလုပ်များနေပါတယ်" in summary:
-        if has_web_data:
-            summary = call_ai_with_3tier_fallback(prompt, use_google_search=False)
+        summary = call_ai_with_3tier_fallback(prompt, use_google_search=True)
 
     summary = _clean_maya_voice(summary)
     return f"📰 Myanmar Daily News Summary ({now_str})\n\n{summary}"
@@ -1523,7 +1762,7 @@ def answer_with_universal_search(
         if prev_user_lines:
             clean_q = f"{prev_user_lines[-1]} {clean_q}".strip()
 
-    tavily_raw = _tavily_worker(clean_q, max_results=6, exclude_social=True)
+    tavily_raw = _tavily_worker(clean_q, max_results=6, exclude_social=True, days=2)
     web_context = f"--- Web Search (Tavily) ---\n{tavily_raw}" if tavily_raw else "--- Web Search Results ---\nNone"
 
     profile_block = f"--- Learned User Profile & Locked Rules ---\n{profile_text}\n\n" if profile_text else ""
@@ -1532,7 +1771,7 @@ def answer_with_universal_search(
     system_prompt = (
         f"သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။\n"
         f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n\n"
-        f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။\n"
+        f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု လုံးဝ မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။\n"
         f"အရှေ့နောက် စကားပြောဆိုမှု context နှင့် ရှာဖွေမေးမြန်းချက်အပေါ်သာ တိုက်ရိုက် Focus ထားပြီး ရှင်းလင်းပြတ်သားစွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ:\n"
         f"1. **တိုက်ရိုက် အဖြေချုပ် (Direct Answer):** မေးခွန်း၏ အဓိကအဖြေကို စာကြောင်း ၁–၂ ကြောင်းဖြင့် အရင်ဆုံး ဖြေပါ။\n"
         f"2. **အဓိက အချက်အလက်များ (Key Points):** သက်ဆိုင်ရာ အချက် (၃–၅ ချက်) ကို Bullet point များဖြင့် ဖော်ပြပြီး အချက်တိုင်း၏ အနောက်တွင် [Verified] (ရှာဖွေမှုရလဒ်တွင် တိုက်ရိုက်ပါဝင်ချက်)၊ [Deduced] (ဆက်စပ်သုံးသပ်ချက်) သို့မဟုတ် [Unverified] (မသေချာသေးသည့်အချက်) tag ထည့်ပေးပါ။\n"
@@ -1663,7 +1902,7 @@ def handle_advice_or_general_intent(user_id: int, user_message: str, intent_mode
     if intent_mode == "ADVICE":
         prompt = (
             f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
-            f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။\n"
+            f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု လုံးဝ မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။\n"
             f"အသုံးပြုသူ၏ Locked Core Rules၊ Profile၊ Style Preferences၊ အတိတ်မှတ်ဉာဏ်နှင့် မေးခွန်းကို သုံးသပ်ပြီး "
             f"အလိုက်သိသိ မြန်မာဘာသာဖြင့် အကြံပြုပါ:\n"
             f"1. အခြေအနေ သုံးသပ်ချက်\n"
@@ -1675,7 +1914,7 @@ def handle_advice_or_general_intent(user_id: int, user_message: str, intent_mode
     else:
         prompt = (
             f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
-            f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။\n"
+            f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု လုံးဝ မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။\n"
             f"အသုံးပြုသူ၏ Locked Core Rules၊ Profile၊ Style Preferences၊ အတိတ်စကားပြောဆိုမှုများနှင့် ခိုင်းစေချက်ကို သေချာမှတ်မိပြီး "
             f"အလိုက်သိသိနှင့် မြန်မာစာ သန့်သန့်ရှင်းရှင်းဖြင့် ကူညီဆောင်ရွက်ပေးပါ။\n\n"
             f"{memory_context}\n\n"
@@ -1929,7 +2168,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if stripped_lower in ["မာယာ", "maya", "hi", "hello", "hey", "မင်္ဂလာပါ"]:
                 memory_ctx = await asyncio.to_thread(recall_relevant_history, message.from_user.id, user_message, 4, 2)
                 greet_prompt = (
-                    "မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။ "
+                    "မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု လုံးဝ မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။ "
                     "နှုတ်ဆက်/ခေါ်နေပါသည်။ လက်ရှိ လေ့လာမှတ်သားထားသော Locked Core Rules/Profile/Preferences/Conversation ရှိလျှင် အလိုက်သိသိ "
                     f"ရင်းနှီးဖော်ရွေစွာ နှုတ်ဆက်ပြီး ဘာကူညီပေးနိုင်မလဲ တိုတိုရှင်းရှင်း မြန်မာဘာသာဖြင့် ဖြေပါ။\n\n{memory_ctx}"
                 )
@@ -2049,7 +2288,7 @@ async def main_async():
         BotCommand("setrule", "Add a new versioned core rule"),
     ])
 
-    print("🤖 Maya AI Agent (Qwen 3.8 27B + Context Search + Confidence Tagging + Skill Versioning + Trusted News) started...")
+    print("🤖 Maya AI Agent (3-Source Hybrid News + Qwen 3.8 27B + Confidence Tagging + Skill Versioning) started...")
 
     await application.start()
     await application.updater.start_polling()
