@@ -1433,28 +1433,27 @@ def get_myanmar_news_summary() -> str:
     """
     Web Search (Tavily + Google Search grounding) မှတစ်ဆင့်
     Local & Independent Outlets (Myanmar Now, The Irrawaddy, Mizzima, Frontier Myanmar, Khit Thit Media)
-    နှင့် International Coverage (BBC Burmese, VOA Burmese, RFA Burmese, Reuters) သတင်းများကို
-    တိုက်ရိုက် ရှာဖွေအနှစ်ချုပ်ပေးသည်။
+    နှင့် International Coverage (BBC Burmese, VOA Burmese, RFA Burmese, Reuters) သတင်းဖြစ်ရပ်များကို
+    ရှာဖွေအနှစ်ချုပ်ပေးသည်။
     """
     now_mm = datetime.now(MM_TZ)
     now_str = now_mm.strftime("%Y-%m-%d %H:%M MMT")
-    today_date = now_mm.strftime("%Y-%m-%d")
 
     local_query = (
-        f"Myanmar news events {today_date} "
-        f"Irrawaddy Myanmar Now Mizzima Frontier Khit Thit"
+        "Myanmar news conflict economy politics "
+        "Irrawaddy Myanmar Now Mizzima Frontier Khit Thit"
     )
     intl_query = (
-        f"Myanmar news {today_date} "
-        f"BBC Burmese VOA RFA Reuters"
+        "Myanmar news today "
+        "BBC Burmese VOA RFA Reuters"
     )
 
     local_web_raw = ""
     intl_web_raw = ""
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        f_local = executor.submit(_tavily_worker, local_query, 6, True)
-        f_intl = executor.submit(_tavily_worker, intl_query, 6, True)
+        f_local = executor.submit(_tavily_worker, local_query, 7, True)
+        f_intl = executor.submit(_tavily_worker, intl_query, 7, True)
         try:
             local_web_raw = f_local.result() or ""
         except Exception as e:
@@ -1469,20 +1468,27 @@ def get_myanmar_news_summary() -> str:
     prompt = f"""
     လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)
 
-    မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။
-    အောက်ပါ သတင်းဆောင်းပါး ရလဒ်များနှင့် Google Search တို့မှ **တကယ့် သတင်းဖြစ်ရပ် အကြောင်းအရာများ (ဘယ်နေရာမှာ ဘာဖြစ်ပျက်ခဲ့သလဲ၊ ဘယ်သူတွေ ပါဝင်သလဲ)** ကိုသာ ထုတ်နုတ်ပြီး ကဏ္ဍ (၂) ခုခွဲ၍ မြန်မာဘာသာဖြင့် အနှစ်ချုပ်ပေးပါ:
+    သင်သည် မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ၊ ရိုးရိုးရှင်းရှင်းနဲ့ ရင်းနှီးဖော်ရွေစွာ ပြောဆိုသည့် 'မာယာ' ဖြစ်သည်။
+    - 'မောင်' ဟု လုံးဝ မသုံးပါနှင့်။
+    - 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်။
+    - စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်။
+    - မိတ်ဆက်စကား၊ ရှင်းလင်းချက်ရှည်ကြီးများ မရေးဘဲ သတင်းအနှစ်ချုပ်ကိုသာ တိုက်ရိုက် ဖော်ပြပါ။
+
+    အောက်ပါ သတင်းရလဒ်များနှင့် Google Search တို့မှ လွန်ခဲ့သည့် ၂၄ နာရီအတွင်း မြန်မာပြည်နှင့် ပတ်သက်သည့်
+    သတင်းဖြစ်ရပ်များကို ကဏ္ဍ (၂) ခုခွဲ၍ မြန်မာဘာသာဖြင့် အနှစ်ချုပ်ပေးပါ:
 
     ၁။ **ပြည်တွင်းနှင့် လွတ်လပ်သော သတင်းဌာနများ (Myanmar Now, The Irrawaddy, Mizzima, Frontier Myanmar, Khit Thit Media)**
     ၂။ **နိုင်ငံတကာ သတင်းဌာနများ (BBC Burmese, VOA Burmese, RFA Burmese, Reuters)**
 
-    အရေးကြီး စည်းမျဉ်းများ:
-    - "သတင်းအစီအစဉ် ထုတ်လွှင့်ခဲ့သည် / ဗီဒီယို တွေ့ရှိရသည်" စသည့် အစီအစဉ်ကြေညာချက်များကို လုံးဝ မရေးပါနှင့်။
-    - တကယ့် သတင်းဖြစ်ရပ် အကြောင်းအရာကိုသာ အချက်အလက် တိတိကျကျဖြင့် Bullet point ရေးပြီး အနောက်တွင် [သတင်းဌာနအမည်] [Verified] သို့မဟုတ် [Deduced] ထည့်ပေးပါ။
+    စည်းမျဉ်းများ:
+    - သတင်းဌာနများ၏ ယေဘုယျသမိုင်း/လုပ်ငန်းဆောင်တာ ရှင်းလင်းချက်များကို မရေးပါနှင့်။ တကယ့် သတင်းဖြစ်ရပ်/အကြောင်းအရာများကိုသာ Bullet point ဖြင့် တိုတိုရှင်းရှင်း ရေးပါ။
+    - သတင်းတစ်ပုဒ်ချင်းစီ၏ အနောက်တွင် [သတင်းဌာနအမည်] နှင့် [Verified] (တိုက်ရိုက်တွေ့ရှိချက်) သို့မဟုတ် [Deduced] (ဆက်စပ်သုံးသပ်ချက်) ထည့်ပေးပါ။
+    - သတင်းရလဒ် အလွန်နည်းနေပါက ရှည်ရှည်ဝေးဝေး မရှင်းပြဘဲ ရရှိသမျှ သတင်းကိုသာ တိုတိုဖော်ပြပြီး ထပ်မေးလိုရင် ခေါ်ဆိုနိုင်ကြောင်း တိုတိုသာ ပြောပါ။
 
-    --- Local & Independent Outlets Articles ---
+    --- Local & Independent Outlets ---
     {local_web_raw or "None"}
 
-    --- International Coverage Articles ---
+    --- International Coverage ---
     {intl_web_raw or "None"}
     """
 
