@@ -424,49 +424,49 @@ def get_user_profile(user_id: int) -> str:
 
 
 def update_core_rule_version(user_id: int, new_rule_line: str, note: str = "User rule update") -> str:
-    """Core rule အသစ် ထည့်/ပြင်တိုင်း အရင် version ကို မဖျက်ဘဲ skill_versions ထဲ သိမ်းပြီး version တိုးပေးသည်။"""
+    """Core rule အသစ် ထည့်/ပြင်တိုင်း အရင် version ကို မဖျက်ဘဲ version တိုးပြီး သိမ်းပေးသည်။"""
+    clean_rule = (new_rule_line or "").strip().strip("<>").strip()
+    if not clean_rule:
+        return "ထည့်လိုသည့် Rule စာသားလေး ရေးပေးပါရှင်"
+
     try:
         rec = get_user_profile_record(user_id)
         old_version = int(rec.get("version") or 1)
         old_rules = (rec.get("core_rules") or DEFAULT_CORE_RULES).strip()
-        prefs = (rec.get("style_preferences") or "").strip()
+        old_summary = (rec.get("profile_summary") or "").strip()
+        old_prefs = (rec.get("style_preferences") or "").strip()
 
         try:
             supabase.table("skill_versions").insert({
                 "user_id": int(user_id),
                 "version": old_version,
                 "core_rules": old_rules,
-                "style_preferences": prefs,
+                "style_preferences": old_prefs,
                 "note": note,
             }).execute()
         except Exception as ver_err:
-            print(f"[Skill Version Archive Notice]: {ver_err}")
+            print(f"[Skill Version Archive Error]: {ver_err}")
 
         new_version = old_version + 1
-        updated_rules = f"{old_rules}\n- {new_rule_line.strip()}"
+        updated_rules = f"{old_rules}\n- {clean_rule}".strip()
+        updated_prefs = f"{old_prefs}\n[Core Rule v{new_version}]: {clean_rule}".strip()
 
-        payload = {
-            "user_id": int(user_id),
-            "core_rules": updated_rules,
-            "version": new_version,
-            "profile_summary": rec.get("profile_summary") or "",
-            "style_preferences": prefs,
-            "updated_at": datetime.now(MM_TZ).isoformat(),
-        }
-        try:
-            supabase.table("user_profile").upsert(payload, on_conflict="user_id").execute()
-        except Exception:
-            supabase.table("user_profile").upsert({
+        supabase.table("user_profile").upsert(
+            {
                 "user_id": int(user_id),
-                "profile_summary": rec.get("profile_summary") or "",
-                "style_preferences": f"{prefs}\n[Core Rule v{new_version}]: {new_rule_line.strip()}".strip(),
+                "core_rules": updated_rules,
+                "version": new_version,
+                "profile_summary": old_summary,
+                "style_preferences": updated_prefs,
                 "updated_at": datetime.now(MM_TZ).isoformat(),
-            }, on_conflict="user_id").execute()
+            },
+            on_conflict="user_id",
+        ).execute()
 
-        return f"Core Rule အသစ်ကို Version v{new_version} အဖြစ် မှတ်သားပြီး အရင် v{old_version} ကိုလည်း သိမ်းပေးထားပါပြီရှင်"
+        return f"Core Rule အသစ်ကို Version v{new_version} အဖြစ် မှတ်သားပေးလိုက်ပါပြီရှင်\n• {clean_rule}"
     except Exception as e:
-        print(f"Error updating core rule version: {e}")
-        return "Rule version သိမ်းရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားပါတယ်၊ ထပ်စမ်းကြည့်ပါရှင်"
+        print(f"[Error updating core rule version]: {type(e).__name__}: {e}")
+        return f"Rule သိမ်းရာမှာ အခက်အခဲ ရှိနေပါတယ်ရှင် — {type(e).__name__}: {str(e)[:120]}"
 
 
 def get_skill_versions_summary(user_id: int) -> str:
