@@ -7,6 +7,8 @@ import logging
 import threading
 import asyncio
 import re
+import ast
+import base64
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -43,9 +45,6 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("MY_TELEGRAM_USER_ID", "0"))
-
-import ast
-import base64
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 GITHUB_REPO = os.getenv("GITHUB_REPO", "").strip()
@@ -140,6 +139,7 @@ def _clean_maya_voice(text: str) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip()
+
 
 def _detect_task_category_and_priority(text: str, reason: str | None = None) -> tuple[str, str]:
     """Task စာသားပေါ်မူတည်၍ category (health/family/work/general) နှင့် priority (urgent/normal) ခွဲခြားသည်။"""
@@ -910,8 +910,6 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
 
     debug_tail = "\n".join(errors[-3:])
     return f"လောလောဆယ် AI ဆာဗာ ခဏအလုပ်များနေပါတယ်ရှင်၊ ခဏနေပြီး ထပ်စမ်းကြည့်ပေးပါ:\n{debug_tail}"
-
-
 # --- Single Smart Intelligence Classifier (TASK / GROUP / ADVICE / GENERAL / WEB_SEARCH + Multi-Task) ---
 def _extract_weekday_target(text: str) -> int | None:
     t = text.lower()
@@ -1284,6 +1282,7 @@ def add_task(
             supabase.table("tasks").insert(minimal_payload).execute()
     return {"status": "success", "message": f"Task added: {title}"}
 
+
 def list_tasks() -> list:
     cleanup_old_done_tasks()
     res = supabase.table("tasks").select("*").order("id").execute()
@@ -1340,6 +1339,7 @@ def get_formatted_tasks() -> str:
         parts.append("ပြီးစီးပြီး:\n" + "\n".join(done_rows[-8:]))
 
     return "\n\n".join(parts)
+
 
 def delete_latest_pending_task() -> str | None:
     try:
@@ -1680,7 +1680,6 @@ def _humanize_timestamps_for_speech(text: str) -> str:
     text = re.sub(r"\b(\d{1,2}):(\d{2})\b", _hm_repl, text)
     text = re.sub(r"\b(19|20)\d{2}\b", "", text)
 
-    # Clean duplicate time-of-day or 'နာရီ' words if a phrase was already humanized
     text = re.sub(r"\b(မနက်|နေ့လယ်|ညနေ|ည)\s+(မနက်|နေ့လယ်|ညနေ|ည)\b", r"\1", text)
     text = re.sub(r"(နာရီ)\s+နာရီ", r"\1", text)
     return text
@@ -1719,6 +1718,7 @@ def _prepare_spoken_text(reply_text: str, max_chars: int = 440) -> tuple[str, st
 
     style = "fast_task" if is_task_confirm else ("calm_care" if is_care_tone else "normal")
     return spoken, style
+
 
 def transcribe_voice_bytes(audio_bytes: bytes, mime_type: str = "audio/ogg") -> str:
     """Voice/Audio bytes ကို Gemini multimodal audio understanding ဖြင့် စာသားပြောင်းသည်။"""
@@ -1862,32 +1862,13 @@ def synthesize_myanmar_voice_mp3(text: str, user_id: int | None = None) -> bytes
         print(f"[gTTS Fallback Error]: {type(e).__name__}: {e}")
         return None
 
-async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Private chat မှ Voice Note / Audio ဖြင့် ခိုင်းစေမှုကို နားထောင်ပြီး စာသား + မိန်းကလေးအသံ နှစ်မျိုးလုံးဖြင့် ပြန်ဖြေသည်။"""
-    message = update.message
-    if not message or message.chat.type != "private":
-        return
-
-    if message.from_user.id != ADMIN_USER_ID:
-        await message.reply_text("Unauthorized.")
-        return
-
-    voice_obj = message.voice or message.audio
-    if not voice_obj:
-        return
-
-    await context.bot.send_chat_action(chat_id=message.chat_id, action="record_voice")
-
-    try:
-        tg_file = await voice_obj.get_file()
-        audio_bytes = bytes(await tg_file.download_as_bytearray())
-        mime_type = getattr(voice_obj, "mime_type", None) or ("audio/ogg" if message.voice else "audio/mpeg")
-
-        transcript = await asyncio.to_thread(transcribe_voice_bytes, audio_bytes, mime_type)
-        if not transcript:
-            await message.reply_text("အသံကို နားထောင်ရာမှာ ခဏပြတ်တောက်သွားပါတယ်ရှင်၊ ထပ်ပြောကြည့်ပေးပါ")
+    async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Private chat မှ Voice Note / Audio ဖြင့် ခိုင်းစေမှုကို နားထောင်ပြီး စာသား + မိန်းကလေးအသံ နှစ်မျိုးလုံးဖြင့် ပြန်ဖြေသည်။"""
+        message = update.message
+        if not message or message.chat.type != "private":
             return
 
+<<<<<<< HEAD
         save_chat_message(message.from_user.id, "user", f"[Voice] {transcript}")
 
         recent_ctx = await asyncio.to_thread(get_recent_history_for_router, message.from_user.id, 6)
@@ -3262,168 +3243,1619 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # CASE B: Private Chat (Single-user ADMIN_USER_ID restricted)
     if chat_type == "private":
+=======
+>>>>>>> f678868 (Update main.py)
         if message.from_user.id != ADMIN_USER_ID:
             await message.reply_text("Unauthorized.")
             return
 
-        if message.document:
-            handled = await _handle_py_document_github_upload(message, context)
-            if handled:
-                return
-
-        user_message = message.text
-        if not user_message:
+        voice_obj = message.voice or message.audio
+        if not voice_obj:
             return
 
-        await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
+        await context.bot.send_chat_action(chat_id=message.chat_id, action="record_voice")
 
         try:
-            save_chat_message(message.from_user.id, "user", user_message)
+            tg_file = await voice_obj.get_file()
+            audio_bytes = bytes(await tg_file.download_as_bytearray())
+            mime_type = getattr(voice_obj, "mime_type", None) or ("audio/ogg" if message.voice else "audio/mpeg")
 
-            stripped_lower = user_message.strip().lower()
-            if stripped_lower in ["menu", "help"]:
-                await message.reply_text("Quick Menu ပါရှင်", reply_markup=build_main_menu_keyboard())
+            transcript = await asyncio.to_thread(transcribe_voice_bytes, audio_bytes, mime_type)
+            if not transcript:
+                await message.reply_text("အသံကို နားထောင်ရာမှာ ခဏပြတ်တောက်သွားပါတယ်ရှင်၊ ထပ်ပြောကြည့်ပေးပါ")
                 return
 
-            if stripped_lower in ["မာယာ", "maya", "hi", "hello", "hey", "မင်္ဂလာပါ"]:
-                memory_ctx = await asyncio.to_thread(recall_relevant_history, message.from_user.id, user_message, 4, 2)
-                greet_prompt = (
-                    "မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု လုံးဝ မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။ "
-                    "နှုတ်ဆက်/ခေါ်နေပါသည်။ လက်ရှိ လေ့လာမှတ်သားထားသော Locked Core Rules/Profile/Preferences/Conversation ရှိလျှင် အလိုက်သိသိ "
-                    f"ရင်းနှီးဖော်ရွေစွာ နှုတ်ဆက်ပြီး ဘာကူညီပေးနိုင်မလဲ တိုတိုရှင်းရှင်း မြန်မာဘာသာဖြင့် ဖြေပါ။\n\n{memory_ctx}"
-                )
-                reply_text = await asyncio.to_thread(call_ai_with_3tier_fallback, greet_prompt, None, None, False)
-                save_chat_message(message.from_user.id, "assistant", reply_text)
-                await send_long_message(message, reply_text)
-                return
-
-            if any(k in stripped_lower for k in ["news summary", "daily news", "သတင်း အနှစ်ချုပ်", "သတင်းအနှစ်ချုပ်", "မြန်မာသတင်း အနှစ်ချုပ်"]):
-                reply_text = await asyncio.to_thread(get_myanmar_news_summary, False)
-                save_chat_message(message.from_user.id, "assistant", reply_text)
-                await send_long_message(message, reply_text)
-                return
+            save_chat_message(message.from_user.id, "user", f"[Voice] {transcript}")
 
             recent_ctx = await asyncio.to_thread(get_recent_history_for_router, message.from_user.id, 6)
             available_groups = await asyncio.to_thread(get_available_groups)
             user_pref_ctx = await asyncio.to_thread(get_user_profile, message.from_user.id)
 
             route = await asyncio.to_thread(
-                smart_route_and_parse, user_message, available_groups, recent_ctx, user_pref_ctx
+                smart_route_and_parse, transcript, available_groups, recent_ctx, user_pref_ctx
             )
             intent = route.get("intent", "GENERAL")
-            print(f"[Smart Route] intent={intent}, mode={route.get('group_mode')}, action={route.get('task_action')}, group={route.get('group_name')}")
 
             if intent == "TASK":
-                reply_text = await asyncio.to_thread(handle_task_intent, user_message, route)
+                reply_text = await asyncio.to_thread(handle_task_intent, transcript, route)
             elif intent == "GROUP":
-                if any(w in user_message for w in ["task မဟုတ်ဘူး", "မဟုတ်ဘူးလေ"]):
-                    await asyncio.to_thread(delete_latest_pending_task)
                 reply_text = await asyncio.to_thread(
-                    handle_group_intent, message.from_user.id, user_message, route, recent_ctx
+                    handle_group_intent, message.from_user.id, transcript, route, recent_ctx
                 )
             elif intent == "WEB_SEARCH":
                 reply_text = await asyncio.to_thread(
                     answer_with_universal_search,
                     message.from_user.id,
-                    user_message,
+                    transcript,
                     recent_ctx,
                     route.get("search_query"),
                 )
             elif intent == "ADVICE":
                 reply_text = await asyncio.to_thread(
-                    handle_advice_or_general_intent, message.from_user.id, user_message, "ADVICE"
+                    handle_advice_or_general_intent, message.from_user.id, transcript, "ADVICE"
                 )
             else:
                 reply_text = await asyncio.to_thread(
-                    handle_advice_or_general_intent, message.from_user.id, user_message, "GENERAL"
+                    handle_advice_or_general_intent, message.from_user.id, transcript, "GENERAL"
                 )
 
             save_chat_message(message.from_user.id, "assistant", reply_text)
-            asyncio.create_task(asyncio.to_thread(evolve_user_profile, message.from_user.id, user_message, reply_text))
-            await send_long_message(message, reply_text)
+            asyncio.create_task(asyncio.to_thread(evolve_user_profile, message.from_user.id, transcript, reply_text))
+
+            await send_long_message(message, f"🎙️ \"{transcript}\"\n\n{reply_text}")
+
+            mp3_bytes = await asyncio.to_thread(synthesize_myanmar_voice_mp3, reply_text, message.from_user.id)
+            if mp3_bytes:
+                await message.reply_voice(voice=io.BytesIO(mp3_bytes))
 
         except Exception as e:
-            await send_long_message(message, "လောလောဆယ် အဖြေပြန်ထုတ်ရာမှာ ခဏအခက်အခဲ ရှိနေပါတယ်ရှင်၊ နောက်မှ ထပ်မေးကြည့်ပါ")
-            print(f"Error in handle_message: {e}")
+            print(f"Error in handle_voice_message: {e}")
+            await message.reply_text("အသံနဲ့ ပြန်ဖြေရာမှာ ခဏအခက်အခဲ ရှိနေပါတယ်ရှင်၊ နောက်မှ ထပ်စမ်းကြည့်ပါ")
 
+    # --- 2. Group Summary, Report & Confidence-Tagged Natural Group Q&A Tools ---
+    def get_available_groups() -> list:
+        cleanup_old_raw_logs()
+        thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
+        res = supabase.table("raw_logs").select("group_name").gte("created_at", thirty_days_ago_iso).execute()
+        groups = sorted(list({r["group_name"] for r in (res.data or []) if r.get("group_name")}))
+        return groups
 
-async def main_async():
-    threading.Thread(target=run_health_server, daemon=True).start()
+    def get_date_bounds(day_mode: str):
+        now_mm = datetime.now(MM_TZ)
+        if day_mode == "yesterday":
+            target_date = (now_mm - timedelta(days=1)).date()
+            label = f"Yesterday ({target_date})"
+        else:
+            target_date = now_mm.date()
+            label = f"Today ({target_date})"
 
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        start_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=MM_TZ)
+        end_dt = start_dt + timedelta(days=1)
+        return start_dt.isoformat(), end_dt.isoformat(), label
 
-    # Slash Commands
-    application.add_handler(
-        CommandHandler(
-            ["start", "menu", "summary", "today", "yesterday", "groups", "news", "tasks", "addtask", "rules", "setrule","patch"],
-            handle_command,
+    def parse_date_range_from_text(text: str):
+        text_lower = text.lower()
+        if "မနေ့" in text_lower or "yesterday" in text_lower:
+            return get_date_bounds("yesterday")
+        if "ဒီနေ့" in text_lower or "today" in text_lower or "ယနေ့" in text_lower:
+            return get_date_bounds("today")
+
+        match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text_lower)
+        if match:
+            try:
+                target_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
+                start_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=MM_TZ)
+                end_dt = start_dt + timedelta(days=1)
+                return start_dt.isoformat(), end_dt.isoformat(), f"{target_date}"
+            except ValueError:
+                pass
+
+        return None, None, None
+
+    def query_specific_group_logs(
+            user_message: str,
+            router_group: str = None,
+            router_period: str = "recent",
+            recent_ctx: str = "",
+    ) -> str:
+        """Group logs များကို တိုက်ရိုက်ဖတ်ပြီး Confidence Tag ([Verified] / [Deduced] / [Unverified]) နှင့်တကွ ဖြေပေးသည်။"""
+        cleanup_old_raw_logs()
+
+        thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
+        query = supabase.table("raw_logs").select("*").gte("created_at", thirty_days_ago_iso).order("id", desc=True)
+
+        date_label = None
+        if router_period in ["today", "yesterday"]:
+            start_iso, end_iso, date_label = get_date_bounds(router_period)
+            query = query.gte("created_at", start_iso).lt("created_at", end_iso)
+        else:
+            s_iso, e_iso, d_lbl = parse_date_range_from_text(f"{recent_ctx}\n{user_message}")
+            if s_iso and e_iso:
+                start_iso, end_iso, date_label = s_iso, e_iso, d_lbl
+                query = query.gte("created_at", start_iso).lt("created_at", end_iso)
+
+        logs_res = query.limit(300).execute()
+        all_logs = list(reversed(logs_res.data or []))
+
+        if not all_logs:
+            scope_d = f" ({date_label})" if date_label else ""
+            return f"သက်ဆိုင်ရာ ကာလ{scope_d} အတွင်း Group မှတ်တမ်းတွေ မရှိသေးပါဘူးရှင်"
+
+        matched_group = router_group
+        if not matched_group:
+            combined_q = f"{recent_ctx}\n{user_message}".lower()
+            available_groups = list({l.get("group_name") for l in all_logs if l.get("group_name")})
+            best_score = 0
+            for g_name in available_groups:
+                g_lower = g_name.lower()
+                score = 100 if g_lower in combined_q else 0
+                for word in re.findall(r"[a-z0-9\u1000-\u109F]+", g_lower):
+                    if len(word) >= 2 and word in combined_q:
+                        score += len(word) * 2
+                if score > best_score:
+                    best_score = score
+                    matched_group = g_name
+
+        selected_logs = [l for l in all_logs if l.get("group_name") == matched_group] if matched_group else all_logs
+
+        if not selected_logs:
+            return f"{matched_group or 'သက်ဆိုင်ရာ Group'} ထဲမှာ မှတ်တမ်း မရှိသေးပါဘူးရှင်"
+
+        raw_text = "\n".join(
+            [
+                f"[{_format_mm_timestamp(l.get('created_at'))} | {l.get('group_name', '')} | {l.get('sender_name', 'Unknown')}]: {l.get('content_summary', '')}"
+                for l in selected_logs[-200:]
+            ]
         )
-    )
-    # Inline Button Clicks
-    application.add_handler(CallbackQueryHandler(handle_button_callback))
-    # Voice / Audio Messages
-    application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice_message))
-    # Normal Messages
-    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.VOICE & ~filters.AUDIO, handle_message))
 
-    # Scheduled Jobs (9:00 AM News, Due Reminders + Repeat Reschedule + 30d Cleanup, 6:00 PM Digest, 30s Follow-up)
-    if application.job_queue:
-        morning_9_mmt = dt_time(hour=9, minute=0, second=0, tzinfo=MM_TZ)
-        application.job_queue.run_daily(
-            scheduled_morning_news_job,
-            time=morning_9_mmt,
-            name="daily_9am_myanmar_news"
-        )
-        application.job_queue.run_repeating(
-            check_due_task_reminders_job,
-            interval=60,
-            first=15,
-            name="due_task_reminders_watcher"
-        )
-        evening_6_mmt = dt_time(hour=18, minute=0, second=0, tzinfo=MM_TZ)
-        application.job_queue.run_daily(
-            scheduled_evening_task_digest_job,
-            time=evening_6_mmt,
-            name="daily_6pm_pending_task_digest"
-        )
-        application.job_queue.run_repeating(
-            check_pending_followups_job,
-            interval=30,
-            first=20,
-            name="pending_followups_watcher"
-        )
+        now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
 
-    await application.initialize()
+        prompt = f"""
+        လက်ရှိအချိန်: {now_str}
 
-    # English Bot Commands Menu
-    await application.bot.set_my_commands([
-        BotCommand("menu", "Quick menu buttons"),
-        BotCommand("summary", "Unread group summary"),
-        BotCommand("today", "Today group summary"),
-        BotCommand("yesterday", "Yesterday group summary"),
-        BotCommand("groups", "Select group report"),
-        BotCommand("news", "Latest Myanmar news summary"),
-        BotCommand("tasks", "View current tasks"),
-        BotCommand("addtask", "Add a new task"),
-        BotCommand("rules", "View locked core rules & versions"),
-        BotCommand("setrule", "Add a new versioned core rule"),
-    ])
-
+<<<<<<< HEAD
     print("🤖 Maya AI Agent started...")
+=======
+        အောက်ပါတို့မှာ Telegram Group ထဲမှ စကားပြောဆိုမှု မှတ်တမ်းများ ဖြစ်သည်။
+        အရှေ့နောက် စကားပြောဆိုမှု (Recent Context) နှင့် လက်ရှိ မေးခွန်းကို နားလည်ပြီး အသုံးပြုသူ မေးထားသည့်
+        အချက် (သို့မဟုတ် သက်ဆိုင်ရာ လူပြောထားသည့် အကြောင်းအရာ) တစ်ခုတည်းကိုသာ Focus ထား၍ ပြန်ပြောပြပေးပါ။
+>>>>>>> f678868 (Update main.py)
 
-    await application.start()
-    await application.updater.start_polling()
+        ဖြေဆိုရမည့် ပုံစံစည်းမျဉ်းများ:
+        1. မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်)။
+        2. Confidence Tagging: အဓိက အချက်အလက်တိုင်း၏ အနောက်တွင် အောက်ပါ Tag တစ်ခုခု တွဲထည့်ပေးပါ —
+           - [Verified] = Group မှတ်တမ်းထဲတွင် တိုက်ရိုက် ပါဝင်သော အချက်
+           - [Deduced] = မှတ်တမ်းများမှ ဆက်စပ်သုံးသပ်ထားသော အချက်
+           - [Unverified] = မှတ်တမ်းထဲတွင် တိကျစွာ မပါသေးသော အချက်
+        3. စက်ရုပ်လို တစ်ကြောင်းချင်းစီ၏ အချိန် (Timestamp) တွေ ထည့်ရေးစရာ မလိုပါ (အသုံးပြုသူက ဘယ်အချိန်လဲဟု မေးမှသာ အချိန်ကို ထည့်ပြောပါ)။
+        4. မေးထားသည့် အချက်/လူနှင့် မသက်ဆိုင်သော အခြားလူများ၏ စကားများကို လုံးဝ ထည့်မပြောပါနှင့်။
 
-    stop_signal = asyncio.Event()
-    await stop_signal.wait()
+        Recent Context:
+        {recent_ctx or "None"}
 
+        လက်ရှိ မေးခွန်း: {user_message}
 
-def main():
-    try:
-        asyncio.run(main_async())
-    except KeyboardInterrupt:
-        pass
+        Group မှတ်တမ်းများ:
+        {raw_text}
+        """
 
+        return call_ai_with_3tier_fallback(prompt, use_google_search=False)
 
-if __name__ == "__main__":
-    main()
+    def get_group_report(user_query: str = "", exact_group_name: str = None, day_mode: str = None) -> str:
+        cleanup_old_raw_logs()
+
+        if day_mode in ["today", "yesterday"]:
+            start_iso, end_iso, date_label = get_date_bounds(day_mode)
+        else:
+            start_iso, end_iso, date_label = parse_date_range_from_text(user_query)
+
+        thirty_days_ago_iso = (datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)).isoformat()
+        query = supabase.table("raw_logs").select("*").gte("created_at", thirty_days_ago_iso).order("id")
+
+        if start_iso and end_iso:
+            query = query.gte("created_at", start_iso).lt("created_at", end_iso)
+        elif not exact_group_name:
+            query = query.eq("is_read", False)
+
+        logs_res = query.execute()
+        logs = logs_res.data or []
+
+        matched_group_name = exact_group_name
+        if exact_group_name:
+            logs = [l for l in logs if l.get("group_name") == exact_group_name]
+        elif logs:
+            all_groups = list({l.get("group_name") for l in logs if l.get("group_name")})
+            q_lower = user_query.lower()
+            for g_name in all_groups:
+                g_words = [w for w in g_name.lower().split() if len(w) >= 3]
+                if g_name.lower() in q_lower or any(w in q_lower for w in g_words):
+                    matched_group_name = g_name
+                    logs = [l for l in logs if l.get("group_name") == g_name]
+                    break
+
+        if not logs:
+            scope_desc = f" [{matched_group_name}]" if matched_group_name else ""
+            if date_label:
+                return f"{date_label}{scope_desc} အတွက် မှတ်တမ်း မရှိသေးပါဘူးရှင်"
+            return f"ဖတ်ရမယ့် မက်ဆေ့ခ်ျအသစ် မရှိသေးပါဘူး{scope_desc} ရှင်"
+
+        raw_text = "\n".join(
+            [f"[{l['group_name']} | {l['sender_name']} | {str(l.get('created_at', ''))[:16]}]: {l['content_summary']}"
+             for l in logs]
+        )
+
+        header_info = f"Group: {matched_group_name or 'All Groups'} | Period: {date_label or 'Unread'}"
+
+        prompt = f"""
+        အောက်ပါတို့မှာ Telegram Group များမှ ရရှိထားသော မက်ဆေ့ခ်ျများနှင့် ပုံ/ဖိုင် အနှစ်ချုပ်များ ဖြစ်သည်။
+        ({header_info})
+        မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်)။
+        နေ့စဉ် တွေ့နေကျ ရိုးရိုးနှုတ်ဆက်စကားများ၊ အရေးမပါသော စကားပြောဆိုမှုများကို လုံးဝ ဖယ်ထုတ်ပါ။
+        အချက်တစ်ခုချင်းစီ၏ အနောက်တွင် [Verified] (မှတ်တမ်းထဲ တိုက်ရိုက်ပါဝင်ချက်) သို့မဟုတ် [Deduced] (ဆက်စပ်သုံးသပ်ချက်) tag ထည့်ပေးပါ။
+        အောက်ပါ အချက်များကိုသာ ဦးစားပေး၍ အနှစ်ချုပ် Report တိုတိုရှင်းရှင်းနှင့် ထိရောက်စွာ ထုတ်ပေးပါ:
+        1. ပုံမှန်မဟုတ်သော ပြဿနာများ (Issues / Blockers)
+        2. ဆုံးဖြတ်ချက် အသစ်များနှင့် ညွှန်ကြားချက်များ
+        3. အရေးကြီးသော လုပ်ငန်းတာဝန်များ (Action Items)
+
+        ဒေတာများ:
+        {raw_text}
+        """
+
+        report_text = call_ai_with_3tier_fallback(prompt, use_google_search=False)
+
+        supabase.table("daily_reports").insert({"report_content": f"[{header_info}]\n{report_text}"}).execute()
+
+        if not date_label and not exact_group_name:
+            for l in logs:
+                supabase.table("raw_logs").update({"is_read": True}).eq("id", l["id"]).execute()
+
+        return f"{header_info}\n\n{report_text}"
+
+    # --- Supabase Pending Follow-ups Queue ---
+    def queue_pending_followup(user_id: int, followup_type: str, question: str, target_group: str = None,
+                               delay_seconds: int = 30):
+        try:
+            if followup_type == "web_search":
+                return
+            now_mm = datetime.now(MM_TZ)
+            retry_dt = now_mm + timedelta(seconds=delay_seconds)
+            supabase.table("pending_followups").insert({
+                "user_id": user_id,
+                "followup_type": followup_type,
+                "question": question,
+                "target_group": target_group,
+                "status": "pending",
+                "attempts": 0,
+                "retry_at": retry_dt.isoformat(),
+                "created_at": now_mm.isoformat(),
+            }).execute()
+        except Exception as e:
+            print(f"Error queuing pending_followup: {e}")
+
+    async def check_pending_followups_job(context: ContextTypes.DEFAULT_TYPE):
+        try:
+            res = (
+                supabase.table("pending_followups")
+                .select("*")
+                .eq("status", "pending")
+                .order("id")
+                .limit(20)
+                .execute()
+            )
+            rows = res.data or []
+            if not rows:
+                _reset_job_failure("pending_followups")
+                return
+
+            now_mm = datetime.now(MM_TZ)
+            groups = await asyncio.to_thread(get_available_groups)
+
+            for item in rows:
+                item_id = item.get("id")
+                user_id = item.get("user_id") or ADMIN_USER_ID
+                f_type = item.get("followup_type")
+                question = item.get("question", "")
+                target_group = item.get("target_group")
+                attempts = int(item.get("attempts") or 0)
+
+                if f_type == "web_search":
+                    supabase.table("pending_followups").update({"status": "cancelled"}).eq("id", item_id).execute()
+                    continue
+
+                try:
+                    created_dt = datetime.fromisoformat(str(item.get("created_at")).replace("Z", "+00:00")).astimezone(
+                        MM_TZ)
+                    if (now_mm - created_dt).total_seconds() > 3600 or attempts >= 2:
+                        supabase.table("pending_followups").update({"status": "expired"}).eq("id", item_id).execute()
+                        continue
+                except Exception:
+                    pass
+
+                if f_type == "group_query":
+                    has_group_data = (
+                        any(target_group.lower() in g.lower() for g in groups)
+                        if target_group else len(groups) > 0
+                    )
+                    if has_group_data:
+                        ans = await asyncio.to_thread(
+                            query_specific_group_logs, question, target_group, "recent", ""
+                        )
+                        if ans and "မရှိသေးပါဘူး" not in ans:
+                            msg = f"ခုဏက Group အချက်အလက်လေး ပြန်ပြောပေးတာပါရှင်\n\n{ans}"
+                            await context.bot.send_message(chat_id=user_id, text=msg[:3500])
+                            save_chat_message(user_id, "assistant", msg)
+                            supabase.table("pending_followups").update({"status": "completed"}).eq("id",
+                                                                                                   item_id).execute()
+                        else:
+                            supabase.table("pending_followups").update({
+                                "attempts": attempts + 1
+                            }).eq("id", item_id).execute()
+
+            _reset_job_failure("pending_followups")
+        except Exception as e:
+            print(f"Error in check_pending_followups_job: {e}")
+            await _alert_job_failure(context, "pending_followups", e)
+
+    # --- 3-Source Hybrid News Fetchers (Telegram Public Channels + Direct RSS/XML + Tavily Domain Search) ---
+    def _strip_html(raw_html: str) -> str:
+        if not raw_html:
+            return ""
+        no_br = re.sub(r"<br\s*/?>", " ", raw_html, flags=re.IGNORECASE)
+        no_tags = re.sub(r"<[^>]+>", " ", no_br)
+        unescaped = html.unescape(no_tags)
+        return re.sub(r"\s+", " ", unescaped).strip()
+
+    def _fetch_telegram_channel_news(source_label: str, channel_username: str, max_posts: int = 6) -> str:
+        """Public Telegram channel (https://t.me/s/<username>) မှ လတ်တလော post များကို တိုက်ရိုက် ဖတ်ယူသည်။"""
+        url = f"https://t.me/s/{channel_username}"
+        try:
+            resp = requests.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; MayaNewsBot/1.0)"},
+                timeout=6,
+            )
+            if resp.status_code != 200 or not resp.text:
+                return ""
+
+            page = resp.text
+            blocks = re.findall(
+                r'<div class="tgme_widget_message_wrap[^"]*".*?(?=<div class="tgme_widget_message_wrap|</section>)',
+                page,
+                flags=re.DOTALL,
+            )
+            if not blocks:
+                return ""
+
+            cutoff_dt = datetime.now(MM_TZ) - timedelta(hours=36)
+            items = []
+            for blk in reversed(blocks):
+                text_m = re.search(
+                    r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>',
+                    blk,
+                    flags=re.DOTALL,
+                )
+                if not text_m:
+                    continue
+                clean_txt = _strip_html(text_m.group(1))
+                if len(clean_txt) < 35:
+                    continue
+
+                time_m = re.search(r'<time[^>]+datetime="([^"]+)"', blk)
+                ts_label = ""
+                if time_m:
+                    try:
+                        dt_obj = datetime.fromisoformat(time_m.group(1).replace("Z", "+00:00")).astimezone(MM_TZ)
+                        if dt_obj < cutoff_dt:
+                            continue
+                        ts_label = dt_obj.strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        pass
+
+                items.append(f"- [{source_label} Telegram | {ts_label}]: {clean_txt[:420]}")
+                if len(items) >= max_posts:
+                    break
+
+            return "\n".join(items)
+        except Exception as e:
+            print(f"Telegram channel fetch error ({channel_username}): {e}")
+            return ""
+
+    def _fetch_single_rss_feed(source_label: str, feed_url: str, max_items: int = 5) -> str:
+        """Direct RSS/XML feed မှ လွန်ခဲ့သည့် ၃၆ နာရီအတွင်း သတင်းခေါင်းစဉ်နှင့် အကျဉ်းချုပ်များ ဖတ်ယူသည်။"""
+        try:
+            resp = requests.get(
+                feed_url,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; MayaNewsBot/1.0)"},
+                timeout=6,
+            )
+            if resp.status_code != 200 or not resp.content:
+                return ""
+
+            root = ET.fromstring(resp.content)
+            cutoff_dt = datetime.now(MM_TZ) - timedelta(hours=36)
+            results = []
+
+            rss_items = root.findall(".//item")
+            for it in rss_items:
+                title = _strip_html(it.findtext("title") or "")
+                desc = _strip_html(it.findtext("description") or "")
+                pub_raw = (it.findtext("pubDate") or "").strip()
+                pub_label = ""
+                if pub_raw:
+                    try:
+                        dt_obj = parsedate_to_datetime(pub_raw)
+                        dt_mm = dt_obj.replace(tzinfo=MM_TZ) if dt_obj.tzinfo is None else dt_obj.astimezone(MM_TZ)
+                        if dt_mm < cutoff_dt:
+                            continue
+                        pub_label = dt_mm.strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        pub_label = pub_raw[:16]
+
+                if title:
+                    snippet = f" — {desc[:240]}" if desc and desc.lower() != title.lower() else ""
+                    results.append(f"- [{source_label} | {pub_label}]: {title}{snippet}")
+                if len(results) >= max_items:
+                    break
+
+            if not results:
+                ns = {"atom": "http://www.w3.org/2005/Atom"}
+                entries = root.findall(".//atom:entry", ns) or root.findall(".//entry")
+                for ent in entries:
+                    title = _strip_html(
+                        ent.findtext("atom:title", default="", namespaces=ns) or ent.findtext("title") or "")
+                    summary = _strip_html(
+                        ent.findtext("atom:summary", default="", namespaces=ns)
+                        or ent.findtext("summary")
+                        or ent.findtext("atom:content", default="", namespaces=ns)
+                        or ""
+                    )
+                    upd = (
+                            ent.findtext("atom:updated", default="", namespaces=ns)
+                            or ent.findtext("updated")
+                            or ent.findtext("published")
+                            or ""
+                    ).strip()
+                    pub_label = upd[:16]
+                    if upd:
+                        try:
+                            dt_obj = datetime.fromisoformat(upd.replace("Z", "+00:00")).astimezone(MM_TZ)
+                            if dt_obj < cutoff_dt:
+                                continue
+                            pub_label = dt_obj.strftime("%Y-%m-%d %H:%M")
+                        except Exception:
+                            pass
+
+                    if title:
+                        snippet = f" — {summary[:240]}" if summary else ""
+                        results.append(f"- [{source_label} | {pub_label}]: {title}{snippet}")
+                    if len(results) >= max_items:
+                        break
+
+            return "\n".join(results)
+        except Exception as e:
+            print(f"RSS fetch error ({source_label}): {e}")
+            return ""
+
+    def _tavily_worker(
+            search_query: str,
+            max_results: int = 6,
+            exclude_social: bool = True,
+            include_domains: list | None = None,
+            days: int = 2,
+    ) -> str:
+        if not TAVILY_API_KEY:
+            return ""
+        try:
+            payload = {
+                "api_key": TAVILY_API_KEY,
+                "query": search_query,
+                "search_depth": "advanced",
+                "topic": "news",
+                "days": days,
+                "max_results": max_results,
+                "include_answer": "advanced",
+            }
+            if include_domains:
+                payload["include_domains"] = include_domains
+            elif exclude_social:
+                payload["exclude_domains"] = ["youtube.com", "m.youtube.com", "facebook.com", "tiktok.com"]
+
+            resp = requests.post("https://api.tavily.com/search", json=payload, timeout=9)
+            if resp.status_code != 200:
+                return ""
+            data = resp.json()
+            lines = []
+            if data.get("answer"):
+                lines.append(f"[Summary]: {data['answer']}")
+            for r in data.get("results", []):
+                title = r.get("title", "")
+                url = r.get("url", "")
+                content = (r.get("content", "") or "")[:360]
+                lines.append(f"- {title} ({url}): {content}")
+            return "\n".join(lines)
+        except Exception as e:
+            print(f"Tavily search error: {e}")
+            return ""
+
+    # --- 3-Source Hybrid Myanmar News Summary (With 30-Min Cache for Speed & Quota Saving) ---
+    def get_myanmar_news_summary(force_refresh: bool = False) -> str:
+        now_ts = time.time()
+        if not force_refresh and _NEWS_CACHE["text"] and (now_ts - _NEWS_CACHE["ts"]) < NEWS_CACHE_TTL_SECONDS:
+            return _NEWS_CACHE["text"]
+
+        now_mm = datetime.now(MM_TZ)
+        now_str = now_mm.strftime("%Y-%m-%d %H:%M MMT")
+
+        local_chunks = []
+        intl_chunks = []
+
+        with ThreadPoolExecutor(max_workers=12) as executor:
+            tg_futures = [
+                (label, executor.submit(_fetch_telegram_channel_news, label, handle, 6))
+                for label, handle in TELEGRAM_NEWS_CHANNELS
+            ]
+            local_rss_futures = [
+                (label, executor.submit(_fetch_single_rss_feed, label, url, 5))
+                for label, url in LOCAL_RSS_FEEDS
+            ]
+            intl_rss_futures = [
+                (label, executor.submit(_fetch_single_rss_feed, label, url, 5))
+                for label, url in INTL_RSS_FEEDS
+            ]
+            f_tavily_local = executor.submit(
+                _tavily_worker,
+                "Myanmar latest news conflict economy politics",
+                6,
+                True,
+                LOCAL_TRUSTED_DOMAINS,
+                1,
+            )
+            f_tavily_intl = executor.submit(
+                _tavily_worker,
+                "Myanmar news latest developments",
+                6,
+                True,
+                INTL_TRUSTED_DOMAINS,
+                1,
+            )
+
+            for _, fut in tg_futures:
+                try:
+                    res = fut.result()
+                    if res:
+                        local_chunks.append(res)
+                except Exception:
+                    pass
+
+            for _, fut in local_rss_futures:
+                try:
+                    res = fut.result()
+                    if res:
+                        local_chunks.append(res)
+                except Exception:
+                    pass
+
+            try:
+                t_loc = f_tavily_local.result()
+                if t_loc:
+                    local_chunks.append(t_loc)
+            except Exception:
+                pass
+
+            for _, fut in intl_rss_futures:
+                try:
+                    res = fut.result()
+                    if res:
+                        intl_chunks.append(res)
+                except Exception:
+                    pass
+
+            try:
+                t_intl = f_tavily_intl.result()
+                if t_intl:
+                    intl_chunks.append(t_intl)
+            except Exception:
+                pass
+
+        local_raw = "\n".join(local_chunks).strip()
+        intl_raw = "\n".join(intl_chunks).strip()
+        has_data = bool(local_raw or intl_raw)
+
+        prompt = f"""
+        လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)
+
+        သင်သည် မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ၊ ရိုးရိုးရှင်းရှင်းနဲ့ ရင်းနှီးဖော်ရွေစွာ ပြောဆိုသည့် 'မာယာ' ဖြစ်သည်။
+        - 'မောင်' ဟု လုံးဝ မသုံးပါနှင့်။
+        - 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်။
+        - ထိုင်းစာ/တရုတ်စာ စသည့် မဆိုင်သော ဘာသာစကားစာလုံးများ လုံးဝ မရောပါနှင့် (မြန်မာစာ Unicode နှင့် အင်္ဂလိပ်ဌာနအမည်များသာ သုံးပါ)။
+        - စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်။
+        - မိတ်ဆက်စကားရှည်ကြီးများ မရေးဘဲ သတင်းအနှစ်ချုပ်ကိုသာ တိုက်ရိုက် ဖော်ပြပါ။
+
+        အောက်ပါ Telegram News Channels၊ Direct RSS Feeds နှင့် သတင်းဌာန Website ရလဒ်များမှ လွန်ခဲ့သည့် ၂၄ နာရီအတွင်း
+        မြန်မာပြည်နှင့် ပတ်သက်သည့် **တကယ့် သတင်းဖြစ်ရပ် အကြောင်းအရာများ** ကို ကဏ္ဍ (၂) ခုခွဲ၍ မြန်မာဘာသာဖြင့် အနှစ်ချုပ်ပေးပါ:
+
+        ၁။ **ပြည်တွင်းနှင့် လွတ်လပ်သော သတင်းဌာနများ (Myanmar Now, The Irrawaddy, Mizzima, Frontier Myanmar, Khit Thit Media)**
+        ၂။ **နိုင်ငံတကာ သတင်းဌာနများ (BBC Burmese, VOA Burmese, RFA Burmese, Reuters)**
+
+        စည်းမျဉ်းများ:
+        - သတင်းဌာနများ၏ ယေဘုယျသမိုင်း/လုပ်ငန်းဆောင်တာ ရှင်းလင်းချက်များကို လုံးဝ မရေးပါနှင့်။ တကယ့် သတင်းဖြစ်ရပ် (ဘယ်နေရာမှာ ဘာဖြစ်သလဲ၊ ဘယ်သူတွေ ပါသလဲ) ကိုသာ Bullet point ဖြင့် တိုတိုရှင်းရှင်း ရေးပါ။
+        - သတင်းတစ်ပုဒ်ချင်းစီ၏ အနောက်တွင် [သတင်းဌာနအမည်] နှင့် [Verified] (တိုက်ရိုက်တွေ့ရှိချက်) သို့မဟုတ် [Deduced] (ဆက်စပ်သုံးသပ်ချက်) ထည့်ပေးပါ။
+
+        --- Local & Independent Outlets (Telegram Channels + RSS + Domains) ---
+        {local_raw[:7500] or "None"}
+
+        --- International Coverage (RSS + Domains) ---
+        {intl_raw[:5500] or "None"}
+        """
+
+        summary = call_ai_with_3tier_fallback(prompt, use_google_search=(not has_data))
+        if not summary or "ခဏအလုပ်များနေပါတယ်" in summary:
+            summary = call_ai_with_3tier_fallback(prompt, use_google_search=True)
+
+        summary = _clean_maya_voice(summary)
+        final_output = f"📰 Myanmar Daily News Summary ({now_str})\n\n{summary}"
+
+        if summary and "ခဏအလုပ်များနေပါတယ်" not in summary:
+            _NEWS_CACHE["ts"] = time.time()
+            _NEWS_CACHE["text"] = final_output
+
+        return final_output
+
+    # --- Web Search Helper (Context-Aware + Confidence Tagging) ---
+    def answer_with_universal_search(
+            user_id: int,
+            user_message: str,
+            recent_ctx: str = "",
+            effective_query: str | None = None,
+    ) -> str:
+        now_mm = datetime.now(MM_TZ)
+        now_str = now_mm.strftime("%Y-%m-%d %H:%M MMT")
+        profile_text = get_user_profile(user_id)
+
+        raw_q = (effective_query or user_message).strip()
+        clean_q = re.sub(r"[?？!]", "", raw_q).strip()
+        if len(clean_q) <= 18 and recent_ctx:
+            prev_user_lines = [
+                line.split(":", 1)[1].strip()
+                for line in recent_ctx.splitlines()
+                if line.startswith("user:") and user_message.strip() not in line
+            ]
+            if prev_user_lines:
+                clean_q = f"{prev_user_lines[-1]} {clean_q}".strip()
+
+        tavily_raw = _tavily_worker(clean_q, max_results=6, exclude_social=True, days=2)
+        web_context = f"--- Web Search (Tavily) ---\n{tavily_raw}" if tavily_raw else "--- Web Search Results ---\nNone"
+
+        profile_block = f"--- Learned User Profile & Locked Rules ---\n{profile_text}\n\n" if profile_text else ""
+        ctx_block = f"--- Recent Conversation Context ---\n{recent_ctx}\n\n" if recent_ctx else ""
+
+        system_prompt = (
+            f"သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။\n"
+            f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n\n"
+            f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု လုံးဝ မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။\n"
+            f"အရှေ့နောက် စကားပြောဆိုမှု context နှင့် ရှာဖွေမေးမြန်းချက်အပေါ်သာ တိုက်ရိုက် Focus ထားပြီး ရှင်းလင်းပြတ်သားစွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ:\n"
+            f"1. **တိုက်ရိုက် အဖြေချုပ် (Direct Answer):** မေးခွန်း၏ အဓိကအဖြေကို စာကြောင်း ၁–၂ ကြောင်းဖြင့် အရင်ဆုံး ဖြေပါ။\n"
+            f"2. **အဓိက အချက်အလက်များ (Key Points):** သက်ဆိုင်ရာ အချက် (၃–၅ ချက်) ကို Bullet point များဖြင့် ဖော်ပြပြီး အချက်တိုင်း၏ အနောက်တွင် [Verified] (ရှာဖွေမှုရလဒ်တွင် တိုက်ရိုက်ပါဝင်ချက်)၊ [Deduced] (ဆက်စပ်သုံးသပ်ချက်) သို့မဟုတ် [Unverified] (မသေချာသေးသည့်အချက်) tag ထည့်ပေးပါ။\n"
+            f"3. မေးခွန်းနှင့် မသက်ဆိုင်သော အချက်အလက်များကို လုံးဝ မထည့်ပါနှင့်။\n"
+        )
+
+        full_prompt = (
+            f"{system_prompt}\n"
+            f"{profile_block}"
+            f"{ctx_block}"
+            f"{web_context}\n\n"
+            f"ရှာဖွေမေးမြန်းချက်: {user_message}\n"
+            f"ရှာဖွေခဲ့သည့် Query: {clean_q}"
+        )
+
+        reply = call_ai_with_3tier_fallback(full_prompt, use_google_search=True)
+
+        if not reply or "ခဏအလုပ်များနေပါတယ်" in reply:
+            fallback_prompt = (
+                f"{full_prompt}\n\n"
+                f"မှတ်ချက်: Google Search tool ခဏမရသဖြင့် အထက်ပါ Web Search အချက်အလက်များကို အခြေခံ၍ "
+                f"Confidence tag ([Verified] / [Deduced] / [Unverified]) များနှင့်တကွ ရှင်းလင်းစွာ ဖြေပေးပါ။"
+            )
+            reply_no_search = call_ai_with_3tier_fallback(fallback_prompt, use_google_search=False)
+            if reply_no_search and "ခဏအလုပ်များနေပါတယ်" not in reply_no_search:
+                return _clean_maya_voice(reply_no_search)
+
+        if not reply or "ခဏအလုပ်များနေပါတယ်" in reply:
+            return "လောလောဆယ် Web Search ဘက်မှာ ခဏအဆင်မပြေ ဖြစ်နေပါတယ်ရှင်၊ ခဏနေပြီး ထပ်မေးကြည့်ပါ"
+
+        return _clean_maya_voice(reply)
+
+    # --- Scheduled Jobs (9:00 AM News, Due Reminders + Repeat Reschedule + 30d Cleanup, 6:00 PM Digest, 30s Follow-up) ---
+    async def scheduled_morning_news_job(context: ContextTypes.DEFAULT_TYPE):
+        if not ADMIN_USER_ID:
+            return
+        try:
+            news_text = await asyncio.to_thread(get_myanmar_news_summary, True)
+            save_chat_message(ADMIN_USER_ID, "assistant", news_text)
+            for i in range(0, len(news_text), 3500):
+                await context.bot.send_message(chat_id=ADMIN_USER_ID, text=news_text[i:i + 3500])
+            _reset_job_failure("morning_news")
+        except Exception as e:
+            print(f"Error sending scheduled morning news: {e}")
+            await _alert_job_failure(context, "morning_news", e)
+
+    async def _send_reminder_with_actions(context: ContextTypes.DEFAULT_TYPE, chat_id: int, task_id: int | None,
+                                          text_msg: str):
+        reply_markup = None
+        if task_id is not None:
+            reply_markup = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Done", callback_data=f"task_done:{task_id}"),
+                    InlineKeyboardButton("⏰ ၁၅ မိနစ် ကြာမှ", callback_data=f"task_snooze15:{task_id}"),
+                ]
+            ])
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=text_msg,
+            reply_markup=reply_markup,
+        )
+
+    async def check_due_task_reminders_job(context: ContextTypes.DEFAULT_TYPE):
+        if not ADMIN_USER_ID:
+            return
+        try:
+            cleanup_old_done_tasks()
+            now_mm = datetime.now(MM_TZ)
+            res = supabase.table("tasks").select("*").execute()
+            tasks = res.data or []
+
+            for t in tasks:
+                status_val = str(t.get("status") or "pending").strip().lower()
+                if status_val != "pending":
+                    continue
+
+                repeat_type = str(t.get("repeat_type") or "once").strip().lower()
+                is_repeatable = repeat_type in {"daily", "weekly", "school_days"}
+
+                r_at = t.get("remind_at")
+                if not r_at:
+                    continue
+
+                try:
+                    r_dt = datetime.fromisoformat(str(r_at).replace("Z", "+00:00"))
+                    if r_dt.tzinfo is None:
+                        r_dt = r_dt.replace(tzinfo=MM_TZ)
+                    else:
+                        r_dt = r_dt.astimezone(MM_TZ)
+
+                    if is_repeatable and r_dt > now_mm and t.get("reminded") is True:
+                        try:
+                            supabase.table("tasks").update({"reminded": False}).eq("id", t["id"]).execute()
+                        except Exception:
+                            pass
+                        continue
+
+                    if t.get("reminded") is True and not is_repeatable:
+                        continue
+
+                    if r_dt <= now_mm:
+                        title = (t.get("title") or "").strip()
+                        clean_reason, cat, prio = _unpack_task_meta(t)
+                        use_maung = (cat in ("health", "family")) or _is_health_or_family_task(title, clean_reason)
+                        prio_prefix = "🔥 အရေးကြီး — " if prio == "urgent" else ""
+                        msg = (
+                            f"{prio_prefix}မောင်ရေ — {title} အချိန်ရောက်ပြီနော်"
+                            if use_maung
+                            else f"{prio_prefix}{title} အချိန်ရောက်ပါပြီရှင်"
+                        )
+                        if clean_reason:
+                            msg += f"\n📝 {clean_reason}"
+
+                        next_dt = _compute_next_repeat_datetime(r_dt, repeat_type, now_mm)
+                        if next_dt:
+                            msg += f"\n🔁 နောက်တစ်ကြိမ်: {next_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[next_dt.weekday()]})"
+
+                        await _send_reminder_with_actions(context, ADMIN_USER_ID, t.get("id"), msg)
+                        save_chat_message(ADMIN_USER_ID, "assistant", msg)
+
+                        try:
+                            if next_dt:
+                                supabase.table("tasks").update({
+                                    "status": "pending",
+                                    "remind_at": next_dt.isoformat(),
+                                    "reminded": False,
+                                }).eq("id", t["id"]).execute()
+                            else:
+                                supabase.table("tasks").update({"reminded": True}).eq("id", t["id"]).execute()
+                        except Exception:
+                            pass
+                except Exception as item_err:
+                    print(f"[Reminder Item Error] id={t.get('id')}: {item_err}")
+
+            _reset_job_failure("due_task_reminders")
+        except Exception as e:
+            print(f"Error in check_due_task_reminders_job: {e}")
+            await _alert_job_failure(context, "due_task_reminders", e)
+
+    async def scheduled_evening_task_digest_job(context: ContextTypes.DEFAULT_TYPE):
+        if not ADMIN_USER_ID:
+            return
+        try:
+            res = supabase.table("tasks").select("*").eq("status", "pending").order("id").execute()
+            pending = res.data or []
+            if not pending:
+                _reset_job_failure("evening_digest")
+                return
+
+            lines = [f"• {t['title']}" for t in pending[:10]]
+            msg = "ဒီနေ့ ပြီးဖို့ ကျန်နေသေးတဲ့ Task လေးတွေပါရှင်\n" + "\n".join(lines)
+            await context.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
+            save_chat_message(ADMIN_USER_ID, "assistant", msg)
+            _reset_job_failure("evening_digest")
+        except Exception as e:
+            print(f"Error in scheduled_evening_task_digest_job: {e}")
+            await _alert_job_failure(context, "evening_digest", e)
+
+    # --- Dedicated 5-Intent Handlers (TASK / GROUP / ADVICE / GENERAL / WEB_SEARCH) ---
+    def handle_group_intent(user_id: int, user_message: str, route: dict, recent_ctx: str = "") -> str:
+        target_group = route.get("group_name")
+        period = route.get("period", "recent")
+        mode = route.get("group_mode", "query")
+
+        if mode == "summary":
+            day_m = period if period in ["today", "yesterday"] else None
+            return get_group_report(user_message, target_group, day_m)
+
+        ans = query_specific_group_logs(user_message, target_group, period, recent_ctx)
+        if ans and "မရှိသေးပါဘူး" in ans:
+            queue_pending_followup(user_id, "group_query", user_message, target_group=target_group, delay_seconds=30)
+            g_label = f"\"{target_group}\"" if target_group else "သက်ဆိုင်ရာ Group"
+            return f"{g_label} ရဲ့ မက်ဆေ့ခ်ျအချက်အလက်တွေ အခုထိ မရောက်သေးပါဘူးရှင်၊ ရောက်လာတာနဲ့ ချက်ချင်း ပြန်ပြောပေးပါမယ်"
+        return ans
+
+    def handle_advice_or_general_intent(user_id: int, user_message: str, intent_mode: str = "GENERAL") -> str:
+        cal_info = get_myanmar_calendar_context()
+        memory_context = recall_relevant_history(user_id, user_message, recent_limit=8, search_limit=10)
+
+        if intent_mode == "ADVICE":
+            prompt = (
+                f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
+                f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု လုံးဝ မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။\n"
+                f"အသုံးပြုသူ၏ Locked Core Rules၊ Profile၊ Style Preferences၊ အတိတ်မှတ်ဉာဏ်နှင့် မေးခွန်းကို သုံးသပ်ပြီး "
+                f"အလိုက်သိသိ မြန်မာဘာသာဖြင့် အကြံပြုပါ:\n"
+                f"1. အခြေအနေ သုံးသပ်ချက်\n"
+                f"2. အကြံပြု လုပ်ဆောင်သင့်သော နည်းလမ်းများ\n"
+                f"3. ချက်ချင်း စတင်နိုင်မည့် Next Step\n\n"
+                f"{memory_context}\n\n"
+                f"အကြံတောင်းသည့် အကြောင်းအရာ: {user_message}"
+            )
+        else:
+            prompt = (
+                f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
+                f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု လုံးဝ မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။\n"
+                f"အသုံးပြုသူ၏ Locked Core Rules၊ Profile၊ Style Preferences၊ အတိတ်စကားပြောဆိုမှုများနှင့် ခိုင်းစေချက်ကို သေချာမှတ်မိပြီး "
+                f"အလိုက်သိသိနှင့် မြန်မာစာ သန့်သန့်ရှင်းရှင်းဖြင့် ကူညီဆောင်ရွက်ပေးပါ။\n\n"
+                f"{memory_context}\n\n"
+                f"ခိုင်းစေချက်: {user_message}"
+            )
+
+        return call_ai_with_3tier_fallback(prompt, None, None, False)
+
+    # --- Quick Menu & Command Handlers ---
+    def build_main_menu_keyboard() -> InlineKeyboardMarkup:
+        keyboard = [
+            [
+                InlineKeyboardButton("Unread Summary", callback_data="cmd_unread_summary"),
+                InlineKeyboardButton("Today Summary", callback_data="cmd_today_summary"),
+            ],
+            [
+                InlineKeyboardButton("Yesterday Summary", callback_data="cmd_yesterday_summary"),
+                InlineKeyboardButton("Select Group", callback_data="cmd_list_groups"),
+            ],
+            [
+                InlineKeyboardButton("News Summary", callback_data="cmd_news_summary"),
+                InlineKeyboardButton("Tasks List", callback_data="cmd_list_tasks"),
+            ],
+            [
+                InlineKeyboardButton("Core Rules & Versions", callback_data="cmd_view_rules"),
+            ],
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
+    def build_groups_keyboard() -> tuple[str, InlineKeyboardMarkup | None]:
+        groups = get_available_groups()
+        if not groups:
+            return "No groups found within the last 30 days.", None
+
+        keyboard = []
+        for idx, g_name in enumerate(groups):
+            keyboard.append([InlineKeyboardButton(g_name, callback_data=f"grp_sel_{idx}")])
+
+        return "Select a group:", InlineKeyboardMarkup(keyboard)
+
+    def build_group_date_keyboard(group_idx: int, group_name: str) -> tuple[str, InlineKeyboardMarkup]:
+        keyboard = [
+            [
+                InlineKeyboardButton("Today", callback_data=f"grp_day_{group_idx}_today"),
+                InlineKeyboardButton("Yesterday", callback_data=f"grp_day_{group_idx}_yesterday"),
+            ],
+            [
+                InlineKeyboardButton("Back to Groups", callback_data="cmd_list_groups"),
+            ],
+        ]
+        return f"Group: {group_name}\nSelect date for daily report:", InlineKeyboardMarkup(keyboard)
+
+    async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        message = update.message
+        if not message or message.chat.type != "private":
+            return
+
+        if message.from_user.id != ADMIN_USER_ID:
+            await message.reply_text("Unauthorized.")
+            return
+
+        parts = message.text.split(maxsplit=1)
+        cmd = parts[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if cmd in ["/start", "/menu"]:
+            await message.reply_text(
+                "Quick Menu ပါရှင်",
+                reply_markup=build_main_menu_keyboard()
+            )
+            return
+
+        if cmd == "/rules":
+            reply_text = await asyncio.to_thread(get_skill_versions_summary, message.from_user.id)
+            await send_long_message(message, reply_text)
+            return
+
+        if cmd == "/setrule":
+            if not arg:
+                await message.reply_text("/setrule <ထပ်ထည့်လိုသည့် rule> လို့ ရေးပေးပါရှင်")
+                return
+            reply_text = await asyncio.to_thread(update_core_rule_version, message.from_user.id, arg,
+                                                 "Added via /setrule")
+            await send_long_message(message, reply_text)
+            return
+
+        if cmd == "/patch":
+            if "<<<OLD>>>" not in arg or "<<<NEW>>>" not in arg:
+                await message.reply_text(
+                    "အသုံးပြုပုံ:\n"
+                    "/patch main.py | commit message\n"
+                    "<<<OLD>>>\nမူရင်း code\n<<<NEW>>>\nအသစ်ပြင်မယ့် code"
+                )
+                return
+            header_part, rest_part = arg.split("<<<OLD>>>", 1)
+            old_part, new_part = rest_part.split("<<<NEW>>>", 1)
+            header_tokens = [x.strip() for x in header_part.strip().split("|", 1)]
+            target_file = header_tokens[0] or "main.py"
+            c_msg = header_tokens[1] if len(header_tokens) > 1 and header_tokens[1] else f"Patch {target_file} via Maya"
+
+            clean_old = old_part.strip("\r\n")
+            clean_new = new_part.strip("\r\n")
+            if target_file.endswith(".py"):
+                try:
+                    ast.parse(clean_new)
+                except SyntaxError as se:
+                    await message.reply_text(f"❌ NEW code မှာ syntax error ရှိနေပါတယ်ရှင် — line {se.lineno}: {se.msg}")
+                    return
+
+            import uuid
+            req_id = uuid.uuid4().hex[:10]
+            _PENDING_GITHUB_ACTIONS[req_id] = {
+                "kind": "patch",
+                "file_path": target_file,
+                "old_text": clean_old,
+                "new_text": clean_new,
+                "commit_message": c_msg,
+                "branch": GITHUB_BRANCH,
+                "created_ts": time.time(),
+            }
+            preview_msg = (
+                f"⚠️ GitHub Patch အတည်ပြုချက် လိုအပ်ပါတယ်ရှင်\n"
+                f"• File: `{target_file}` (`{GITHUB_BRANCH}`)\n"
+                f"• Commit: `{c_msg}`\n"
+                f"• OLD length: {len(clean_old)} chars → NEW length: {len(clean_new)} chars"
+            )
+            kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Confirm Commit", callback_data=f"gh_ok:{req_id}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"gh_no:{req_id}"),
+                ]
+            ])
+            await message.reply_text(preview_msg, reply_markup=kb)
+            return
+
+        if cmd == "/getfile":
+            target_file = arg or "main.py"
+            await context.bot.send_chat_action(chat_id=message.chat_id, action="upload_document")
+            res = await asyncio.to_thread(get_github_file, target_file, GITHUB_BRANCH)
+            if not res.get("ok"):
+                await message.reply_text(f"❌ File ပြန်ယူရာမှာ အဆင်မပြေ ဖြစ်သွားပါတယ်ရှင်:\n{res.get('error')}")
+                return
+
+            content_bytes = (res.get("content") or "").encode("utf-8")
+            safe_filename = os.path.basename(res.get("path") or target_file) or "file.txt"
+            bio = io.BytesIO(content_bytes)
+            bio.name = safe_filename
+            await message.reply_document(
+                document=bio,
+                filename=safe_filename,
+                caption=f"📄 {res.get('path')} ({GITHUB_BRANCH}) — GitHub မှ ပြန်ယူပေးထားပါတယ်ရှင်",
+            )
+            return
+
+        if cmd == "/addtask":
+            if not arg:
+                await message.reply_text("/addtask <task description> လို့ ရေးပေးပါရှင်")
+                return
+            parsed = smart_route_and_parse(arg, [])
+            clean_title = parsed.get("clean_title") or _clean_task_title_fallback(arg)
+            remind_dt = parsed.get("remind_dt")
+            reason = parsed.get("reason")
+            repeat_mode = parsed.get("repeat_type", "once")
+            add_task(clean_title, remind_dt, reason=reason, repeat_type=repeat_mode)
+            await message.reply_text(_format_single_task_added(clean_title, remind_dt, reason, repeat_mode, arg))
+            return
+
+        await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
+
+        if cmd == "/summary":
+            reply_text = get_group_report("unread summary")
+            await send_long_message(message, reply_text)
+        elif cmd == "/today":
+            reply_text = get_group_report("today summary", day_mode="today")
+            await send_long_message(message, reply_text)
+        elif cmd == "/yesterday":
+            reply_text = get_group_report("yesterday summary", day_mode="yesterday")
+            await send_long_message(message, reply_text)
+        elif cmd == "/groups":
+            text, markup = build_groups_keyboard()
+            await message.reply_text(text, reply_markup=markup)
+        elif cmd == "/news":
+            reply_text = await asyncio.to_thread(get_myanmar_news_summary, False)
+            await send_long_message(message, reply_text)
+        elif cmd == "/tasks":
+            await send_long_message(message, get_formatted_tasks())
+
+    async def handle_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        if not query:
+            return
+
+        if query.from_user.id != ADMIN_USER_ID:
+            await query.answer("Unauthorized.", show_alert=True)
+            return
+
+        await query.answer()
+        data = (query.data or "").strip()
+
+        if data.startswith("gh_ok:") or data.startswith("gh_no:"):
+            action_type, req_id = data.split(":", 1)
+            pending = _PENDING_GITHUB_ACTIONS.pop(req_id, None)
+            await query.edit_message_reply_markup(reply_markup=None)
+
+            if not pending:
+                await query.message.reply_text("ဒီ Commit request က သက်တမ်းကုန်သွားပါပြီ (သို့မဟုတ်) ပြီးသွားပါပြီရှင်")
+                return
+
+            if (time.time() - float(pending.get("created_ts") or 0)) > 600:
+                await query.message.reply_text("⏰ ၁၀ မိနစ်ကျော်သွားလို့ ဒီ Commit request ကို ပယ်ဖျက်လိုက်ပါပြီရှင်")
+                return
+
+            if action_type == "gh_no":
+                await query.message.reply_text(f"❌ `{pending.get('file_path')}` အတွက် Commit ကို ပယ်ဖျက်လိုက်ပါပြီရှင်")
+                return
+
+            await context.bot.send_chat_action(chat_id=query.message.chat_id, action="typing")
+            if pending.get("kind") == "patch":
+                res = await asyncio.to_thread(
+                    replace_github_snippet,
+                    pending["file_path"],
+                    pending["old_text"],
+                    pending["new_text"],
+                    pending["commit_message"],
+                    pending["branch"],
+                )
+            else:
+                res = await asyncio.to_thread(
+                    upsert_github_file,
+                    pending["file_path"],
+                    pending["content"],
+                    pending["commit_message"],
+                    pending["branch"],
+                )
+
+            if res.get("ok"):
+                await query.message.reply_text(
+                    f"✅ '{res['path']}' ကို ပြင်ဆင်ပြီး `{res['branch']}` ပေါ် commit တင်ပြီးပါပြီရှင် (Commit: `{res['commit']}`)"
+                )
+            else:
+                await query.message.reply_text(f"❌ Commit မအောင်မြင်ပါရှင်:\n{res.get('error')}")
+            return
+
+        # Reminder Quick Action Buttons: Done / Snooze 15 mins
+        if data.startswith("task_done:") or data.startswith("task_snooze15:"):
+            action_key, raw_id = data.split(":", 1)
+            try:
+                task_id = int(raw_id)
+            except ValueError:
+                await query.edit_message_reply_markup(reply_markup=None)
+                return
+
+            try:
+                res = supabase.table("tasks").select("*").eq("id", task_id).limit(1).execute()
+                rows = res.data or []
+                if not rows:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                    await query.message.reply_text("ဒီ Task ကို မတွေ့တော့ပါဘူးရှင်")
+                    return
+
+                row = rows[0]
+                title = row.get("title", "Task")
+                reason = row.get("reason")
+                is_hf = _is_health_or_family_task(title, reason)
+                p = "မောင်ရေ — " if is_hf else ""
+                e = "နော်" if is_hf else "ရှင်"
+
+                if action_key == "task_done":
+                    now_mm = datetime.now(MM_TZ)
+                    repeat_type = (row.get("repeat_type") or "once").strip().lower()
+                    base_dt = now_mm
+                    if row.get("remind_at"):
+                        try:
+                            parsed_r = datetime.fromisoformat(str(row["remind_at"]).replace("Z", "+00:00"))
+                            base_dt = parsed_r.replace(
+                                tzinfo=MM_TZ) if parsed_r.tzinfo is None else parsed_r.astimezone(MM_TZ)
+                        except Exception:
+                            base_dt = now_mm
+
+                    next_dt = _compute_next_repeat_datetime(base_dt, repeat_type, now_mm)
+                    if next_dt:
+                        supabase.table("tasks").update({
+                            "status": "pending",
+                            "remind_at": next_dt.isoformat(),
+                            "reminded": False,
+                        }).eq("id", task_id).execute()
+                        confirm_text = f"{p}\"{title}\" ပြီးသွားပြီမို့ မှတ်ထားလိုက်ပါပြီ — နောက်တစ်ကြိမ် ⏰ {next_dt.strftime('%m-%d %H:%M')} မှာ ထပ်သတိပေးပါမယ်{e}"
+                    else:
+                        try:
+                            supabase.table("tasks").update({
+                                "status": "done",
+                                "reminded": True,
+                                "updated_at": now_mm.isoformat(),
+                            }).eq("id", task_id).execute()
+                        except Exception:
+                            supabase.table("tasks").update({
+                                "status": "done",
+                                "reminded": True,
+                            }).eq("id", task_id).execute()
+                        confirm_text = f"{p}\"{title}\" ပြီးသွားပြီမို့ Done မှတ်လိုက်ပါပြီ{e}"
+
+                    await query.edit_message_reply_markup(reply_markup=None)
+                    await query.message.reply_text(confirm_text)
+
+                elif action_key == "task_snooze15":
+                    snooze_dt = datetime.now(MM_TZ) + timedelta(minutes=15)
+                    supabase.table("tasks").update({
+                        "status": "pending",
+                        "remind_at": snooze_dt.isoformat(),
+                        "reminded": False,
+                    }).eq("id", task_id).execute()
+                    confirm_text = f"{p}\"{title}\" ကို ၁၅ မိနစ် ရွှေ့လိုက်ပါပြီ — ⏰ {snooze_dt.strftime('%H:%M')} မှာ ပြန်သတိပေးပါမယ်{e}"
+                    await query.edit_message_reply_markup(reply_markup=None)
+                    await query.message.reply_text(confirm_text)
+            except Exception as err:
+                print(f"[Reminder Callback Error]: {err}")
+                await query.message.reply_text("Button လုပ်ဆောင်ရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားပါတယ်ရှင်")
+            return
+
+        if data == "cmd_list_groups":
+            text, markup = build_groups_keyboard()
+            await query.message.reply_text(text, reply_markup=markup)
+            return
+
+        if data == "cmd_view_rules":
+            reply_text = await asyncio.to_thread(get_skill_versions_summary, query.from_user.id)
+            await send_long_message(query.message, reply_text)
+            return
+
+        if data.startswith("grp_sel_"):
+            idx = int(data.replace("grp_sel_", ""))
+            groups = get_available_groups()
+            if 0 <= idx < len(groups):
+                text, markup = build_group_date_keyboard(idx, groups[idx])
+                await query.message.reply_text(text, reply_markup=markup)
+            else:
+                await query.message.reply_text("Group not found. Please run /groups again.")
+            return
+
+        await context.bot.send_chat_action(chat_id=query.message.chat_id, action="typing")
+
+        if data == "cmd_unread_summary":
+            reply_text = get_group_report("unread summary")
+        elif data == "cmd_today_summary":
+            reply_text = get_group_report("today summary", day_mode="today")
+        elif data == "cmd_yesterday_summary":
+            reply_text = get_group_report("yesterday summary", day_mode="yesterday")
+        elif data == "cmd_news_summary":
+            reply_text = await asyncio.to_thread(get_myanmar_news_summary, False)
+        elif data == "cmd_list_tasks":
+            reply_text = get_formatted_tasks()
+        elif data.startswith("grp_day_"):
+            parts = data.split("_")
+            idx = int(parts[2])
+            day_mode = parts[3]
+            groups = get_available_groups()
+            if 0 <= idx < len(groups):
+                selected_group = groups[idx]
+                reply_text = get_group_report(exact_group_name=selected_group, day_mode=day_mode)
+            else:
+                reply_text = "Group not found. Please run /groups again."
+        else:
+            reply_text = "Unknown action."
+
+        await send_long_message(query.message, reply_text)
+
+    # --- GitHub Direct Code Update Helpers (No Supabase Storage Used) ---
+    def _github_headers() -> dict:
+        return {
+            "Authorization": f"Bearer {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+
+    def get_github_file(file_path: str, branch: str | None = None) -> dict:
+        clean_path = (file_path or "").strip().lstrip("/")
+        if not GITHUB_TOKEN or not GITHUB_REPO:
+            return {"ok": False, "error": "GITHUB_TOKEN သို့မဟုတ် GITHUB_REPO မသတ်မှတ်ရသေးပါရှင်"}
+        if not clean_path:
+            return {"ok": False, "error": "File path လိုအပ်ပါတယ်ရှင်"}
+
+        ref = branch or GITHUB_BRANCH
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{clean_path}"
+        try:
+            resp = requests.get(url, headers=_github_headers(), params={"ref": ref}, timeout=10)
+            if resp.status_code != 200:
+                return {"ok": False, "error": f"GitHub read failed ({resp.status_code}): {resp.text[:180]}"}
+            data = resp.json()
+            raw_b64 = (data.get("content") or "").replace("\n", "")
+            content_str = base64.b64decode(raw_b64).decode("utf-8") if raw_b64 else ""
+            return {"ok": True, "path": clean_path, "sha": data.get("sha"), "content": content_str}
+        except Exception as e:
+            return {"ok": False, "error": f"GitHub read error: {type(e).__name__}: {str(e)[:150]}"}
+
+    def upsert_github_file(
+            file_path: str,
+            new_content: str,
+            commit_message: str = "Update file via Maya AI Agent",
+            branch: str | None = None,
+    ) -> dict:
+        clean_path = (file_path or "").strip().lstrip("/")
+        if not GITHUB_TOKEN or not GITHUB_REPO:
+            return {"ok": False, "error": "GITHUB_TOKEN သို့မဟုတ် GITHUB_REPO မသတ်မှတ်ရသေးပါရှင်"}
+        if clean_path not in ALLOWED_GITHUB_FILES:
+            return {"ok": False, "error": f"'{clean_path}' ကို ခွင့်ပြုထားသည့် file စာရင်းထဲ ထည့်မထားပါရှင်"}
+
+        if clean_path.endswith(".py"):
+            try:
+                ast.parse(new_content)
+            except SyntaxError as se:
+                return {"ok": False,
+                        "error": f"Python syntax error ရှိနေလို့ commit မတင်ခဲ့ပါဘူး — line {se.lineno}: {se.msg}"}
+
+        ref = branch or GITHUB_BRANCH
+        existing = get_github_file(clean_path, branch=ref)
+        sha = existing.get("sha") if existing.get("ok") else None
+
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{clean_path}"
+        encoded = base64.b64encode(new_content.encode("utf-8")).decode("ascii")
+        payload = {
+            "message": commit_message[:120] or "Update file via Maya AI Agent",
+            "content": encoded,
+            "branch": ref,
+        }
+        if sha:
+            payload["sha"] = sha
+
+        try:
+            resp = requests.put(url, headers=_github_headers(), json=payload, timeout=15)
+            if resp.status_code not in (200, 201):
+                return {"ok": False, "error": f"GitHub commit failed ({resp.status_code}): {resp.text[:180]}"}
+            res_json = resp.json()
+            commit_sha = ((res_json.get("commit") or {}).get("sha") or "")[:7]
+            return {"ok": True, "path": clean_path, "commit": commit_sha, "branch": ref}
+        except Exception as e:
+            return {"ok": False, "error": f"GitHub commit error: {type(e).__name__}: {str(e)[:150]}"}
+
+    def replace_github_snippet(
+            file_path: str,
+            old_text: str,
+            new_text: str,
+            commit_message: str = "Patch via Maya AI Agent",
+            branch: str | None = None,
+    ) -> dict:
+        clean_path = (file_path or "").strip().lstrip("/")
+        if clean_path not in ALLOWED_GITHUB_FILES:
+            return {"ok": False, "error": f"'{clean_path}' ကို ခွင့်ပြုထားသည့် file စာရင်းထဲ ထည့်မထားပါရှင်"}
+        if not old_text:
+            return {"ok": False, "error": "အစားထိုးမယ့် မူရင်းစာသား (old_text) လိုအပ်ပါတယ်ရှင်"}
+
+        current = get_github_file(clean_path, branch=branch)
+        if not current.get("ok"):
+            return current
+
+        original_content = current.get("content", "")
+        match_count = original_content.count(old_text)
+        if match_count == 0:
+            return {"ok": False, "error": "အစားထိုးမယ့် မူရင်းစာသားကို file ထဲမှာ မတွေ့ပါဘူးရှင်"}
+        if match_count > 1:
+            return {"ok": False, "error": f"တူညီနေတဲ့ စာသား {match_count} နေရာ တွေ့နေပါတယ်၊ ပိုတိကျအောင် ထည့်ပေးပါရှင်"}
+
+        updated_content = original_content.replace(old_text, new_text, 1)
+        return upsert_github_file(clean_path, updated_content, commit_message=commit_message, branch=branch)
+
+    async def _handle_py_document_github_upload(message, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        doc = message.document
+        if not doc:
+            return False
+
+        file_name = (doc.file_name or "").strip()
+        if not file_name.endswith(".py"):
+            return False
+
+        if file_name not in ALLOWED_GITHUB_FILES:
+            await message.reply_text(
+                f"'{file_name}' ကို GitHub upload ခွင့်ပြုထားသည့် ဖိုင်စာရင်းထဲ ထည့်မထားပါရှင် "
+                f"({', '.join(sorted(ALLOWED_GITHUB_FILES))})"
+            )
+            return True
+
+        await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
+        try:
+            tg_file = await doc.get_file()
+            raw_bytes = bytes(await tg_file.download_as_bytearray())
+            code_text = raw_bytes.decode("utf-8")
+        except Exception as e:
+            await message.reply_text(f"ဖိုင်ကို ဖတ်ယူရာမှာ အခက်အခဲ ရှိနေပါတယ်ရှင်: {type(e).__name__}")
+            return True
+
+        caption = (message.caption or "").strip()
+        commit_msg = caption[:120] if caption else f"Update {file_name} via Maya"
+        result = await asyncio.to_thread(upsert_github_file, file_name, code_text, commit_msg, GITHUB_BRANCH)
+
+        if result.get("ok"):
+            await message.reply_text(
+                f"✅ '{result['path']}' ကို `{result['branch']}` branch ပေါ်သို့ GitHub တင်ပြီးပါပြီရှင် "
+                f"(Commit: `{result['commit']}`, Storage မသုံးပါ)"
+            )
+        else:
+            await message.reply_text(f"❌ GitHub တင်ရာမှာ အဆင်မပြေ ဖြစ်သွားပါတယ်ရှင်:\n{result.get('error')}")
+        return True
+
+    # --- General Telegram Message Handler (Single Smart 5-Intent Intelligence) ---
+    async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        message = update.message
+        if not message:
+            return
+
+        chat_type = message.chat.type
+        sender_name = message.from_user.first_name if message.from_user else "Unknown"
+        group_name = message.chat.title if chat_type in ["group", "supergroup"] else "Private"
+
+        # CASE A: Group Messages (Silent observer logger with quota-saving media cap)
+        if chat_type in ["group", "supergroup"]:
+            content_summary = ""
+
+            if message.text:
+                content_summary = message.text
+            elif message.photo:
+                if _can_use_group_media_ai():
+                    photo_file = await message.photo[-1].get_file()
+                    photo_bytes = await photo_file.download_as_bytearray()
+                    img_prompt = "ဒီပုံထဲမှာ ပါဝင်တဲ့ အဓိက အချက်အလက်များ၊ စာသားများ သို့မဟုတ် လုပ်ငန်းဆိုင်ရာ အခြေအနေများကို အတိုချုံး ဖော်ပြပေးပါ။"
+                    img_summary = call_ai_with_3tier_fallback(img_prompt, image_bytes=photo_bytes,
+                                                              mime_type='image/jpeg')
+                    content_summary = f"[Photo] {img_summary}"
+                else:
+                    content_summary = "[Photo] (AI quota saving: media logged without AI vision call)"
+            elif message.document:
+                if _can_use_group_media_ai():
+                    doc_file = await message.document.get_file()
+                    doc_bytes = await doc_file.download_as_bytearray()
+                    doc_prompt = "ဒီဖိုင်ထဲပါတဲ့ အဓိက အကြောင်းအရာနဲ့ အရေးကြီးတဲ့ အချက်တွေကို အနှစ်ချုပ်ပေးပါ။"
+                    doc_summary = call_ai_with_3tier_fallback(doc_prompt, image_bytes=doc_bytes,
+                                                              mime_type=message.document.mime_type or 'application/pdf')
+                    content_summary = f"[Document: {message.document.file_name}] {doc_summary}"
+                else:
+                    content_summary = f"[Document: {message.document.file_name}] (AI quota saving: file logged without AI call)"
+
+            if content_summary:
+                supabase.table("raw_logs").insert({
+                    "group_name": group_name,
+                    "sender_name": sender_name,
+                    "content_summary": content_summary,
+                    "is_read": False
+                }).execute()
+                cleanup_old_raw_logs()
+
+            return
+
+        # CASE B: Private Chat (Single-user ADMIN_USER_ID restricted)
+        if chat_type == "private":
+            if message.from_user.id != ADMIN_USER_ID:
+                await message.reply_text("Unauthorized.")
+                return
+
+            if message.document:
+                handled = await _handle_py_document_github_upload(message, context)
+                if handled:
+                    return
+
+            user_message = message.text
+            if not user_message:
+                return
+
+            await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
+
+            try:
+                save_chat_message(message.from_user.id, "user", user_message)
+
+                stripped_lower = user_message.strip().lower()
+                if stripped_lower in ["menu", "help"]:
+                    await message.reply_text("Quick Menu ပါရှင်", reply_markup=build_main_menu_keyboard())
+                    return
+
+                if stripped_lower in ["မာယာ", "maya", "hi", "hello", "hey", "မင်္ဂလာပါ"]:
+                    memory_ctx = await asyncio.to_thread(recall_relevant_history, message.from_user.id, user_message, 4,
+                                                         2)
+                    greet_prompt = (
+                        "မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု လုံးဝ မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။ "
+                        "နှုတ်ဆက်/ခေါ်နေပါသည်။ လက်ရှိ လေ့လာမှတ်သားထားသော Locked Core Rules/Profile/Preferences/Conversation ရှိလျှင် အလိုက်သိသိ "
+                        f"ရင်းနှီးဖော်ရွေစွာ နှုတ်ဆက်ပြီး ဘာကူညီပေးနိုင်မလဲ တိုတိုရှင်းရှင်း မြန်မာဘာသာဖြင့် ဖြေပါ။\n\n{memory_ctx}"
+                    )
+                    reply_text = await asyncio.to_thread(call_ai_with_3tier_fallback, greet_prompt, None, None, False)
+                    save_chat_message(message.from_user.id, "assistant", reply_text)
+                    await send_long_message(message, reply_text)
+                    return
+
+                if any(k in stripped_lower for k in
+                       ["news summary", "daily news", "သတင်း အနှစ်ချုပ်", "သတင်းအနှစ်ချုပ်", "မြန်မာသတင်း အနှစ်ချုပ်"]):
+                    reply_text = await asyncio.to_thread(get_myanmar_news_summary, False)
+                    save_chat_message(message.from_user.id, "assistant", reply_text)
+                    await send_long_message(message, reply_text)
+                    return
+
+                recent_ctx = await asyncio.to_thread(get_recent_history_for_router, message.from_user.id, 6)
+                available_groups = await asyncio.to_thread(get_available_groups)
+                user_pref_ctx = await asyncio.to_thread(get_user_profile, message.from_user.id)
+
+                route = await asyncio.to_thread(
+                    smart_route_and_parse, user_message, available_groups, recent_ctx, user_pref_ctx
+                )
+                intent = route.get("intent", "GENERAL")
+                print(
+                    f"[Smart Route] intent={intent}, mode={route.get('group_mode')}, action={route.get('task_action')}, group={route.get('group_name')}")
+
+                if intent == "TASK":
+                    reply_text = await asyncio.to_thread(handle_task_intent, user_message, route)
+                elif intent == "GROUP":
+                    if any(w in user_message for w in ["task မဟုတ်ဘူး", "မဟုတ်ဘူးလေ"]):
+                        await asyncio.to_thread(delete_latest_pending_task)
+                    reply_text = await asyncio.to_thread(
+                        handle_group_intent, message.from_user.id, user_message, route, recent_ctx
+                    )
+                elif intent == "WEB_SEARCH":
+                    reply_text = await asyncio.to_thread(
+                        answer_with_universal_search,
+                        message.from_user.id,
+                        user_message,
+                        recent_ctx,
+                        route.get("search_query"),
+                    )
+                elif intent == "ADVICE":
+                    reply_text = await asyncio.to_thread(
+                        handle_advice_or_general_intent, message.from_user.id, user_message, "ADVICE"
+                    )
+                else:
+                    reply_text = await asyncio.to_thread(
+                        handle_advice_or_general_intent, message.from_user.id, user_message, "GENERAL"
+                    )
+
+                save_chat_message(message.from_user.id, "assistant", reply_text)
+                asyncio.create_task(
+                    asyncio.to_thread(evolve_user_profile, message.from_user.id, user_message, reply_text))
+                await send_long_message(message, reply_text)
+
+            except Exception as e:
+                await send_long_message(message,
+                                        "လောလောဆယ် အဖြေပြန်ထုတ်ရာမှာ ခဏအခက်အခဲ ရှိနေပါတယ်ရှင်၊ နောက်မှ ထပ်မေးကြည့်ပါ")
+                print(f"Error in handle_message: {e}")
+
+    async def main_async():
+        threading.Thread(target=run_health_server, daemon=True).start()
+
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+        # Slash Commands
+        application.add_handler(
+            CommandHandler(
+                ["start", "menu", "summary", "today", "yesterday", "groups", "news", "tasks", "addtask", "getfile",
+                 "rules", "setrule", "patch"],
+                handle_command,
+            )
+        )
+        # Inline Button Clicks
+        application.add_handler(CallbackQueryHandler(handle_button_callback))
+        # Voice / Audio Messages
+        application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice_message))
+        # Normal Messages
+        application.add_handler(
+            MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.VOICE & ~filters.AUDIO, handle_message))
+
+        # Scheduled Jobs (9:00 AM News, Due Reminders + Repeat Reschedule + 30d Cleanup, 6:00 PM Digest, 30s Follow-up)
+        if application.job_queue:
+            morning_9_mmt = dt_time(hour=9, minute=0, second=0, tzinfo=MM_TZ)
+            application.job_queue.run_daily(
+                scheduled_morning_news_job,
+                time=morning_9_mmt,
+                name="daily_9am_myanmar_news"
+            )
+            application.job_queue.run_repeating(
+                check_due_task_reminders_job,
+                interval=60,
+                first=15,
+                name="due_task_reminders_watcher"
+            )
+            evening_6_mmt = dt_time(hour=18, minute=0, second=0, tzinfo=MM_TZ)
+            application.job_queue.run_daily(
+                scheduled_evening_task_digest_job,
+                time=evening_6_mmt,
+                name="daily_6pm_pending_task_digest"
+            )
+            application.job_queue.run_repeating(
+                check_pending_followups_job,
+                interval=30,
+                first=20,
+                name="pending_followups_watcher"
+            )
+
+        await application.initialize()
+
+        # English Bot Commands Menu
+        await application.bot.set_my_commands([
+            BotCommand("menu", "Quick menu buttons"),
+            BotCommand("summary", "Unread group summary"),
+            BotCommand("today", "Today group summary"),
+            BotCommand("yesterday", "Yesterday group summary"),
+            BotCommand("groups", "Select group report"),
+            BotCommand("news", "Latest Myanmar news summary"),
+            BotCommand("tasks", "View current tasks"),
+            BotCommand("addtask", "Add a new task"),
+            BotCommand("rules", "View locked core rules & versions"),
+            BotCommand("setrule", "Add a new versioned core rule"),
+        ])
+
+        print("🤖 Maya AI Agent started...")
+
+        await application.start()
+        if ADMIN_USER_ID:
+            try:
+                now_boot = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
+                await application.bot.send_message(
+                    chat_id=ADMIN_USER_ID,
+                    text=f"🚀 Maya AI Agent Render ပေါ်မှာ Auto-Deploy ပြီးစီးပြီး Online ဖြစ်သွားပါပြီရှင် ({now_boot})",
+                )
+            except Exception as boot_err:
+                print(f"[Startup Notify Error]: {boot_err}")
+        await application.updater.start_polling()
+
+        stop_signal = asyncio.Event()
+        await stop_signal.wait()
+
+    def main():
+        try:
+            asyncio.run(main_async())
+        except KeyboardInterrupt:
+            pass
+
+    if __name__ == "__main__":
+        main()
