@@ -67,11 +67,19 @@ STRICT_MYANMAR_SYSTEM = (
     "User Profile / Style Preferences ထဲမှ လေ့လာမှတ်သားထားသည့် စကားပြောဟန်အတိုင်း ပြောဆိုပါ။ "
     "'မောင်' ဟူသော အသုံးအနှုန်းကို ဆေးသောက်ရန် နှင့် မိသားစု/ကလေးများနှင့် ပတ်သက်သော Task/Reminder များတွင်သာ သုံးပါ။ "
     "အခြား Task များ၊ လုပ်ငန်း/Group Summary များ၊ Web Search များနှင့် အခြားစကားပြောမှုများတွင် 'မောင်' ဟု မသုံးဘဲ ပုံမှန် မာယာ ပြောသလို သဘာဝကျကျ ပြောပါ။ "
-    "မလိုအပ်ဘဲ နိုင်ငံခြားစာလုံး/သင်္ကေတများ ရောနှောခြင်းကို လုံးဝ ရှောင်ကြဉ်ပါ။ "
+    "မိမိကိုယ်ကို 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်။ "
     "အသုံးပြုသူ၏ Locked Core Rules၊ Profile၊ Style Preferences၊ အတိတ်မှတ်တမ်းနှင့် မြန်မာပြက္ခဒိန်အချက်အလက်များကို "
     "သေချာမှတ်မိပြီး အလိုက်သိသိနှင့် ဖြေပါ။ "
     "မေးခွန်းနှင့် မသက်ဆိုင်သော Search အချက်အလက်များကို လုံးဝ မသုံးပါနှင့်။ မသေချာပါက မသိကြောင်း ရိုးသားစွာ ဖြေပါ။"
 )
+
+
+def _clean_maya_voice(text: str) -> str:
+    """Fallback model များက ယောက်ျားလေးအသုံးအနှုန်း မှားသုံးမိရင် မာယာဟန် ပြန်ပြင်ပေးသည်။"""
+    if not text:
+        return text
+    text = text.replace("ကျွန်တော့်", "မာယာ့").replace("ကျွန်တော်", "မာယာ")
+    return text
 
 
 def _is_health_or_family_task(text: str, reason: str | None = None) -> bool:
@@ -108,7 +116,7 @@ async def send_long_message(message, text: str, chunk_size: int = 3500):
         await message.reply_text("လောလောဆယ် အဖြေပြန်ထုတ်ရာမှာ ခဏအခက်အခဲ ရှိနေပါတယ်၊ နောက်မှ ထပ်မေးကြည့်ပါရှင်")
         return
 
-    clean_text = str(text).strip()
+    clean_text = _clean_maya_voice(str(text).strip())
     if len(clean_text) <= chunk_size:
         await message.reply_text(clean_text)
         return
@@ -127,7 +135,7 @@ def cleanup_old_raw_logs():
         print(f"Error cleaning up old raw_logs: {e}")
 
 
-# --- Pure Python Myanmar Calendar Helper ---
+# --- Pure Python Myanmar Calendar Helper (Primarily for Tasks & Calendar Queries) ---
 def _julian_day_from_gregorian(year: int, month: int, day: int) -> int:
     a = (14 - month) // 12
     y = year + 4800 - a
@@ -189,7 +197,7 @@ def _calculate_myanmar_date(dt_mm: datetime) -> dict:
     is_new_moon = (m_day_int == m_len)
     is_sabbath = (fortnight_day in [8, 15]) or is_full_moon or is_new_moon
 
-    wd = dt_mm.weekday()  # 0=Mon .. 6=Sun
+    wd = dt_mm.weekday()
     is_yatyaza = (
         (cur_m_idx in [0, 3, 6, 9] and wd in [1, 5]) or
         (cur_m_idx in [1, 4, 7, 10] and wd in [3, 6]) or
@@ -260,7 +268,7 @@ def save_chat_message(user_id: int, role: str, content: str):
 
 
 def _sanitize_core_rules(raw_rules: str) -> str:
-    """အရင် DB ထဲမှာ ပုံသေ 'နော်' စည်းမျဉ်း ကျန်နေသေးရင် အလိုအလျောက် ဖယ်ရှားပေးသည်။"""
+    """အရင် DB ထဲမှာ ပုံသေစကားလုံးစည်းမျဉ်းဟောင်း ကျန်နေသေးရင် ဖယ်ရှားပေးသည်။"""
     text = (raw_rules or "").strip()
     if not text:
         return DEFAULT_CORE_RULES
@@ -436,7 +444,7 @@ def _call_json_intelligence(prompt: str) -> dict | None:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.0,
-            max_tokens=300,
+            max_tokens=320,
         )
         raw_groq = (completion.choices[0].message.content or "").strip()
         return _extract_json_from_text(raw_groq)
@@ -463,7 +471,7 @@ Assistant: {assistant_reply[:400]}
 
 Return ONLY valid JSON with two concise fields in Burmese (max ~150 words each):
 1. "profile_summary": Key facts, work context, recurring topics, and routing clarifications. Drop outdated/contradictory trivia.
-2. "style_preferences": Natural tone/persona preferences learned from conversation (e.g. natural female Burmese assistant voice like 'ရှင်', concise formatting). Do NOT add rigid sentence-ending rules like forcing 'နော်'.
+2. "style_preferences": Natural female Burmese assistant tone/style preferences learned from conversation (e.g. 'ရှင်', warm/natural phrasing, no forced sentence-ending words).
 
 JSON format:
 {{"profile_summary":"...","style_preferences":"..."}}
@@ -594,7 +602,7 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 8
     return "\n\n".join(sections)
 
 
-# --- Resilient Multi-Tier AI Fallback Helper (Gemini -> OpenRouter Multi-Free -> Groq Active) ---
+# --- Resilient Multi-Tier AI Fallback Helper (Gemini -> OpenRouter + Qwen 3.8 27B -> Groq + Qwen 3.8 27B) ---
 def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, use_google_search=False):
     errors = []
     contents = (
@@ -616,7 +624,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
                 config=config
             )
             if response and response.text and response.text.strip():
-                return response.text.strip()
+                return _clean_maya_voice(response.text.strip())
         except Exception as e:
             err_msg = f"T1({attempt+1}): {type(e).__name__} - {str(e)[:90]}"
             print(err_msg)
@@ -634,18 +642,18 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
             config=config
         )
         if response and response.text and response.text.strip():
-            return response.text.strip()
+            return _clean_maya_voice(response.text.strip())
     except Exception as e:
         err_msg = f"T2: {type(e).__name__} - {str(e)[:90]}"
         print(err_msg)
         errors.append(err_msg)
 
-    # Tier 3A: OpenRouter Free Models (Try primary then secondary free model)
+    # Tier 3A: OpenRouter (Qwen 3.8 27B + Free Fallbacks)
     if OPENROUTER_API_KEY:
         openrouter_models = [
+            "qwen/qwen3.8-27b",
             "google/gemma-4-31b-it:free",
             "meta-llama/llama-3.3-70b-instruct:free",
-            "openrouter/free",
         ]
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -659,7 +667,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
                         {"role": "system", "content": STRICT_MYANMAR_SYSTEM},
                         {"role": "user", "content": prompt_text}
                     ],
-                    "temperature": 0.25,
+                    "temperature": 0.4,
                 }
                 response = requests.post(
                     "https://openrouter.ai/api/v1/chat/completions",
@@ -671,7 +679,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
                 if "choices" in res_json and len(res_json["choices"]) > 0:
                     txt = (res_json["choices"][0]["message"].get("content") or "").strip()
                     if txt:
-                        return txt
+                        return _clean_maya_voice(txt)
                 else:
                     errors.append(f"T3A({or_model}): {str(res_json)[:90]}")
             except Exception as e:
@@ -679,8 +687,8 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
                 print(err_msg)
                 errors.append(err_msg)
 
-    # Tier 3B: Groq Active Models (Avoid deprecated 404 model IDs)
-    groq_models = ["llama-3.1-8b-instant", "gemma2-9b-it"]
+    # Tier 3B: Groq (Qwen 3.8 27B + Active Fallback)
+    groq_models = ["qwen/qwen3.8-27b", "llama-3.1-8b-instant"]
     for g_model in groq_models:
         try:
             completion = groq_client.with_options(timeout=12.0).chat.completions.create(
@@ -689,12 +697,12 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
                     {"role": "system", "content": STRICT_MYANMAR_SYSTEM},
                     {"role": "user", "content": prompt_text}
                 ],
-                temperature=0.25,
+                temperature=0.4,
             )
             if completion and completion.choices and completion.choices[0].message.content:
                 txt = completion.choices[0].message.content.strip()
                 if txt:
-                    return txt
+                    return _clean_maya_voice(txt)
         except Exception as e:
             err_msg = f"T3B({g_model}): {type(e).__name__} - {str(e)[:90]}"
             print(err_msg)
@@ -811,12 +819,14 @@ def smart_route_and_parse(
     user_pref_ctx: str = "",
 ) -> dict:
     now_mm = datetime.now(MM_TZ)
-    weekday_mm = MYANMAR_WEEKDAYS[now_mm.weekday()]
+    cal_info = get_myanmar_calendar_context(now_mm)
     groups_str = ", ".join(available_groups[:25]) if available_groups else "None"
 
     prompt = f"""
 Understand the user's intent naturally from meaning and conversation context (not rigid keywords).
-Current Myanmar Time: {now_mm.strftime('%Y-%m-%d (%A) %H:%M MMT')} ({weekday_mm})
+Calendar Context (especially useful for tasks/reminders):
+{cal_info}
+
 Available Telegram Groups: [{groups_str}]
 
 User Preferences & Locked Rules:
@@ -832,7 +842,10 @@ Classify into ONE primary intent:
 - "GROUP": Asking about anything discussed/reported/shared in Telegram groups, asking for a group summary/report, or correcting a misrouted group query.
 - "ADVICE": Seeking recommendations, options, how-to guidance, or decision support.
 - "GENERAL": Translating, drafting, explaining concepts, recalling personal chat/profile, or casual chat.
-- "WEB_SEARCH": Looking up external/live/current facts, news, weather, prices, entertainment, or web info not from private/group logs.
+- "WEB_SEARCH": Looking up external/live/current facts, news, sports/scores, weather, prices, or web info not from private/group logs.
+
+If intent is "WEB_SEARCH", also output:
+- "search_query": A self-contained search query combining Recent Conversation context if the user says a follow-up like "Yes, ရှာပေးပါ" or "အသေးစိတ် ရှာပေးပါ" (e.g. "Chelsea match result yesterday").
 
 If intent is "TASK", also extract:
 - "task_action": "add" | "done" | "list" | "cancel_last"
@@ -849,6 +862,7 @@ If intent is "GROUP", also extract:
 Return ONLY valid JSON:
 {{
   "intent": "TASK|GROUP|ADVICE|GENERAL|WEB_SEARCH",
+  "search_query": null,
   "task_action": "add",
   "clean_title": null,
   "reason": null,
@@ -863,6 +877,7 @@ Return ONLY valid JSON:
     if not parsed:
         return {
             "intent": "GENERAL",
+            "search_query": None,
             "task_action": "add",
             "clean_title": _clean_task_title_fallback(user_message),
             "reason": None,
@@ -909,8 +924,12 @@ Return ONLY valid JSON:
     raw_reason = parsed.get("reason")
     reason = str(raw_reason).strip() if raw_reason else None
 
+    raw_sq = parsed.get("search_query")
+    search_query = str(raw_sq).strip() if raw_sq else None
+
     return {
         "intent": intent,
+        "search_query": search_query,
         "task_action": str(parsed.get("task_action") or "add").lower().strip(),
         "clean_title": clean_title,
         "reason": reason,
@@ -1374,42 +1393,42 @@ async def check_pending_followups_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"Error in check_pending_followups_job: {e}")
 
 
-# --- Direct Web Search Helpers (Tavily + Google Search Grounding, No RSS) ---
-def _tavily_worker(search_query: str, max_results: int = 5) -> str:
+# --- Direct Web Search Helper (Tavily + Google Search Grounding) ---
+def _tavily_worker(search_query: str, max_results: int = 6, exclude_social: bool = True) -> str:
     if not TAVILY_API_KEY:
         return ""
     try:
-        resp = requests.post(
-            "https://api.tavily.com/search",
-            json={
-                "api_key": TAVILY_API_KEY,
-                "query": search_query,
-                "search_depth": "basic",
-                "topic": "news",
-                "days": 2,
-                "max_results": max_results,
-                "include_answer": "advanced",
-            },
-            timeout=7,
-        )
+        payload = {
+            "api_key": TAVILY_API_KEY,
+            "query": search_query,
+            "search_depth": "advanced",
+            "topic": "news",
+            "days": 2,
+            "max_results": max_results,
+            "include_answer": "advanced",
+        }
+        if exclude_social:
+            payload["exclude_domains"] = ["youtube.com", "m.youtube.com", "facebook.com", "tiktok.com"]
+
+        resp = requests.post("https://api.tavily.com/search", json=payload, timeout=9)
         if resp.status_code != 200:
             return ""
         data = resp.json()
         lines = []
         if data.get("answer"):
-            lines.append(f"[Tavily Summary]: {data['answer']}")
+            lines.append(f"[Summary]: {data['answer']}")
         for r in data.get("results", []):
             title = r.get("title", "")
             url = r.get("url", "")
-            content = (r.get("content", "") or "")[:240]
+            content = (r.get("content", "") or "")[:400]
             lines.append(f"- {title} ({url}): {content}")
         return "\n".join(lines)
     except Exception as e:
-        print(f"Tavily fast search error: {e}")
+        print(f"Tavily search error: {e}")
         return ""
 
 
-# --- Trusted Local & International Outlets Myanmar News Summary (/news & 9:00 AM Daily Job) ---
+# --- Dedicated Myanmar News Summary (Local & Independent + International Coverage) ---
 def get_myanmar_news_summary() -> str:
     """
     Web Search (Tavily + Google Search grounding) မှတစ်ဆင့်
@@ -1420,11 +1439,10 @@ def get_myanmar_news_summary() -> str:
     now_mm = datetime.now(MM_TZ)
     now_str = now_mm.strftime("%Y-%m-%d %H:%M MMT")
     today_date = now_mm.strftime("%Y-%m-%d")
-    cal_info = get_myanmar_calendar_context(now_mm)
 
     local_query = (
-        f"Myanmar latest news {today_date} "
-        f"Irrawaddy Myanmar Now Mizzima Frontier Khit Thit Media"
+        f"Myanmar news events {today_date} "
+        f"Irrawaddy Myanmar Now Mizzima Frontier Khit Thit"
     )
     intl_query = (
         f"Myanmar news {today_date} "
@@ -1435,8 +1453,8 @@ def get_myanmar_news_summary() -> str:
     intl_web_raw = ""
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        f_local = executor.submit(_tavily_worker, local_query, 5)
-        f_intl = executor.submit(_tavily_worker, intl_query, 5)
+        f_local = executor.submit(_tavily_worker, local_query, 6, True)
+        f_intl = executor.submit(_tavily_worker, intl_query, 6, True)
         try:
             local_web_raw = f_local.result() or ""
         except Exception as e:
@@ -1450,24 +1468,21 @@ def get_myanmar_news_summary() -> str:
 
     prompt = f"""
     လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)
-    ပြက္ခဒိန် အချက်အလက်:
-    {cal_info}
 
-    မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်)။
-    Web Search ရလဒ်များနှင့် Google Search တို့ကို အသုံးပြု၍ လွန်ခဲ့သည့် ၂၄ နာရီအတွင်း မြန်မာပြည်နှင့် ပတ်သက်သည့်
-    အရေးကြီးဆုံး သတင်းများကို ကဏ္ဍ (၂) ခုခွဲ၍ မြန်မာဘာသာဖြင့် အနှစ်ချုပ်ပေးပါ:
+    မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။
+    အောက်ပါ သတင်းဆောင်းပါး ရလဒ်များနှင့် Google Search တို့မှ **တကယ့် သတင်းဖြစ်ရပ် အကြောင်းအရာများ (ဘယ်နေရာမှာ ဘာဖြစ်ပျက်ခဲ့သလဲ၊ ဘယ်သူတွေ ပါဝင်သလဲ)** ကိုသာ ထုတ်နုတ်ပြီး ကဏ္ဍ (၂) ခုခွဲ၍ မြန်မာဘာသာဖြင့် အနှစ်ချုပ်ပေးပါ:
 
-    ၁။ **ပြည်တွင်းနှင့် လွတ်လပ်သော သတင်းဌာနများ (Local & Independent Outlets — Myanmar Now, The Irrawaddy, Mizzima, Frontier Myanmar, Khit Thit Media)**
-    ၂။ **နိုင်ငံတကာ သတင်းဌာနများ (International Coverage — BBC Burmese, VOA Burmese, RFA Burmese, Reuters)**
+    ၁။ **ပြည်တွင်းနှင့် လွတ်လပ်သော သတင်းဌာနများ (Myanmar Now, The Irrawaddy, Mizzima, Frontier Myanmar, Khit Thit Media)**
+    ၂။ **နိုင်ငံတကာ သတင်းဌာနများ (BBC Burmese, VOA Burmese, RFA Burmese, Reuters)**
 
-    စည်းမျဉ်းများ:
-    - သတင်းတစ်ပုဒ်ချင်းစီတွင် သတင်းဌာနအမည် နှင့် [Verified] (ရှာဖွေမှုရလဒ်တွင် တိုက်ရိုက်တွေ့ရှိချက်) သို့မဟုတ် [Deduced] tag ထည့်ပေးပါ။
-    - Bullet point များဖြင့် တိုတိုရှင်းရှင်း ရှင်းလင်းပြတ်သားစွာ ရေးပါ။
+    အရေးကြီး စည်းမျဉ်းများ:
+    - "သတင်းအစီအစဉ် ထုတ်လွှင့်ခဲ့သည် / ဗီဒီယို တွေ့ရှိရသည်" စသည့် အစီအစဉ်ကြေညာချက်များကို လုံးဝ မရေးပါနှင့်။
+    - တကယ့် သတင်းဖြစ်ရပ် အကြောင်းအရာကိုသာ အချက်အလက် တိတိကျကျဖြင့် Bullet point ရေးပြီး အနောက်တွင် [သတင်းဌာနအမည်] [Verified] သို့မဟုတ် [Deduced] ထည့်ပေးပါ။
 
-    --- Local & Independent Outlets Web Search ---
+    --- Local & Independent Outlets Articles ---
     {local_web_raw or "None"}
 
-    --- International Coverage Web Search ---
+    --- International Coverage Articles ---
     {intl_web_raw or "None"}
     """
 
@@ -1476,36 +1491,43 @@ def get_myanmar_news_summary() -> str:
         if has_web_data:
             summary = call_ai_with_3tier_fallback(prompt, use_google_search=False)
 
-    if not summary or "ခဏအလုပ်များနေပါတယ်" in summary:
-        return (
-            f"📰 Myanmar Daily News Summary ({now_str})\n\n"
-            f"လောလောဆယ် သတင်းရှာဖွေမှု ခဏကြန့်ကြာနေပါတယ်ရှင် [Unverified]။ "
-            f"Myanmar Now, The Irrawaddy, Mizzima, Frontier Myanmar, Khit Thit Media နဲ့ "
-            f"BBC Burmese, VOA Burmese, RFA Burmese, Reuters တို့မှာ တိုက်ရိုက် ကြည့်ရှုနိုင်ပါတယ်"
-        )
-
+    summary = _clean_maya_voice(summary)
     return f"📰 Myanmar Daily News Summary ({now_str})\n\n{summary}"
 
 
-# --- Google AI Overview Style Web Search (With Confidence Tagging) ---
-def answer_with_universal_search(user_id: int, user_message: str, allow_queue: bool = False) -> str:
+# --- Web Search Helper (Context-Aware + Confidence Tagging) ---
+def answer_with_universal_search(
+    user_id: int,
+    user_message: str,
+    recent_ctx: str = "",
+    effective_query: str | None = None,
+) -> str:
     now_mm = datetime.now(MM_TZ)
     now_str = now_mm.strftime("%Y-%m-%d %H:%M MMT")
-    cal_info = get_myanmar_calendar_context(now_mm)
     profile_text = get_user_profile(user_id)
 
-    clean_q = re.sub(r"[?？!]", "", user_message).strip()
-    tavily_raw = _tavily_worker(clean_q, max_results=5)
+    raw_q = (effective_query or user_message).strip()
+    clean_q = re.sub(r"[?？!]", "", raw_q).strip()
+    if len(clean_q) <= 18 and recent_ctx:
+        prev_user_lines = [
+            line.split(":", 1)[1].strip()
+            for line in recent_ctx.splitlines()
+            if line.startswith("user:") and user_message.strip() not in line
+        ]
+        if prev_user_lines:
+            clean_q = f"{prev_user_lines[-1]} {clean_q}".strip()
+
+    tavily_raw = _tavily_worker(clean_q, max_results=6, exclude_social=True)
     web_context = f"--- Web Search (Tavily) ---\n{tavily_raw}" if tavily_raw else "--- Web Search Results ---\nNone"
 
     profile_block = f"--- Learned User Profile & Locked Rules ---\n{profile_text}\n\n" if profile_text else ""
+    ctx_block = f"--- Recent Conversation Context ---\n{recent_ctx}\n\n" if recent_ctx else ""
 
     system_prompt = (
         f"သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။\n"
-        f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n"
-        f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
-        f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်)။\n"
-        f"အသုံးပြုသူ၏ ရှာဖွေမေးမြန်းချက်အပေါ်သာ တိုက်ရိုက် Focus ထားပြီး ရှင်းလင်းပြတ်သားစွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ:\n"
+        f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n\n"
+        f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။\n"
+        f"အရှေ့နောက် စကားပြောဆိုမှု context နှင့် ရှာဖွေမေးမြန်းချက်အပေါ်သာ တိုက်ရိုက် Focus ထားပြီး ရှင်းလင်းပြတ်သားစွာ မြန်မာဘာသာဖြင့် ဖြေကြားပါ:\n"
         f"1. **တိုက်ရိုက် အဖြေချုပ် (Direct Answer):** မေးခွန်း၏ အဓိကအဖြေကို စာကြောင်း ၁–၂ ကြောင်းဖြင့် အရင်ဆုံး ဖြေပါ။\n"
         f"2. **အဓိက အချက်အလက်များ (Key Points):** သက်ဆိုင်ရာ အချက် (၃–၅ ချက်) ကို Bullet point များဖြင့် ဖော်ပြပြီး အချက်တိုင်း၏ အနောက်တွင် [Verified] (ရှာဖွေမှုရလဒ်တွင် တိုက်ရိုက်ပါဝင်ချက်)၊ [Deduced] (ဆက်စပ်သုံးသပ်ချက်) သို့မဟုတ် [Unverified] (မသေချာသေးသည့်အချက်) tag ထည့်ပေးပါ။\n"
         f"3. မေးခွန်းနှင့် မသက်ဆိုင်သော အချက်အလက်များကို လုံးဝ မထည့်ပါနှင့်။\n"
@@ -1514,8 +1536,10 @@ def answer_with_universal_search(user_id: int, user_message: str, allow_queue: b
     full_prompt = (
         f"{system_prompt}\n"
         f"{profile_block}"
+        f"{ctx_block}"
         f"{web_context}\n\n"
-        f"ရှာဖွေမေးမြန်းချက်: {user_message}"
+        f"ရှာဖွေမေးမြန်းချက်: {user_message}\n"
+        f"ရှာဖွေခဲ့သည့် Query: {clean_q}"
     )
 
     reply = call_ai_with_3tier_fallback(full_prompt, use_google_search=True)
@@ -1528,12 +1552,12 @@ def answer_with_universal_search(user_id: int, user_message: str, allow_queue: b
         )
         reply_no_search = call_ai_with_3tier_fallback(fallback_prompt, use_google_search=False)
         if reply_no_search and "ခဏအလုပ်များနေပါတယ်" not in reply_no_search:
-            return reply_no_search
+            return _clean_maya_voice(reply_no_search)
 
     if not reply or "ခဏအလုပ်များနေပါတယ်" in reply:
         return "လောလောဆယ် Web Search ဘက်မှာ ခဏအဆင်မပြေ ဖြစ်နေပါတယ်ရှင်၊ ခဏနေပြီး ထပ်မေးကြည့်ပါ"
 
-    return reply
+    return _clean_maya_voice(reply)
 
 
 # --- Scheduled Jobs (9:00 AM News, Due Reminders, 6:00 PM Pending Digest, 30s Follow-up Watcher) ---
@@ -1633,7 +1657,7 @@ def handle_advice_or_general_intent(user_id: int, user_message: str, intent_mode
     if intent_mode == "ADVICE":
         prompt = (
             f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
-            f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်)။\n"
+            f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။\n"
             f"အသုံးပြုသူ၏ Locked Core Rules၊ Profile၊ Style Preferences၊ အတိတ်မှတ်ဉာဏ်နှင့် မေးခွန်းကို သုံးသပ်ပြီး "
             f"အလိုက်သိသိ မြန်မာဘာသာဖြင့် အကြံပြုပါ:\n"
             f"1. အခြေအနေ သုံးသပ်ချက်\n"
@@ -1645,7 +1669,7 @@ def handle_advice_or_general_intent(user_id: int, user_message: str, intent_mode
     else:
         prompt = (
             f"မြန်မာပြက္ခဒိန် အချက်အလက်:\n{cal_info}\n\n"
-            f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်)။\n"
+            f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။\n"
             f"အသုံးပြုသူ၏ Locked Core Rules၊ Profile၊ Style Preferences၊ အတိတ်စကားပြောဆိုမှုများနှင့် ခိုင်းစေချက်ကို သေချာမှတ်မိပြီး "
             f"အလိုက်သိသိနှင့် မြန်မာစာ သန့်သန့်ရှင်းရှင်းဖြင့် ကူညီဆောင်ရွက်ပေးပါ။\n\n"
             f"{memory_context}\n\n"
@@ -1899,7 +1923,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if stripped_lower in ["မာယာ", "maya", "hi", "hello", "hey", "မင်္ဂလာပါ"]:
                 memory_ctx = await asyncio.to_thread(recall_relevant_history, message.from_user.id, user_message, 4, 2)
                 greet_prompt = (
-                    "မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်)။ "
+                    "မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။ "
                     "နှုတ်ဆက်/ခေါ်နေပါသည်။ လက်ရှိ လေ့လာမှတ်သားထားသော Locked Core Rules/Profile/Preferences/Conversation ရှိလျှင် အလိုက်သိသိ "
                     f"ရင်းနှီးဖော်ရွေစွာ နှုတ်ဆက်ပြီး ဘာကူညီပေးနိုင်မလဲ တိုတိုရှင်းရှင်း မြန်မာဘာသာဖြင့် ဖြေပါ။\n\n{memory_ctx}"
                 )
@@ -1908,7 +1932,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_long_message(message, reply_text)
                 return
 
-            # Natural news summary request shortcut (e.g. "သတင်း အနှစ်ချုပ်", "news summary")
+            # Dedicated news summary shortcut
             if any(k in stripped_lower for k in ["news summary", "daily news", "သတင်း အနှစ်ချုပ်", "သတင်းအနှစ်ချုပ်", "မြန်မာသတင်း အနှစ်ချုပ်"]):
                 reply_text = await asyncio.to_thread(get_myanmar_news_summary)
                 save_chat_message(message.from_user.id, "assistant", reply_text)
@@ -1934,7 +1958,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     handle_group_intent, message.from_user.id, user_message, route, recent_ctx
                 )
             elif intent == "WEB_SEARCH":
-                reply_text = await asyncio.to_thread(answer_with_universal_search, message.from_user.id, user_message)
+                reply_text = await asyncio.to_thread(
+                    answer_with_universal_search,
+                    message.from_user.id,
+                    user_message,
+                    recent_ctx,
+                    route.get("search_query"),
+                )
             elif intent == "ADVICE":
                 reply_text = await asyncio.to_thread(
                     handle_advice_or_general_intent, message.from_user.id, user_message, "ADVICE"
@@ -2013,7 +2043,7 @@ async def main_async():
         BotCommand("setrule", "Add a new versioned core rule"),
     ])
 
-    print("🤖 Maya AI Agent (Natural Maya Persona + Confidence Tagging + Skill Versioning + Trusted News) started...")
+    print("🤖 Maya AI Agent (Qwen 3.8 27B + Context Search + Confidence Tagging + Skill Versioning + Trusted News) started...")
 
     await application.start()
     await application.updater.start_polling()
