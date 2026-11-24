@@ -2870,6 +2870,17 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_file = header_tokens[0] or "main.py"
         c_msg = header_tokens[1] if len(header_tokens) > 1 and header_tokens[1] else f"Patch {target_file} via Maya"
 
+        if clean_old and clean_old not in (cur_file.get("content") or ""):
+            _src = cur_file.get("content") or ""
+            _old_lines = clean_old.splitlines()
+            _old_stripped = [ln.lstrip(" ") for ln in _old_lines]
+            _src_lines = _src.splitlines()
+            _matches = []
+            for _i in range(len(_src_lines) - len(_old_stripped) + 1):
+                if [_src_lines[_i + _k].lstrip(" ") for _k in range(len(_old_stripped))] == _old_stripped:
+                    _matches.append("\n".join(_src_lines[_i : _i + len(_old_stripped)]))
+            if len(_matches) == 1:
+                clean_old = _matches[0]
         res = await asyncio.to_thread(
             replace_github_snippet,
             target_file,
