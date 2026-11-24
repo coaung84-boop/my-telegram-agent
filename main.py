@@ -873,7 +873,7 @@ def _parse_time_parts_mmt(text: str) -> tuple[int, int] | None:
         return None
 
     h = int(hr.group(1))
-    after_hr = norm[hr.end():hr.end() + 12]
+    after_hr = norm[hr.end():hr.end() + 14]
     m = 0
     if "ခွဲ" in after_hr or "half" in after_hr.lower():
         m = 30
@@ -892,18 +892,37 @@ def _parse_time_parts_mmt(text: str) -> tuple[int, int] | None:
     return None
 
 
+def _last_day_of_month(year: int, month: int) -> int:
+    if month == 12:
+        return 31
+    next_month_first = datetime(year, month + 1, 1, tzinfo=MM_TZ)
+    return (next_month_first - timedelta(days=1)).day
+
+
 def parse_reminder_datetime_mmt(text: str) -> datetime | None:
     now_mm = datetime.now(MM_TZ)
     mm_digits = str.maketrans("၀၁၂၃၄၅၆၇၈၉", "0123456789")
     norm_text = text.translate(mm_digits)
+    lower = text.lower()
 
+    # 1) Relative minutes ("နောက် ၁၅ မိနစ်")
     rel_min = re.search(r"(?:နောက်\s*)?(\d{1,3})\s*(?:မိနစ်|minute|min)s?", norm_text, re.IGNORECASE)
     if rel_min and "နာရီ" not in norm_text:
         mins = int(rel_min.group(1))
         if 1 <= mins <= 1440:
             return now_mm + timedelta(minutes=mins)
 
+    # 2) Relative days ("နောက် ၂ ရက်နေရင်" / "နောက် ၃ ရက်")
+    rel_days_match = re.search(r"နောက်\s*(\d{1,2})\s*ရက်(?:\s*(?:နေရင်|အကြာ|မှာ))?", norm_text)
     parts = _parse_time_parts_mmt(text)
+
+    if rel_days_match and not parts:
+        days_add = int(rel_days_match.group(1))
+        if 1 <= days_add <= 365:
+            target_d = (now_mm + timedelta(days=days_add)).date()
+            default_h = 9 if now_mm.hour >= 9 else max(9, now_mm.hour)
+            return datetime(target_d.year, target_d.month, target_d.day, default_h, 0, 0, tzinfo=MM_TZ)
+
     if not parts:
         return None
     hour, minute = parts
@@ -911,17 +930,36 @@ def parse_reminder_datetime_mmt(text: str) -> datetime | None:
     target_date = now_mm.date()
     target_wd = _extract_weekday_target(text)
 
-    if target_wd is not None:
+    if rel_days_match:
+        days_add = int(rel_days_match.group(1))
+        if 1 <= days_add <= 365:
+            target_date = (now_mm + timedelta(days=days_add)).date()
+    elif "လကုန်" in text:
+        end_d = _last_day_of_month(now_mm.year, now_mm.month)
+        target_date = datetime(now_mm.year, now_mm.month, end_d, tzinfo=MM_TZ).date()
+        if target_date < now_mm.date():
+            next_m = 1 if now_mm.month == 12 else now_mm.month + 1
+            next_y = now_mm.year + 1 if now_mm.month == 12 else now_mm.year
+            end_d = _last_day_of_month(next_y, next_m)
+            target_date = datetime(next_y, next_m, end_d, tzinfo=MM_TZ).date()
+    elif target_wd is not None:
         days_ahead = (target_wd - now_mm.weekday()) % 7
         candidate_check = datetime(now_mm.year, now_mm.month, now_mm.day, hour, minute, 0, tzinfo=MM_TZ) + timedelta(days=days_ahead)
         if days_ahead == 0 and candidate_check <= now_mm:
             days_ahead = 7
         target_date = (now_mm + timedelta(days=days_ahead)).date()
-    elif "မနက်ဖြန်" in text or "tomorrow" in text.lower():
+    elif "မနက်ဖြန်" in text or "tomorrow" in lower:
         target_date = (now_mm + timedelta(days=1)).date()
 
     candidate = datetime(target_date.year, target_date.month, target_date.day, hour, minute, 0, tzinfo=MM_TZ)
-    if target_wd is None and candidate < (now_mm - timedelta(minutes=1)) and "မနက်ဖြန်" not in text and "tomorrow" not in text.lower():
+    if (
+        target_wd is None
+        and not rel_days_match
+        and "လကုန်" not in text
+        and candidate < (now_mm - timedelta(minutes=1))
+        and "မနက်ဖြန်" not in text
+        and "tomorrow" not in lower
+    ):
         candidate += timedelta(days=1)
     return candidate
 
@@ -952,12 +990,12 @@ def _compute_next_repeat_datetime(current_rem_dt: datetime, repeat_type: str, no
 def _clean_task_title_fallback(raw_text: str) -> str:
     t = raw_text.strip()
     t = re.sub(r"^(?:မဟုတ်ဘူးလေ|မဟုတ်ဘူး|Task\s*[-–—:]?)", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"(?:အပတ်စဉ်|နေ့စဉ်|ကျောင်းဖွင့်ရက်|မြန်မာ\s*calendar|တိုင်း)", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:အပတ်စဉ်|နေ့စဉ်|ကျောင်းဖွင့်ရက်|လကုန်ရက်|လကုန်|မြန်မာ\s*calendar|တိုင်း)", "", t, flags=re.IGNORECASE)
     t = re.sub(r"(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday|တနင်္လာ|အင်္ဂါ|ဗုဒ္ဓဟူး|ကြာသပတေး|သောကြာ|စနေ|တနင်္ဂနွေ)", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"(?:မနက်|ညနေ|ည|နောက်\s*)?[၀-၉\d]+\s*(?:နာရီ|hour|hr)(?:\s*(?:ခွဲ|[၀-၉\d]+\s*မိနစ်))?", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"(?:နောက်\s*)?[၀-၉\d]+\s*(?:မိနစ်|minute|min)s?\s*(?:မှာ|နေရင်|အကြာမှာ)?", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:မနက်|ညနေ|ည|နေ့လယ်|နောက်\s*)?[၀-၉\d]+\s*(?:နာရီ|hour|hr)(?:\s*(?:ခွဲ|[၀-၉\d]+\s*မိနစ်))?", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:နောက်\s*)?[၀-၉\d]+\s*(?:ရက်|မိနစ်|minute|min)s?\s*(?:နေရင်|မှာ|အကြာမှာ)?", "", t, flags=re.IGNORECASE)
     t = re.sub(r"\b\d{1,2}:\d{2}\b", "", t)
-    t = re.sub(r"(?:remind\s*လုပ်ပေးပါ|remind\s*ပေးပါ|သတိပေးပါ|သတိပေး|remind|ပြောတယ်|မှာ)", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:remind\s*လုပ်ပေးပါ|remind\s*ပေးပါ|သတိပေးပါ|သတိပေး|ပြောင်းပေးပါ|ဖျက်ပေးပါ|ဖျက်လိုက်ပါ|remind|ပြောတယ်|မှာ)", "", t, flags=re.IGNORECASE)
     t = re.sub(r"\s+", " ", t).strip(" -–—၊။")
     return t or raw_text.strip()
 
@@ -988,7 +1026,7 @@ Recent Conversation:
 Latest User Message: "{user_message}"
 
 Classify into ONE primary intent:
-- "TASK": Setting/updating/completing/listing personal reminders or to-dos, or correcting a task entry (including multiple tasks in one message).
+- "TASK": Setting, rescheduling/editing, deleting, completing, or listing personal reminders or to-dos, or correcting a task entry (including multiple tasks in one message).
 - "GROUP": Asking about anything discussed/reported/shared in Telegram groups, asking for a group summary/report, or correcting a misrouted group query.
 - "ADVICE": Seeking recommendations, options, how-to guidance, or decision support.
 - "GENERAL": Translating, drafting, explaining concepts, recalling personal chat/profile, or casual chat.
@@ -998,9 +1036,10 @@ If intent is "WEB_SEARCH", also output:
 - "search_query": A self-contained search query combining Recent Conversation context if the user says a follow-up like "Yes, ရှာပေးပါ" or "အသေးစိတ် ရှာပေးပါ".
 
 If intent is "TASK", also extract:
-- "task_action": "add" | "done" | "list" | "cancel_last"
+- "task_action": "add" | "edit" | "delete" | "done" | "list" | "cancel_last"
+- "target_task_query": If editing/rescheduling/deleting/completing a specific existing task by name/topic, put the existing task keyword here (e.g. "ဆေးသောက်", "ဖုန်းဆက်"), else null.
 - "tasks": list of task objects if adding one or more tasks: [{{"clean_title": "...", "reason": null, "repeat_type": "once|daily|weekly|school_days", "remind_iso": "YYYY-MM-DDTHH:MM:SS+06:30 or null"}}]
-- "clean_title": pure action in Burmese without time/schedule/reason/filler words
+- "clean_title": pure action in Burmese without time/schedule/reason/filler words (or new title if editing)
 - "reason": short reason if stated, else null
 - "repeat_type": "once" | "daily" | "weekly" | "school_days"
 - "remind_iso": ISO-8601 datetime with +06:30 offset for the next occurrence in MMT, or null
@@ -1015,6 +1054,7 @@ Return ONLY valid JSON:
   "intent": "TASK|GROUP|ADVICE|GENERAL|WEB_SEARCH",
   "search_query": null,
   "task_action": "add",
+  "target_task_query": null,
   "tasks": [],
   "clean_title": null,
   "reason": null,
@@ -1031,6 +1071,7 @@ Return ONLY valid JSON:
             "intent": "GENERAL",
             "search_query": None,
             "task_action": "add",
+            "target_task_query": None,
             "tasks": [],
             "clean_title": _clean_task_title_fallback(user_message),
             "reason": None,
@@ -1090,7 +1131,7 @@ Return ONLY valid JSON:
                 except Exception:
                     item_rem_dt = parse_reminder_datetime_mmt(item_title)
             else:
-                item_rem_dt = parse_reminder_datetime_mmt(item_title)
+                item_rem_dt = parse_reminder_datetime_mmt(item_title) or rem_dt
             item_reason = str(item.get("reason")).strip() if item.get("reason") else None
             normalized_tasks.append({
                 "clean_title": item_title,
@@ -1103,6 +1144,9 @@ Return ONLY valid JSON:
     clean_title = (str(raw_title).strip() if raw_title else "") or _clean_task_title_fallback(user_message)
     clean_title = _clean_task_title_fallback(clean_title) or _clean_task_title_fallback(user_message)
 
+    raw_target = parsed.get("target_task_query")
+    target_task_query = str(raw_target).strip() if raw_target else None
+
     raw_reason = parsed.get("reason")
     reason = str(raw_reason).strip() if raw_reason else None
 
@@ -1113,6 +1157,7 @@ Return ONLY valid JSON:
         "intent": intent,
         "search_query": search_query,
         "task_action": str(parsed.get("task_action") or "add").lower().strip(),
+        "target_task_query": target_task_query,
         "tasks": normalized_tasks,
         "clean_title": clean_title,
         "reason": reason,
@@ -1196,6 +1241,23 @@ def delete_latest_pending_task() -> str | None:
     return None
 
 
+def _find_matching_pending_task(pending_tasks: list, query_text: str) -> dict | None:
+    q = (query_text or "").strip().lower()
+    if not pending_tasks:
+        return None
+    if not q:
+        return pending_tasks[0]
+    exact = next((t for t in pending_tasks if q in str(t.get("title", "")).lower()), None)
+    if exact:
+        return exact
+    words = [w for w in re.findall(r"[\w\u1000-\u109F]{2,}", q)]
+    for w in words:
+        m = next((t for t in pending_tasks if w in str(t.get("title", "")).lower()), None)
+        if m:
+            return m
+    return None
+
+
 def _format_single_task_added(title: str, remind_dt: datetime | None, reason: str | None, repeat_mode: str, raw_ctx: str) -> str:
     use_maung = _is_health_or_family_task(f"{title} {raw_ctx}", reason)
     prefix = "မောင်ရေ — " if use_maung else ""
@@ -1217,8 +1279,9 @@ def _format_single_task_added(title: str, remind_dt: datetime | None, reason: st
 def handle_task_intent(user_message: str, route: dict) -> str:
     action = (route.get("task_action") or "add").lower().strip()
     task_title = (route.get("clean_title") or "").strip()
+    target_query = (route.get("target_task_query") or "").strip()
     reason = route.get("reason")
-    use_maung = _is_health_or_family_task(f"{task_title} {user_message}", reason)
+    use_maung = _is_health_or_family_task(f"{task_title} {target_query} {user_message}", reason)
     prefix = "မောင်ရေ — " if use_maung else ""
     ending = "နော်" if use_maung else "ရှင်"
 
@@ -1234,22 +1297,90 @@ def handle_task_intent(user_message: str, route: dict) -> str:
             return f"{p}\"{removed}\" ကို Task ထဲက ပြန်ဖျက်ပေးလိုက်ပါပြီ{e}"
         return f"{prefix}ပြန်ဖျက်စရာ Task မတွေ့ပါဘူး{ending}"
 
-    if action == "done":
+    if action == "delete":
         try:
-            search_key = (task_title or user_message).strip()
             pending_res = (
                 supabase.table("tasks")
                 .select("*")
                 .eq("status", "pending")
                 .order("id", desc=True)
-                .limit(20)
+                .limit(30)
                 .execute()
             )
             pending_tasks = pending_res.data or []
-            matched = next(
-                (t for t in pending_tasks if search_key.lower() in str(t.get("title", "")).lower()),
-                pending_tasks[0] if pending_tasks else None
+            matched = _find_matching_pending_task(pending_tasks, target_query or task_title or user_message)
+            if matched:
+                m_title = matched["title"]
+                supabase.table("tasks").delete().eq("id", matched["id"]).execute()
+                is_hf = _is_health_or_family_task(m_title, matched.get("reason"))
+                p = "မောင်ရေ — " if is_hf else ""
+                e = "နော်" if is_hf else "ရှင်"
+                return f"{p}\"{m_title}\" ကို Task ထဲက ဖျက်ပေးလိုက်ပါပြီ{e}"
+            return f"{prefix}ဖျက်ရမယ့် Task ကို မတွေ့သေးပါဘူး{ending}"
+        except Exception as e:
+            print(f"Task delete error: {e}")
+            return f"{prefix}Task ဖျက်ရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားပါတယ်၊ ထပ်စမ်းကြည့်ပါ{ending}"
+
+    if action in ("edit", "reschedule"):
+        try:
+            pending_res = (
+                supabase.table("tasks")
+                .select("*")
+                .eq("status", "pending")
+                .order("id", desc=True)
+                .limit(30)
+                .execute()
             )
+            pending_tasks = pending_res.data or []
+            matched = _find_matching_pending_task(pending_tasks, target_query or task_title or user_message)
+            new_rem_dt = route.get("remind_dt") or parse_reminder_datetime_mmt(user_message)
+            new_rep = route.get("repeat_type") or "once"
+
+            if matched:
+                upd = {}
+                final_title = matched["title"]
+                if task_title and len(task_title) >= 2 and task_title not in matched["title"]:
+                    final_title = task_title
+                    upd["title"] = final_title
+                if new_rem_dt:
+                    upd["remind_at"] = new_rem_dt.isoformat()
+                    upd["reminded"] = False
+                if new_rep != "once":
+                    upd["repeat_type"] = new_rep
+                if reason:
+                    upd["reason"] = reason
+
+                if upd:
+                    try:
+                        supabase.table("tasks").update(upd).eq("id", matched["id"]).execute()
+                    except Exception:
+                        supabase.table("tasks").update({"title": final_title}).eq("id", matched["id"]).execute()
+
+                is_hf = _is_health_or_family_task(final_title, matched.get("reason"))
+                p = "မောင်ရေ — " if is_hf else ""
+                e = "နော်" if is_hf else "ရှင်"
+                msg = f"{p}\"{final_title}\" ကို ပြင်ဆင်မှတ်သားပေးလိုက်ပါပြီ{e}"
+                if new_rem_dt:
+                    msg += f"\n⏰ {new_rem_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[new_rem_dt.weekday()]})"
+                return msg
+            return f"{prefix}ပြင်ဆင်ရမယ့် Pending Task ကို မတွေ့သေးပါဘူး{ending}"
+        except Exception as e:
+            print(f"Task edit error: {e}")
+            return f"{prefix}Task ပြင်ဆင်ရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားပါတယ်၊ ထပ်စမ်းကြည့်ပါ{ending}"
+
+    if action == "done":
+        try:
+            search_key = (target_query or task_title or user_message).strip()
+            pending_res = (
+                supabase.table("tasks")
+                .select("*")
+                .eq("status", "pending")
+                .order("id", desc=True)
+                .limit(25)
+                .execute()
+            )
+            pending_tasks = pending_res.data or []
+            matched = _find_matching_pending_task(pending_tasks, search_key) or (pending_tasks[0] if pending_tasks else None)
             if matched:
                 m_title = matched["title"]
                 is_hf = _is_health_or_family_task(m_title, matched.get("reason"))
