@@ -2907,33 +2907,79 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 ast.parse(_preview_full)
             except SyntaxError as se:
-                _heal_prompt = (
-                    f"Fix the Python SyntaxError ({se.msg} at line {se.lineno}) in this code snippet.\n"
-                    f"Keep the exact indentation level and do NOT add extra explanatory text or markdown fences.\n"
-                    f"Return ONLY valid Python code:\n\n{clean_new}"
-                )
-                _healed = None
-                try:
-                    _healed = await asyncio.to_thread(call_ai_with_3tier_fallback, _heal_prompt, None, None, False)
-                except Exception:
-                    _healed = None
-                if _healed and "ခဏအလုပ်များနေပါတယ်" not in _healed:
+                def _run_code_fixer(snippet_text: str, err_msg: str, err_line: int) -> str:
+                    fix_prompt = (
+                        f"Fix the Python SyntaxError ({err_msg} at line {err_line}) in the snippet below.\n"
+                        f"Return ONLY raw valid Python code. No markdown fences, no ```python, no explanations.\n\n"
+                        f"{snippet_text}"
+                    )
+                    code_sys = "You are a strict Python syntax fixer. Output ONLY valid Python code."
+                    for m_name in ("gemini-3.5-flash-lite", "gemini-3.8-flash"):
+                        try:
+                            r = gemini_client.models.generate_content(
+                                model=m_name,
+                                contents=fix_prompt,
+                                config=types.GenerateContentConfig(
+                                    system_instruction=code_sys,
+                                    temperature=0.0,
+                                ),
+                            )
+                            if r and r.text and r.text.strip():
+                                return r.text.strip()
+                        except Exception:
+                            pass
+                    if OPENROUTER_API_KEY:
+                        for or_m in ("qwen/qwen3.8-27b", "google/gemma-4-31b-it:free"):
+                            try:
+                                resp = requests.post(
+                                    "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)",
+                                    headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
+                                    json={
+                                        "model": or_m,
+                                        "messages": [
+                                            {"role": "system", "content": code_sys},
+                                            {"role": "user", "content": fix_prompt},
+                                        ],
+                                        "temperature": 0.0,
+                                    },
+                                    timeout=12,
+                                )
+                                j = resp.json()
+                                if j.get("choices"):
+                                    t = (j["choices"][0]["message"].get("content") or "").strip()
+                                    if t:
+                                        return t
+                            except Exception:
+                                pass
+                    return ""
+
+                _healed = await asyncio.to_thread(_run_code_fixer, clean_new, se.msg, se.lineno)
+                if _healed:
                     _clean_healed = _healed.strip()
                     if _clean_healed.startswith("```"):
                         _h_lines = _clean_healed.splitlines()
                         if len(_h_lines) >= 2:
                             _clean_healed = "\n".join(_h_lines[1:-1] if _h_lines[-1].strip().startswith("```") else _h_lines[1:])
+                    _h_lines_list = _clean_healed.splitlines()
+                    if _h_lines_list and clean_old:
+                        _base_ind = " " * (len(clean_old.splitlines()[0]) - len(clean_old.splitlines()[0].lstrip(" ")))
+                        _non_emp = [ln for ln in _h_lines_list if ln.strip()]
+                        _min_ind = min((len(ln) - len(ln.lstrip(" ")) for ln in _non_emp), default=0)
+                        _clean_healed = "\n".join(
+                            (_base_ind + ln[_min_ind:]) if ln.strip() else ""
+                            for ln in _h_lines_list
+                        )
                     _test_full = _src_text.replace(clean_old, _clean_healed, 1)
                     try:
                         ast.parse(_test_full)
                         clean_new = _clean_healed
-                    except SyntaxError:
-                        await message.reply_text(f"❌ Auto-fix ကြိုးစားပေမယ့် syntax error ကျန်နေပါတယ်ရှင် — line {se.lineno}: {se.msg}")
+                    except SyntaxError as se2:
+                        await message.reply_text(f"❌ Auto-fix ကြိုးစားပေမယ့် syntax error ကျန်နေပါတယ်ရှင် — line {se2.lineno}: {se2.msg}")
                         return
                 else:
                     await message.reply_text(f"❌ NEW code ကြောင့် syntax error ဖြစ်နေပါတယ်ရှင် — line {se.lineno}: {se.msg}")
                     return
-                
+                    
         import uuid
         req_id = uuid.uuid4().hex[:10]
         _PENDING_GITHUB_ACTIONS[req_id] = {
