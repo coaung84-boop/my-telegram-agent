@@ -2908,8 +2908,9 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ast.parse(_preview_full)
             except SyntaxError as se:
                 _heal_prompt = (
-                    f"Fix Python SyntaxError ({se.msg} at line {se.lineno}) in this snippet.\n"
-                    f"Return ONLY valid Python code without markdown fences.\n\n{clean_new}"
+                    f"Fix the Python SyntaxError ({se.msg} at line {se.lineno}) in this code snippet.\n"
+                    f"Keep the exact indentation level and do NOT add extra explanatory text or markdown fences.\n"
+                    f"Return ONLY valid Python code:\n\n{clean_new}"
                 )
                 _healed = None
                 try:
