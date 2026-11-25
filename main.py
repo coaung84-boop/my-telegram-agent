@@ -2596,13 +2596,7 @@ def answer_with_universal_search(
         f"3. မေးခွန်းနှင့် မသက်ဆိုင်သော အချက်အလက်များကို လုံးဝ မထည့်ပါနှင့်။\n"
     )
 
-    full_prompt = (
-        f"{system_prompt}\n"
-        f"{profile_block}"
-        f"{ctx_block}"
-        f"{web_context}\n\n"
-        f"ရှာဖွေမေးမြန်းချက်: {user_message}\n"
-        )
+
 
     reply = _google_overview_search_summary(
         query_text=clean_q,
