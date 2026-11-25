@@ -3345,6 +3345,13 @@ def replace_github_snippet(
     original_content = current.get("content", "")
     match_count = original_content.count(old_text)
     if match_count == 0:
+        _norm_orig = original_content.replace("\r\n", "\n")
+        _norm_old = old_text.replace("\r\n", "\n")
+        if _norm_old and _norm_orig.count(_norm_old) == 1:
+            old_text = _norm_old
+            original_content = _norm_orig
+            match_count = 1
+    if match_count == 0:
         _old_lines = old_text.splitlines()
         _src_lines = original_content.splitlines()
         _matched_block = None
