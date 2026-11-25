@@ -1916,6 +1916,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 transcript,
                 recent_ctx,
                 route.get("search_query"),
+                route.get("english_search_query"),
             )
         elif intent == "ADVICE":
             reply_text = await asyncio.to_thread(
@@ -2373,7 +2374,8 @@ def _tavily_worker(
     max_results: int = 6,
     exclude_social: bool = True,
     include_domains: list | None = None,
-    days: int = 2,
+    days: int = 7,
+    topic: str = "general",
 ) -> str:
     if not TAVILY_API_KEY:
         return ""
@@ -2382,7 +2384,7 @@ def _tavily_worker(
             "api_key": TAVILY_API_KEY,
             "query": search_query,
             "search_depth": "advanced",
-            "topic": "news",
+            "topic": topic,
             "days": days,
             "max_results": max_results,
             "include_answer": "advanced",
@@ -2398,17 +2400,15 @@ def _tavily_worker(
         data = resp.json()
         lines = []
         if data.get("answer"):
-            lines.append(f"[Summary]: {data['answer']}")
+            lines.append(f"[Web Summary]: {data['answer']}")
         for r in data.get("results", []):
             title = r.get("title", "")
-            url = r.get("url", "")
-            content = (r.get("content", "") or "")[:360]
-            lines.append(f"- {title} ({url}): {content}")
+            content = (r.get("content", "") or "")[:400]
+            lines.append(f"- {title}: {content}")
         return "\n".join(lines)
     except Exception as e:
         print(f"Tavily search error: {e}")
         return ""
-
 
 # --- 3-Source Hybrid Myanmar News Summary (With 30-Min Cache for Speed & Quota Saving) ---
 def get_myanmar_news_summary(force_refresh: bool = False) -> str:
@@ -2544,14 +2544,16 @@ def _google_overview_search_summary(
     tavily_context: str = "",
     use_google_search: bool = True,
 ) -> str:
-    """Google Web Search AI Overview ကဲ့သို့ တိကျပြတ်သားစွာ ခြုံငုံအနှစ်ချုပ်ပေးသည့် helper function။"""
+    """Google Search AI Overview ဆန်ဆန် လိုရင်း Key Point ကို အရင်ဖြေပြီး User နဲ့ အလိုက်သိသော အကြံပြုချက် တွဲပေးသည့် helper။"""
     prompt = (
         f"သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။\n"
         f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n\n"
         f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု လုံးဝ မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။\n"
-        f"Google Search ရလဒ်များကို အခြေခံ၍ Google Web Search ၏ AI ရလဒ် (AI Overview) ကဲ့သို့ တိုက်ရိုက် အနှစ်ချုပ်ဖြေပါ:\n"
-        f"- အဓိက အဖြေကို စာပိုဒ် ၁–၂ ပိုဒ်ဖြင့် ရှင်းရှင်းလင်းလင်း အရင်ဆုံး ဖြေပါ (ပွဲစဉ်၊ ရက်စွဲ၊ အချိန်၊ နေရာ၊ ဈေးနှုန်း သို့မဟုတ် အချက်အလက် တိတိကျကျ တွေ့ရှိပါက ရှင်းလင်းစွာ တိုက်ရိုက် ဖော်ပြပါ)။\n"
-        f"- လိုအပ်ပါက အဓိက အချက်အလက် (၂–၄ ချက်) ကို ရိုးရိုး bullet (-) ဖြင့် ထပ်ဖြည့်ပါ။\n"
+        f"ရှာဖွေတွေ့ရှိချက်များကို အခြေခံ၍ အောက်ပါ အစီအစဉ်အတိုင်း တိတိကျကျ ဖြေပါ:\n"
+        f"1. လိုရင်း အဖြေ (Key Point): အသုံးပြုသူ သိချင်သည့် အဓိက အချက် (ရှိ/မရှိ၊ ရက်/အချိန်၊ အသင်း/နေရာ၊ ဈေးနှုန်း သို့မဟုတ် အဖြေအဓိက) ကို စာပိုဒ် ၁–၂ ပိုဒ်ဖြင့် တိုက်ရိုက် ရှင်းရှင်းလင်းလင်း အရင်ဆုံး ဖြေပါ။ ရှာဖွေမှုရလဒ်ထဲ တွေ့ရှိပါက 'တရားဝင် website/app မှာ စစ်ဆေးပါ' ဟု ရှောင်မဖြေဘဲ တွေ့သည့်အတိုင်း တိုက်ရိုက် ပြောပါ။\n"
+        f"2. အထောက်အကူ အချက်များ (လိုအပ်မှသာ): အဓိက အချက် (၂–၃ ချက်) ကို ရိုးရိုး bullet (-) ဖြင့် တိုတိုတုတ်တုတ် ထည့်ပါ။\n"
+        f"3. အလိုက်သိ အကြံပြုချက်: အသုံးပြုသူ၏ Profile/အခြေအနေနှင့် ယခု မေးခွန်းအကြောင်းအရာအရ ဆက်လုပ်နိုင်မည့် အရာ (ဥပမာ reminder မှတ်ခြင်း၊ schedule စစ်ခြင်း၊ နှိုင်းယှဉ်ခြင်း၊ နောက်ထပ် အသေးစိတ် ရှာခြင်း စသည်) ကို သဘာဝကျကျ ဖော်ရွေစွာ အကြံပြု/ကမ်းလှမ်းပါ။\n"
+        f"စည်းမျဉ်းများ:\n"
         f"- ** (bold asterisks) များကို လုံးဝ မသုံးပါနှင့်။\n"
         f"- [Verified], [Deduced], [Unverified], [အတည်ပြုပြီး], [ခန့်မှန်းသုံးသပ်ချက်], [မသေချာသေးပါ] စသည့် tag များကို လုံးဝ မထည့်ပါနှင့်။\n"
         f"- မေးခွန်းနှင့် မသက်ဆိုင်သော အချက်အလက်များကို လုံးဝ မထည့်ပါနှင့်။\n\n"
@@ -2564,18 +2566,19 @@ def _google_overview_search_summary(
     return call_ai_with_3tier_fallback(prompt, use_google_search=use_google_search)
 
 
-# --- Web Search Helper (Google AI Overview Style) ---
+# --- Web Search Helper (Google AI Overview Style + Proactive Suggestion) ---
 def answer_with_universal_search(
     user_id: int,
     user_message: str,
     recent_ctx: str = "",
     effective_query: str | None = None,
+    english_query: str | None = None,
 ) -> str:
     now_mm = datetime.now(MM_TZ)
     now_str = now_mm.strftime("%Y-%m-%d %H:%M MMT")
     profile_text = get_user_profile(user_id)
 
-    raw_q = (user_message or effective_query or "").strip()
+    raw_q = (effective_query or user_message or "").strip()
     clean_q = re.sub(r"[?？!]", "", raw_q).strip()
     if len(clean_q) <= 18 and recent_ctx:
         prev_user_lines = [
@@ -2586,39 +2589,40 @@ def answer_with_universal_search(
         if prev_user_lines:
             clean_q = f"{prev_user_lines[-1]} {clean_q}".strip()
 
+    en_q = (english_query or "").strip()
+    if en_q and now_mm.strftime("%Y") not in en_q:
+        en_q = f"{en_q} {now_mm.strftime('%B %Y')}"
+
+    search_query_label = f"{clean_q} | {en_q}" if en_q and en_q.lower() != clean_q.lower() else clean_q
+
     profile_block = f"--- Learned User Profile & Locked Rules ---\n{profile_text}\n\n" if profile_text else ""
     ctx_block = f"--- Recent Conversation Context ---\n{recent_ctx}\n\n" if recent_ctx else ""
 
+    tavily_chunks = []
+    if en_q:
+        t_en = _tavily_worker(en_q, max_results=6, exclude_social=True, days=7, topic="general")
+        if t_en:
+            tavily_chunks.append(f"[English Query Results ({en_q})]:\n{t_en}")
+    t_orig = _tavily_worker(clean_q, max_results=5, exclude_social=True, days=7, topic="general")
+    if t_orig:
+        tavily_chunks.append(f"[Original Query Results ({clean_q})]:\n{t_orig}")
+
+    tavily_ctx = "--- Live Web Search Context ---\n" + "\n\n".join(tavily_chunks) if tavily_chunks else ""
+
     reply = _google_overview_search_summary(
-            query_text=clean_q,
+        query_text=search_query_label,
         user_message=user_message,
         now_str=now_str,
         profile_block=profile_block,
         ctx_block=ctx_block,
-        tavily_context="",
+        tavily_context=tavily_ctx,
         use_google_search=True,
     )
-
-    if not reply or "ခဏအလုပ်များနေပါတယ်" in reply:
-        tavily_raw = _tavily_worker(clean_q, max_results=7, exclude_social=True, days=7)
-        tavily_ctx = f"--- Web Search (Tavily Fallback) ---\n{tavily_raw or 'None'}"
-        reply_no_search = _google_overview_search_summary(
-            query_text=clean_q,
-            user_message=user_message,
-            now_str=now_str,
-            profile_block=profile_block,
-            ctx_block=ctx_block,
-            tavily_context=tavily_ctx,
-            use_google_search=False,
-        )
-        if reply_no_search and "ခဏအလုပ်များနေပါတယ်" not in reply_no_search:
-            return _clean_maya_voice(reply_no_search)
 
     if not reply or "ခဏအလုပ်များနေပါတယ်" in reply:
         return "လောလောဆယ် Web Search ဘက်မှာ ခဏအဆင်မပြေ ဖြစ်နေပါတယ်ရှင်၊ ခဏနေပြီး ထပ်မေးကြည့်ပါ"
 
     return _clean_maya_voice(reply)
-
 
 # --- Scheduled Jobs (9:00 AM News, Due Reminders + Repeat Reschedule + 30d Cleanup, 6:00 PM Digest, 30s Follow-up) ---
 async def scheduled_morning_news_job(context: ContextTypes.DEFAULT_TYPE):
@@ -3556,6 +3560,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     user_message,
                     recent_ctx,
                     route.get("search_query"),
+                    route.get("english_search_query"),
                 )
             elif intent == "ADVICE":
                 reply_text = await asyncio.to_thread(
