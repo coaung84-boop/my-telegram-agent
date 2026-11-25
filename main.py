@@ -2582,7 +2582,9 @@ def answer_with_universal_search(
     reply = call_ai_with_3tier_fallback(full_prompt, use_google_search=True)
 
     if not reply or "ခဏအလုပ်များနေပါတယ်" in reply:
+        tavily_raw = _tavily_worker(clean_q, max_results=6, exclude_social=True, days=2)
         fallback_prompt = (
+            f"{full_prompt}\n\n--- Web Search (Tavily Fallback) ---\n{tavily_raw or 'None'}\n\n"
             f"{full_prompt}\n\n"
             f"မှတ်ချက်: Google Search tool ခဏမရသဖြင့် အထက်ပါ Web Search အချက်အလက်များကို အခြေခံ၍ "
             f"Confidence tag ([Verified] / [Deduced] / [Unverified]) များနှင့်တကွ ရှင်းလင်းစွာ ဖြေပေးပါ။"
