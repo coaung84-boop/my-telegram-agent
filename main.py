@@ -2594,7 +2594,8 @@ def answer_with_universal_search(
     if en_q and now_mm.strftime("%Y") not in en_q:
         en_q = f"{en_q} {now_mm.strftime('%B %Y')}"
 
-    search_query_text = f"{en_q} ({clean_q})" if en_q and en_q.lower() != clean_q.lower() else clean_q
+    primary_q = en_q or clean_q
+    search_query_text = primary_q
     ctx_block = f"Recent Context:\n{recent_ctx}\n\n" if recent_ctx else ""
 
     try:
@@ -2614,8 +2615,7 @@ def answer_with_universal_search(
     )
 
     if not reply or "ခဏအလုပ်များနေပါတယ်" in reply:
-        tavily_q = en_q or clean_q
-        tavily_raw = _tavily_worker(tavily_q, max_results=6, exclude_social=True, days=7, topic="general")
+        tavily_raw = _tavily_worker(primary_q, max_results=6, exclude_social=True, days=7, topic="general")
         if tavily_raw:
             reply = _google_overview_search_summary(
                 query_text=search_query_text,
