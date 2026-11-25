@@ -2961,14 +2961,25 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if len(_h_lines) >= 2:
                             _clean_healed = "\n".join(_h_lines[1:-1] if _h_lines[-1].strip().startswith("```") else _h_lines[1:])
                     _h_lines_list = _clean_healed.splitlines()
-                    if _h_lines_list and clean_old:
-                        _base_ind = " " * (len(clean_old.splitlines()[0]) - len(clean_old.splitlines()[0].lstrip(" ")))
+                    if _h_lines_list:
+                        _old_first = clean_old.splitlines()[0] if clean_old and clean_old.splitlines() else ""
+                        _base_len = len(_old_first) - len(_old_first.lstrip(" "))
+                        _src_idx = _src_text.find(clean_old) if clean_old else -1
+                        if _src_idx != -1:
+                            _line_start = _src_text.rfind("\n", 0, _src_idx) + 1
+                            _actual_line = _src_text[_line_start:_src_idx] + _old_first
+                            _base_len = len(_actual_line) - len(_actual_line.lstrip(" "))
+                        _base_ind = " " * _base_len
                         _non_emp = [ln for ln in _h_lines_list if ln.strip()]
                         _min_ind = min((len(ln) - len(ln.lstrip(" ")) for ln in _non_emp), default=0)
-                        _clean_healed = "\n".join(
-                            (_base_ind + ln[_min_ind:]) if ln.strip() else ""
-                            for ln in _h_lines_list
-                        )
+                        _aligned = []
+                        for _idx, ln in enumerate(_h_lines_list):
+                            if not ln.strip():
+                                _aligned.append("")
+                            else:
+                                _rel_extra = max(0, (len(ln) - len(ln.lstrip(" "))) - _min_ind)
+                                _aligned.append(_base_ind + (" " * _rel_extra) + ln.lstrip(" "))
+                        _clean_healed = "\n".join(_aligned)
                     _test_full = _src_text.replace(clean_old, _clean_healed, 1)
                     try:
                         ast.parse(_test_full)
