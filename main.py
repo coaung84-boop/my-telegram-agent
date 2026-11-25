@@ -2544,29 +2544,23 @@ def _google_overview_search_summary(
     tavily_context: str = "",
     use_google_search: bool = True,
 ) -> str:
-    """Google Search AI Overview ဆန်ဆန် လိုရင်း Key Point ကို အရင်ဖြေပြီး User နဲ့ အလိုက်သိသော အကြံပြုချက် တွဲပေးသည့် helper။"""
+    """Google Search AI Overview လို ရိုးရိုးရှင်းရှင်းနှင့် တိုက်ရိုက် အနှစ်ချုပ်ဖြေပေးသည့် helper။"""
     prompt = (
-        f"သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။\n"
-        f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n\n"
-        f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု လုံးဝ မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။\n"
-        f"ရှာဖွေတွေ့ရှိချက်များကို အခြေခံ၍ အောက်ပါ အစီအစဉ်အတိုင်း တိတိကျကျ ဖြေပါ:\n"
-        f"1. လိုရင်း အဖြေ (Key Point): အသုံးပြုသူ သိချင်သည့် အဓိက အချက် (ရှိ/မရှိ၊ ရက်/အချိန်၊ အသင်း/နေရာ၊ ဈေးနှုန်း သို့မဟုတ် အဖြေအဓိက) ကို စာပိုဒ် ၁–၂ ပိုဒ်ဖြင့် တိုက်ရိုက် ရှင်းရှင်းလင်းလင်း အရင်ဆုံး ဖြေပါ။ ရှာဖွေမှုရလဒ်ထဲ တွေ့ရှိပါက 'တရားဝင် website/app မှာ စစ်ဆေးပါ' ဟု ရှောင်မဖြေဘဲ တွေ့သည့်အတိုင်း တိုက်ရိုက် ပြောပါ။\n"
-        f"2. အထောက်အကူ အချက်များ (လိုအပ်မှသာ): အဓိက အချက် (၂–၃ ချက်) ကို ရိုးရိုး bullet (-) ဖြင့် တိုတိုတုတ်တုတ် ထည့်ပါ။\n"
-        f"3. အလိုက်သိ အကြံပြုချက်: အသုံးပြုသူ၏ Profile/အခြေအနေနှင့် ယခု မေးခွန်းအကြောင်းအရာအရ ဆက်လုပ်နိုင်မည့် အရာ (ဥပမာ reminder မှတ်ခြင်း၊ schedule စစ်ခြင်း၊ နှိုင်းယှဉ်ခြင်း၊ နောက်ထပ် အသေးစိတ် ရှာခြင်း စသည်) ကို သဘာဝကျကျ ဖော်ရွေစွာ အကြံပြု/ကမ်းလှမ်းပါ။\n"
-        f"စည်းမျဉ်းများ:\n"
-        f"- ** (bold asterisks) များကို လုံးဝ မသုံးပါနှင့်။\n"
-        f"- [Verified], [Deduced], [Unverified], [အတည်ပြုပြီး], [ခန့်မှန်းသုံးသပ်ချက်], [မသေချာသေးပါ] စသည့် tag များကို လုံးဝ မထည့်ပါနှင့်။\n"
-        f"- မေးခွန်းနှင့် မသက်ဆိုင်သော အချက်အလက်များကို လုံးဝ မထည့်ပါနှင့်။\n\n"
-        f"{profile_block}"
+        f"သင်သည် 'မာယာ (Maya)' အမည်ရှိ မြန်မာမိန်းကလေးဟန် AI Assistant ဖြစ်သည်။\n"
+        f"ယနေ့အချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n"
+        f"'မောင်'၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်။ ** (bold) နှင့် tag များ မသုံးပါနှင့်။\n\n"
+        f"Google Search ရှာဖွေတွေ့ရှိချက်များကို အခြေခံ၍ အောက်ပါ မေးခွန်းကို Google AI Overview ကဲ့သို့ "
+        f"လိုရင်းအဖြေကို ရှင်းရှင်းလင်းလင်း တိုက်ရိုက် ဖြေပါ။ လိုအပ်လျှင် အချက်အလက်အနည်းငယ်ကို ရိုးရိုး bullet (-) ဖြင့် ထည့်ပါ။ "
+        f"အဖြေတွေ့လျှင် website/app မှာ သွားစစ်ပါဟု မညွှန်းဘဲ တွေ့သည့်အချက်ကို တိုက်ရိုက် ဖြေပါ။\n\n"
         f"{ctx_block}"
         f"{tavily_context + chr(10) + chr(10) if tavily_context else ''}"
         f"မေးခွန်း: {user_message}\n"
-        f"ရှာဖွေရန် Query: {query_text}"
+        f"Search Query: {query_text}"
     )
     return call_ai_with_3tier_fallback(prompt, use_google_search=use_google_search)
 
 
-# --- Web Search Helper (Google AI Overview Style + Proactive Suggestion) ---
+# --- Web Search Helper (Simple Google AI Overview Style) ---
 def answer_with_universal_search(
     user_id: int,
     user_message: str,
@@ -2576,7 +2570,6 @@ def answer_with_universal_search(
 ) -> str:
     now_mm = datetime.now(MM_TZ)
     now_str = now_mm.strftime("%Y-%m-%d %H:%M MMT")
-    profile_text = get_user_profile(user_id)
 
     raw_q = (effective_query or user_message or "").strip()
     clean_q = re.sub(r"[?？!]", "", raw_q).strip()
@@ -2593,37 +2586,38 @@ def answer_with_universal_search(
     if en_q and now_mm.strftime("%Y") not in en_q:
         en_q = f"{en_q} {now_mm.strftime('%B %Y')}"
 
-    search_query_label = f"{clean_q} | {en_q}" if en_q and en_q.lower() != clean_q.lower() else clean_q
-
-    profile_block = f"--- Learned User Profile & Locked Rules ---\n{profile_text}\n\n" if profile_text else ""
-    ctx_block = f"--- Recent Conversation Context ---\n{recent_ctx}\n\n" if recent_ctx else ""
-
-    tavily_chunks = []
-    if en_q:
-        t_en = _tavily_worker(en_q, max_results=6, exclude_social=True, days=7, topic="general")
-        if t_en:
-            tavily_chunks.append(f"[English Query Results ({en_q})]:\n{t_en}")
-    t_orig = _tavily_worker(clean_q, max_results=5, exclude_social=True, days=7, topic="general")
-    if t_orig:
-        tavily_chunks.append(f"[Original Query Results ({clean_q})]:\n{t_orig}")
-
-    tavily_ctx = "--- Live Web Search Context ---\n" + "\n\n".join(tavily_chunks) if tavily_chunks else ""
+    search_query_text = f"{en_q} ({clean_q})" if en_q and en_q.lower() != clean_q.lower() else clean_q
+    ctx_block = f"Recent Context:\n{recent_ctx}\n\n" if recent_ctx else ""
 
     reply = _google_overview_search_summary(
-        query_text=search_query_label,
+        query_text=search_query_text,
         user_message=user_message,
         now_str=now_str,
-        profile_block=profile_block,
+        profile_block="",
         ctx_block=ctx_block,
-        tavily_context=tavily_ctx,
+        tavily_context="",
         use_google_search=True,
     )
+
+    if not reply or "ခဏအလုပ်များနေပါတယ်" in reply:
+        tavily_q = en_q or clean_q
+        tavily_raw = _tavily_worker(tavily_q, max_results=6, exclude_social=True, days=7, topic="general")
+        if tavily_raw:
+            reply = _google_overview_search_summary(
+                query_text=search_query_text,
+                user_message=user_message,
+                now_str=now_str,
+                profile_block="",
+                ctx_block=ctx_block,
+                tavily_context=f"Web Search Results:\n{tavily_raw}",
+                use_google_search=False,
+            )
 
     if not reply or "ခဏအလုပ်များနေပါတယ်" in reply:
         return "လောလောဆယ် Web Search ဘက်မှာ ခဏအဆင်မပြေ ဖြစ်နေပါတယ်ရှင်၊ ခဏနေပြီး ထပ်မေးကြည့်ပါ"
 
     return _clean_maya_voice(reply)
-
+    
 # --- Scheduled Jobs (9:00 AM News, Due Reminders + Repeat Reschedule + 30d Cleanup, 6:00 PM Digest, 30s Follow-up) ---
 async def scheduled_morning_news_job(context: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_USER_ID:
