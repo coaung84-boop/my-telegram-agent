@@ -2603,8 +2603,7 @@ def answer_with_universal_search(
         f"{ctx_block}"
         f"{web_context}\n\n"
         f"ရှာဖွေမေးမြန်းချက်: {user_message}\n"
-        f"ရှာဖွေခဲ့သည့် Query: {clean_q}"
-    )
+        )
 
     reply = _google_overview_search_summary(
         query_text=clean_q,
