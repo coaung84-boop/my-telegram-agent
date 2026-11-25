@@ -2595,6 +2595,12 @@ def answer_with_universal_search(
     search_query_text = f"{en_q} ({clean_q})" if en_q and en_q.lower() != clean_q.lower() else clean_q
     ctx_block = f"Recent Context:\n{recent_ctx}\n\n" if recent_ctx else ""
 
+    try:
+        mem_ctx = recall_relevant_history(user_id, clean_q, recent_limit=4, search_limit=4)
+        profile_block = f"User Context:\n{mem_ctx[:700]}\n\n" if mem_ctx else ""
+    except Exception:
+        profile_block = ""
+
     reply = _google_overview_search_summary(
         query_text=search_query_text,
         user_message=user_message,
