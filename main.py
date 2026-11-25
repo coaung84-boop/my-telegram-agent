@@ -2869,42 +2869,47 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         header_tokens = [x.strip() for x in header_part.strip().split("|", 1)]
         target_file = header_tokens[0] or "main.py"
         c_msg = header_tokens[1] if len(header_tokens) > 1 and header_tokens[1] else f"Patch {target_file} via Maya"
+        clean_old = old_part.strip("\r\n")
+        clean_new = new_part.strip("\r\n")
 
-        if clean_old and clean_old not in (cur_file.get("content") or ""):
-            _src = cur_file.get("content") or ""
+        cur_file = await asyncio.to_thread(get_github_file, target_file)
+        _src_text = cur_file.get("content") or "" if isinstance(cur_file, dict) else ""
+
+        # 1. Leading-space tolerant matching
+        if clean_old and clean_old not in _src_text:
             _old_lines = clean_old.splitlines()
             _old_stripped = [ln.lstrip(" ") for ln in _old_lines]
-            _src_lines = _src.splitlines()
+            _src_lines = _src_text.splitlines()
             _matches = []
             for _i in range(len(_src_lines) - len(_old_stripped) + 1):
                 if [_src_lines[_i + _k].lstrip(" ") for _k in range(len(_old_stripped))] == _old_stripped:
                     _matches.append("\n".join(_src_lines[_i : _i + len(_old_stripped)]))
             if len(_matches) == 1:
                 clean_old = _matches[0]
-        res = await asyncio.to_thread(
-            replace_github_snippet,
-            target_file,
-            old_part.strip("\r\n"),
-            new_part.strip("\r\n"),
-            c_msg,
-            GITHUB_BRANCH,
-        )
-        if res.get("ok"):
-            await message.reply_text(
-                f"✅ '{res['path']}' ကို ပြင်ဆင်ပြီး `{res['branch']}` ပေါ် commit တင်ပြီးပါပြီရှင် (Commit: `{res['commit']}`)"
-            )
-        else:
-            await message.reply_text(f"❌ Patch မအောင်မြင်ပါရှင်:\n{res.get('error')}")
-            return
-        clean_old = old_part.strip("\r\n")
-        clean_new = new_part.strip("\r\n")
-        if target_file.endswith(".py"):
-            try:
-                ast.parse(clean_new)
-            except SyntaxError as se:
-                await message.reply_text(f"❌ NEW code မှာ syntax error ရှိနေပါတယ်ရှင် — line {se.lineno}: {se.msg}")
-                return
 
+        # 2. Auto-indent alignment to match original file's indentation
+        if clean_old and clean_old in _src_text:
+            _first_old_line = clean_old.splitlines()[0]
+            _target_indent = " " * (len(_first_old_line) - len(_first_old_line.lstrip(" ")))
+            _new_lines = clean_new.splitlines()
+            if _new_lines:
+                _non_empty = [ln for ln in _new_lines if ln.strip()]
+                _min_new_indent = min((len(ln) - len(ln.lstrip(" ")) for ln in _non_empty), default=0)
+                _aligned_lines = [
+                    (_target_indent + ln[_min_new_indent:]) if ln.strip() else ""
+                    for ln in _new_lines
+                ]
+                clean_new = "\n".join(_aligned_lines)
+
+        # 3. Full-file syntax check before asking confirmation
+        if target_file.endswith(".py") and clean_old in _src_text:
+            _preview_full = _src_text.replace(clean_old, clean_new, 1)
+            try:
+                ast.parse(_preview_full)
+            except SyntaxError as se:
+                await message.reply_text(f"❌ NEW code ကြောင့် syntax error ဖြစ်နေပါတယ်ရှင် — line {se.lineno}: {se.msg}")
+                return
+                
         import uuid
         req_id = uuid.uuid4().hex[:10]
         _PENDING_GITHUB_ACTIONS[req_id] = {
