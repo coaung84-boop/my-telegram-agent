@@ -2608,17 +2608,28 @@ def answer_with_universal_search(
         f"ရှာဖွေခဲ့သည့် Query: {clean_q}"
     )
 
-    reply = call_ai_with_3tier_fallback(full_prompt, use_google_search=True)
+    reply = _google_overview_search_summary(
+        query_text=clean_q,
+        user_message=user_message,
+        now_str=now_str,
+        profile_block=profile_block,
+        ctx_block=ctx_block,
+        tavily_context="",
+        use_google_search=True,
+    )
 
     if not reply or "ခဏအလုပ်များနေပါတယ်" in reply:
-        tavily_raw = _tavily_worker(clean_q, max_results=6, exclude_social=True, days=2)
-        fallback_prompt = (
-            f"{full_prompt}\n\n--- Web Search (Tavily Fallback) ---\n{tavily_raw or 'None'}\n\n"
-            f"{full_prompt}\n\n"
-            f"မှတ်ချက်: Google Search tool ခဏမရသဖြင့် အထက်ပါ Web Search အချက်အလက်များကို အခြေခံ၍ "
-            f"Confidence tag ([Verified] / [Deduced] / [Unverified]) များနှင့်တကွ ရှင်းလင်းစွာ ဖြေပေးပါ။"
+        tavily_raw = _tavily_worker(clean_q, max_results=7, exclude_social=True, days=7)
+        tavily_ctx = f"--- Web Search (Tavily Fallback) ---\n{tavily_raw or 'None'}"
+        reply_no_search = _google_overview_search_summary(
+            query_text=clean_q,
+            user_message=user_message,
+            now_str=now_str,
+            profile_block=profile_block,
+            ctx_block=ctx_block,
+            tavily_context=tavily_ctx,
+            use_google_search=False,
         )
-        reply_no_search = call_ai_with_3tier_fallback(fallback_prompt, use_google_search=False)
         if reply_no_search and "ခဏအလုပ်များနေပါတယ်" not in reply_no_search:
             return _clean_maya_voice(reply_no_search)
 
