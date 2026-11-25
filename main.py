@@ -2568,7 +2568,28 @@ def _google_overview_search_summary(
         f"မေးခွန်း: {user_message}\n"
         f"Search Query: {query_text}"
     )
-    return call_ai_with_3tier_fallback(prompt, use_google_search=use_google_search)
+    if use_google_search:
+        cfg = types.GenerateContentConfig(
+            system_instruction=search_sys,
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            temperature=0.2,
+        )
+        for m_name in ("gemini-3.5-flash-lite", "gemini-3.8-flash"):
+            try:
+                resp = gemini_client.models.generate_content(model=m_name, contents=prompt, config=cfg)
+                if resp and resp.text and resp.text.strip():
+                    cleaned = _clean_maya_voice(resp.text.strip())
+                    cleaned = re.sub(r"\[(Verified|Deduced|Unverified)\]", "", cleaned, flags=re.IGNORECASE).strip()
+                    if cleaned:
+                        return cleaned
+            except Exception as e:
+                print(f"[Search Overview {m_name} Error]: {e}")
+
+    res_txt = call_ai_with_3tier_fallback(prompt, use_google_search=False)
+    if not res_txt:
+        return ""
+    res_txt = re.sub(r"\[(Verified|Deduced|Unverified)\]", "", res_txt, flags=re.IGNORECASE).strip()
+    return _clean_maya_voice(res_txt)
 
 
 # --- Web Search Helper (Simple Google AI Overview Style) ---
