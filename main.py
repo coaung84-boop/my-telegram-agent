@@ -2582,9 +2582,6 @@ def answer_with_universal_search(
         if prev_user_lines:
             clean_q = f"{prev_user_lines[-1]} {clean_q}".strip()
 
-    tavily_raw = ""
-    web_context = "--- Web Search Results ---\nGoogle Search primary mode"
-
     profile_block = f"--- Learned User Profile & Locked Rules ---\n{profile_text}\n\n" if profile_text else ""
     ctx_block = f"--- Recent Conversation Context ---\n{recent_ctx}\n\n" if recent_ctx else ""
 
