@@ -3341,7 +3341,20 @@ def replace_github_snippet(
     original_content = current.get("content", "")
     match_count = original_content.count(old_text)
     if match_count == 0:
-        return {"ok": False, "error": "အစားထိုးမယ့် မူရင်းစာသားကို file ထဲမှာ မတွေ့ပါဘူးရှင်"}
+        _old_lines = old_text.splitlines()
+        _src_lines = original_content.splitlines()
+        _matched_block = None
+        if _old_lines and len(_src_lines) >= len(_old_lines):
+            _norm_old = [ln.lstrip(" ") for ln in _old_lines]
+            for _i in range(len(_src_lines) - len(_old_lines) + 1):
+                _win = _src_lines[_i:_i + len(_old_lines)]
+                if [w.lstrip(" ") for w in _win] == _norm_old:
+                    _matched_block = "\n".join(_win)
+                    break
+        if _matched_block is not None and original_content.count(_matched_block) == 1:
+            old_text = _matched_block
+        else:
+            return {"ok": False, "error": "အစားထိုးမယ့် မူရင်းစာသားကို file ထဲမှာ မတွေ့ပါဘူးရှင်"}
     if match_count > 1:
         return {"ok": False, "error": f"တူညီနေတဲ့ စာသား {match_count} နေရာ တွေ့နေပါတယ်၊ ပိုတိကျအောင် ထည့်ပေးပါရှင်"}
 
