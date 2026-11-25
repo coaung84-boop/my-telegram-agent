@@ -2628,18 +2628,20 @@ def answer_with_universal_search(
     except Exception:
         profile_block = ""
 
+    tavily_raw = _tavily_worker(primary_q, max_results=6, exclude_social=True, days=14, topic="general")
+    tavily_block = f"Search Snippets:\n{tavily_raw}" if tavily_raw else ""
+
     reply = _google_overview_search_summary(
         query_text=search_query_text,
         user_message=user_message,
         now_str=now_str,
         profile_block=profile_block,
         ctx_block=ctx_block,
-        tavily_context="",
+        tavily_context=tavily_block,
         use_google_search=True,
     )
 
     if not reply or "ခဏအလုပ်များနေပါတယ်" in reply:
-        tavily_raw = _tavily_worker(primary_q, max_results=6, exclude_social=True, days=7, topic="general")
         if tavily_raw:
             reply = _google_overview_search_summary(
                 query_text=search_query_text,
@@ -2647,7 +2649,7 @@ def answer_with_universal_search(
                 now_str=now_str,
                 profile_block=profile_block,
                 ctx_block=ctx_block,
-                tavily_context=f"Web Search Results:\n{tavily_raw}",
+                tavily_context=tavily_block,
                 use_google_search=False,
             )
 
