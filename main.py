@@ -2542,7 +2542,7 @@ def answer_with_universal_search(
     now_str = now_mm.strftime("%Y-%m-%d %H:%M MMT")
     profile_text = get_user_profile(user_id)
 
-    raw_q = (effective_query or user_message).strip()
+    raw_q = (user_message or effective_query or "").strip()
     clean_q = re.sub(r"[?？!]", "", raw_q).strip()
     if len(clean_q) <= 18 and recent_ctx:
         prev_user_lines = [
