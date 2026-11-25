@@ -2907,8 +2907,31 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 ast.parse(_preview_full)
             except SyntaxError as se:
-                await message.reply_text(f"❌ NEW code ကြောင့် syntax error ဖြစ်နေပါတယ်ရှင် — line {se.lineno}: {se.msg}")
-                return
+                _heal_prompt = (
+                    f"Fix Python SyntaxError ({se.msg} at line {se.lineno}) in this snippet.\n"
+                    f"Return ONLY valid Python code without markdown fences.\n\n{clean_new}"
+                )
+                _healed = None
+                try:
+                    _healed = await asyncio.to_thread(call_ai_with_3tier_fallback, _heal_prompt, None, None, False)
+                except Exception:
+                    _healed = None
+                if _healed and "ခဏအလုပ်များနေပါတယ်" not in _healed:
+                    _clean_healed = _healed.strip()
+                    if _clean_healed.startswith("```"):
+                        _h_lines = _clean_healed.splitlines()
+                        if len(_h_lines) >= 2:
+                            _clean_healed = "\n".join(_h_lines[1:-1] if _h_lines[-1].strip().startswith("```") else _h_lines[1:])
+                    _test_full = _src_text.replace(clean_old, _clean_healed, 1)
+                    try:
+                        ast.parse(_test_full)
+                        clean_new = _clean_healed
+                    except SyntaxError:
+                        await message.reply_text(f"❌ Auto-fix ကြိုးစားပေမယ့် syntax error ကျန်နေပါတယ်ရှင် — line {se.lineno}: {se.msg}")
+                        return
+                else:
+                    await message.reply_text(f"❌ NEW code ကြောင့် syntax error ဖြစ်နေပါတယ်ရှင် — line {se.lineno}: {se.msg}")
+                    return
                 
         import uuid
         req_id = uuid.uuid4().hex[:10]
