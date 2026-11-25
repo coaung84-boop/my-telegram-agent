@@ -2598,7 +2598,7 @@ def answer_with_universal_search(
 
 
     reply = _google_overview_search_summary(
-        query_text=clean_q,
+            query_text=clean_q,
         user_message=user_message,
         now_str=now_str,
         profile_block=profile_block,
