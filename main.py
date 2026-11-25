@@ -2656,6 +2656,7 @@ def answer_with_universal_search(
     if not reply or "ခဏအလုပ်များနေပါတယ်" in reply:
         return "လောလောဆယ် Web Search ဘက်မှာ ခဏအဆင်မပြေ ဖြစ်နေပါတယ်ရှင်၊ ခဏနေပြီး ထပ်မေးကြည့်ပါ"
 
+    reply = re.sub(r"\[(Verified|Deduced|Unverified)\]", "", reply, flags=re.IGNORECASE).strip()
     return _clean_maya_voice(reply)
     
 # --- Scheduled Jobs (9:00 AM News, Due Reminders + Repeat Reschedule + 30d Cleanup, 6:00 PM Digest, 30s Follow-up) ---
