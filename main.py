@@ -1107,7 +1107,8 @@ Classify into ONE primary intent:
 
 If intent is "WEB_SEARCH", also output:
 - "search_query": A self-contained search query combining Recent Conversation context if the user says a follow-up like "Yes, ရှာပေးပါ" or "အသေးစိတ် ရှာပေးပါ".
-
+- "english_search_query": A concise, high-accuracy English search query for live facts/sports/news/prices/schedules (e.g. "Chelsea next match schedule November 2026"), or null if already in English.
+                                                                                                                     
 If intent is "TASK", also extract:
 - "task_action": "add" | "edit" | "delete" | "done" | "list" | "cancel_last"
 - "target_task_query": If editing/rescheduling/deleting/completing a specific existing task by name/topic, put the existing task keyword here (e.g. "ဆေးသောက်", "ဖုန်းဆက်"), else null.
@@ -1225,6 +1226,9 @@ Return ONLY valid JSON:
 
     raw_sq = parsed.get("search_query")
     search_query = str(raw_sq).strip() if raw_sq else None
+
+    raw_esq = parsed.get("english_search_query")
+    english_search_query = str(raw_esq).strip() if raw_esq else None
 
     return {
         "intent": intent,
