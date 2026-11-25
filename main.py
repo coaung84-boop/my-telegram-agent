@@ -2957,7 +2957,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         for or_m in ("qwen/qwen3.8-27b", "google/gemma-4-31b-it:free"):
                             try:
                                 resp = requests.post(
-                                    "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)",
+                                    "https://openrouter.ai/api/v1/chat/completions",
                                     headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
                                     json={
                                         "model": or_m,
