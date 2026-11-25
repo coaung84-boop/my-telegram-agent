@@ -2531,7 +2531,36 @@ def get_myanmar_news_summary(force_refresh: bool = False) -> str:
     return final_output
 
 
-# --- Web Search Helper (Context-Aware + Confidence Tagging) ---
+def _google_overview_search_summary(
+    query_text: str,
+    user_message: str,
+    now_str: str,
+    profile_block: str = "",
+    ctx_block: str = "",
+    tavily_context: str = "",
+    use_google_search: bool = True,
+) -> str:
+    """Google Web Search AI Overview ကဲ့သို့ တိကျပြတ်သားစွာ ခြုံငုံအနှစ်ချုပ်ပေးသည့် helper function။"""
+    prompt = (
+        f"သင်သည် 'မာယာ (Maya)' အမည်ရှိ ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။\n"
+        f"လက်ရှိအချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n\n"
+        f"မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု လုံးဝ မသုံးပါနှင့်၊ စကားလုံးတစ်ခုခုကို ပုံသေအတင်းမထည့်ပါနှင့်၊ 'ကျွန်တော်' ဟု လုံးဝ မသုံးပါနှင့်)။\n"
+        f"Google Search ရလဒ်များကို အခြေခံ၍ Google Web Search ၏ AI ရလဒ် (AI Overview) ကဲ့သို့ တိုက်ရိုက် အနှစ်ချုပ်ဖြေပါ:\n"
+        f"- အဓိက အဖြေကို စာပိုဒ် ၁–၂ ပိုဒ်ဖြင့် ရှင်းရှင်းလင်းလင်း အရင်ဆုံး ဖြေပါ (ပွဲစဉ်၊ ရက်စွဲ၊ အချိန်၊ နေရာ၊ ဈေးနှုန်း သို့မဟုတ် အချက်အလက် တိတိကျကျ တွေ့ရှိပါက ရှင်းလင်းစွာ တိုက်ရိုက် ဖော်ပြပါ)။\n"
+        f"- လိုအပ်ပါက အဓိက အချက်အလက် (၂–၄ ချက်) ကို ရိုးရိုး bullet (-) ဖြင့် ထပ်ဖြည့်ပါ။\n"
+        f"- ** (bold asterisks) များကို လုံးဝ မသုံးပါနှင့်။\n"
+        f"- [Verified], [Deduced], [Unverified], [အတည်ပြုပြီး], [ခန့်မှန်းသုံးသပ်ချက်], [မသေချာသေးပါ] စသည့် tag များကို လုံးဝ မထည့်ပါနှင့်။\n"
+        f"- မေးခွန်းနှင့် မသက်ဆိုင်သော အချက်အလက်များကို လုံးဝ မထည့်ပါနှင့်။\n\n"
+        f"{profile_block}"
+        f"{ctx_block}"
+        f"{tavily_context + chr(10) + chr(10) if tavily_context else ''}"
+        f"မေးခွန်း: {user_message}\n"
+        f"ရှာဖွေရန် Query: {query_text}"
+    )
+    return call_ai_with_3tier_fallback(prompt, use_google_search=use_google_search)
+
+
+# --- Web Search Helper (Google AI Overview Style) ---
 def answer_with_universal_search(
     user_id: int,
     user_message: str,
