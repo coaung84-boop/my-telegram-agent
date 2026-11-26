@@ -7,3 +7,4 @@ python-dotenv
 gTTS
 edge-tts
 beautifulsoup4
+tavily-python
