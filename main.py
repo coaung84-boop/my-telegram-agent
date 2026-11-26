@@ -1129,6 +1129,7 @@ Return ONLY valid JSON:
   "search_query": null,
   "english_search_query": null,
   "task_action": "add",
+  "target_task_query": null,
 <<<OLD>>>
     raw_esq = parsed.get("english_search_query")
     english_search_query = str(raw_esq).strip() if raw_esq else None
