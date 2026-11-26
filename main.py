@@ -1,6 +1,8 @@
 import os
 import re
 import asyncio
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -38,6 +40,22 @@ from group_news_search import (
 )
 from voice_handler import handle_voice_message, send_voice_reply
 from github_ops import handle_patch_command
+
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        return
+
+
+def _start_port_server():
+    port = int(os.environ.get("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
 
 
 # --- Command Handlers ---
@@ -84,7 +102,10 @@ async def setrule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = raw.split(maxsplit=1)
     rule_text = parts[1].strip() if len(parts) > 1 else ""
     if not rule_text:
-        await update.message.reply_text("ထည့်လိုသည့် Rule စာသားလေး ရေးပေးပါရှင်\nဥပမာ: `/setrule အဖြေများကို တိုတိုနှင့် လိုရင်းတိုရှင်း ရေးပါ`", parse_mode="Markdown")
+        await update.message.reply_text(
+            "ထည့်လိုသည့် Rule စာသားလေး ရေးပေးပါရှင်\nဥပမာ: `/setrule အဖြေများကို တိုတိုနှင့် လိုရင်းတိုရှင်း ရေးပါ`",
+            parse_mode="Markdown",
+        )
         return
     msg = update_core_rule_version(update.effective_user.id, rule_text, note=f"/setrule: {rule_text[:60]}")
     await update.message.reply_text(msg)
@@ -300,9 +321,15 @@ async def post_init(application):
     application.create_task(reminder_loop(application))
 
 
+async def _on_error(update, context):
+    print(f"Telegram Bot Error: {context.error}")
+
+
 def main():
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing.")
+
+    _start_port_server()
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -318,9 +345,11 @@ def main():
 
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice_message))
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, handle_message))
+    app.add_error_handler(_on_error)
 
     print("သင်ဇာ (Thinzar) Telegram Bot is starting...")
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
