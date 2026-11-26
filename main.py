@@ -303,6 +303,10 @@ async def post_init(application):
 def main():
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing.")
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start_command))
@@ -317,7 +321,6 @@ def main():
 
     print("သင်ဇာ (Thinzar) Telegram Bot is starting...")
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
