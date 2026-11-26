@@ -3337,9 +3337,7 @@ def _align_new_block_indent(matched_old_block: str, new_block: str) -> str:
         return new_block
 
     first_old = old_lines[0]
-    target_indent = " " * (len(first_old) - len(first_old.lstrip(" \t")).__max__(0))
-    # Tab များကို spaces အဖြစ် ညီမျှစေရန်
-    leading_ws_len = len(first_old) - len(first_old.lstrip(" "))
+    leading_ws_len = max(0, len(first_old) - len(first_old.lstrip(" ")))
     target_indent = " " * leading_ws_len
 
     non_empty = [ln for ln in new_lines if ln.strip()]
@@ -3356,7 +3354,6 @@ def _align_new_block_indent(matched_old_block: str, new_block: str) -> str:
             rel_extra = max(0, cur_ind - min_new_indent)
             aligned.append(target_indent + (" " * rel_extra) + ln.lstrip(" "))
     return "\n".join(aligned)
-
 
 def _find_matching_block_in_text(source_text: str, old_block: str) -> tuple[str | None, str]:
     """Exact match -> line-normalized match အစဉ်လိုက် ရှာပြီး (matched_block, error_msg) ပြန်ပေးသည်။"""
