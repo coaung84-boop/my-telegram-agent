@@ -1253,6 +1253,7 @@ Return ONLY valid JSON:
     return {
         "intent": intent,
         "search_query": search_query,
+        "english_search_query": english_search_query,
         "task_action": str(parsed.get("task_action") or "add").lower().strip(),
         "target_task_query": target_task_query,
         "tasks": normalized_tasks,
