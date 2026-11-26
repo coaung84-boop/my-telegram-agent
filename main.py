@@ -111,6 +111,31 @@ async def setrule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 
+async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+    groups = get_available_group_names()
+    if not groups:
+        await update.message.reply_text("လက်ရှိ မှတ်တမ်းရှိတဲ့ Group စာရင်း မတွေ့သေးပါဘူးရှင်။")
+        return
+    lines = "\n".join(f"• {g}" for g in groups)
+    await update.message.reply_text(f"📌 မှတ်တမ်းရှိသော Group များ:\n{lines}")
+
+
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+    await update.message.reply_text(
+        "📋 Command Menu:\n"
+        "• /tasks — လက်ရှိ Task စာရင်း\n"
+        "• /groups — Group စာရင်း\n"
+        "• /news — သတင်းအနှစ်ချုပ်\n"
+        "• /skills — Core Rules\n"
+        "• /setrule — Rule ထည့်ရန်\n"
+        "• /patch — GitHub ဖိုင် patch လုပ်ရန်"
+    )
+
+
 # --- Background Reminder Loop ---
 async def reminder_loop(app):
     while True:
