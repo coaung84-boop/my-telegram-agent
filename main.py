@@ -1107,7 +1107,7 @@ Classify into ONE primary intent:
 
 If intent is "WEB_SEARCH", also output:
 - "search_query": A self-contained search query combining Recent Conversation context and prior assistant/user turns for follow-ups (such as "ဘယ်သူ ဂိုးသွင်းတာလဲ" after a match result).
-- "english_search_query": A concise, high-accuracy English search query combining Recent Conversation context for live facts/sports/news/prices/schedules, including "latest" and "November 2026" for current events/matches/results (e.g. "Nottingham Forest vs Chelsea 1-0 goal scorer latest November 2026"), or null if already in English.
+- "english_search_query": A concise, high-accuracy English search query combining Recent Conversation context for live facts/sports/news/prices/schedules, including "latest" and "November 2026" for current events/matches/results (e.g. Nottingham Forest vs Chelsea 1-0 goal scorer latest November 2026), or null if already in English.
                                                                                                                      
 If intent is "TASK", also extract:
 - "task_action": "add" | "edit" | "delete" | "done" | "list" | "cancel_last"
