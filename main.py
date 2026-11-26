@@ -2937,12 +2937,6 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if cmd == "/patch":
         try:
-            # Format:
-            # /patch main.py | commit message
-            # <<<OLD>>>
-            # old code
-            # <<<NEW>>>
-            # new code
             hunks = _parse_patch_hunks(arg)
             if not hunks:
                 await message.reply_text(
@@ -2952,72 +2946,67 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "(နောက်ထပ် နေရာလည်း ဆက်ထည့်လို့ ရပါတယ်)"
                 )
                 return
-            # ... ကျန်တဲ့ /patch code များကိုလည်း ဒီ ၁၂ spaces indentation ထဲမှာပဲ ဆက်ထားပါ ...
+
+            header_part = arg.split("<<<OLD>>>", 1)[0]
+            header_tokens = [x.strip() for x in header_part.strip().split("|", 1)]
+            target_file = header_tokens[0] or "main.py"
+            c_msg = header_tokens[1] if len(header_tokens) > 1 and header_tokens[1] else f"Patch {target_file} via Maya"
+
+            cur_file = await asyncio.to_thread(get_github_file, target_file)
+            if not isinstance(cur_file, dict) or not cur_file.get("ok"):
+                err_txt = cur_file.get("error") if isinstance(cur_file, dict) else "File ဖတ်မရပါ"
+                await message.reply_text(f"❌ {err_txt}")
+                return
+
+            _src_text = cur_file.get("content") or ""
+            _ok_apply, _preview_full, _apply_err = apply_hunks_to_source(_src_text, hunks)
+            if not _ok_apply:
+                await message.reply_text(f"❌ {_apply_err}")
+                return
+
+            if target_file.endswith(".py"):
+                try:
+                    ast.parse(_preview_full)
+                except SyntaxError as se:
+                    await message.reply_text(f"❌ Patch ပြီးနောက် Python syntax error ဖြစ်နိုင်ပါတယ်ရှင် — line {se.lineno}: {se.msg}")
+                    return
+
+            clean_old = arg[arg.find("<<<OLD>>>"):]
+            clean_new = ""
+            total_old_chars = sum(len(o) for o, _ in hunks)
+            total_new_chars = sum(len(n) for _, n in hunks)
+
+            import uuid
+            req_id = uuid.uuid4().hex[:10]
+            _PENDING_GITHUB_ACTIONS[req_id] = {
+                "kind": "patch",
+                "file_path": target_file,
+                "old_text": clean_old,
+                "new_text": clean_new,
+                "commit_message": c_msg,
+                "branch": GITHUB_BRANCH,
+                "created_ts": time.time(),
+            }
+            preview_msg = (
+                f"⚠️ GitHub Patch အတည်ပြုချက် လိုအပ်ပါတယ်ရှင်\n"
+                f"• File: `{target_file}` (`{GITHUB_BRANCH}`)\n"
+                f"• Commit: `{c_msg}`\n"
+                f"• Hunks: {len(hunks)} နေရာ | OLD: {total_old_chars} chars → NEW: {total_new_chars} chars"
+            )
+            kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Confirm Commit", callback_data=f"gh_ok:{req_id}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"gh_no:{req_id}"),
+                ]
+            ])
+            await message.reply_text(preview_msg, reply_markup=kb)
         except Exception as patch_err:
             print(f"[/patch Error]: {type(patch_err).__name__}: {patch_err}")
             await message.reply_text(
                 f"❌ /patch လုပ်ဆောင်ရာမှာ အခက်အခဲ ဖြစ်သွားပါတယ်ရှင်: {type(patch_err).__name__}: {str(patch_err)[:180]}"
             )
-            return
-            
-        header_part = arg.split("<<<OLD>>>", 1)[0]
-        header_tokens = [x.strip() for x in header_part.strip().split("|", 1)]
-        target_file = header_tokens[0] or "main.py"
-        c_msg = header_tokens[1] if len(header_tokens) > 1 and header_tokens[1] else f"Patch {target_file} via Maya"
-
-        cur_file = await asyncio.to_thread(get_github_file, target_file)
-        if not isinstance(cur_file, dict) or not cur_file.get("ok"):
-            err_txt = cur_file.get("error") if isinstance(cur_file, dict) else "File ဖတ်မရပါ"
-            await message.reply_text(f"❌ {err_txt}")
-            return
-
-        _src_text = cur_file.get("content") or ""
-        _ok_apply, _preview_full, _apply_err = apply_hunks_to_source(_src_text, hunks)
-        if not _ok_apply:
-            await message.reply_text(f"❌ {_apply_err}")
-            return
-
-        if target_file.endswith(".py"):
-            try:
-                ast.parse(_preview_full)
-            except SyntaxError as se:
-                await message.reply_text(f"❌ Patch ပြီးနောက် Python syntax error ဖြစ်နိုင်ပါတယ်ရှင် — line {se.lineno}: {se.msg}")
-                return
-
-        clean_old = arg[arg.find("<<<OLD>>>"):]
-        clean_new = ""
-        total_old_chars = sum(len(o) for o, _ in hunks)
-        total_new_chars = sum(len(n) for _, n in hunks)
-
-        import uuid
-        req_id = uuid.uuid4().hex[:10]
-        _PENDING_GITHUB_ACTIONS[req_id] = {
-            "kind": "patch",
-            "file_path": target_file,
-            "old_text": clean_old,
-            "new_text": clean_new,
-            "commit_message": c_msg,
-            "branch": GITHUB_BRANCH,
-            "created_ts": time.time(),
-        }
-        preview_msg = (
-            f"⚠️ GitHub Patch အတည်ပြုချက် လိုအပ်ပါတယ်ရှင်\n"
-            f"• File: `{target_file}` (`{GITHUB_BRANCH}`)\n"
-            f"• Commit: `{c_msg}`\n"
-            f"• Hunks: {len(hunks)} နေရာ | OLD: {total_old_chars} chars → NEW: {total_new_chars} chars"
-        )
-        kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Confirm Commit", callback_data=f"gh_ok:{req_id}"),
-                InlineKeyboardButton("❌ Cancel", callback_data=f"gh_no:{req_id}"),
-            ]
-        ])
-            await message.reply_text(preview_msg, reply_markup=kb)
-        except Exception as patch_err:
-            print(f"[/patch Error]: {type(patch_err).__name__}: {patch_err}")
-            await message.reply_text(f"❌ /patch လုပ်ဆောင်ရာမှာ အခက်အခဲ ဖြစ်သွားပါတယ်ရှင်: {type(patch_err).__name__}: {str(patch_err)[:180]}")
         return
-
+        
     if cmd == "/getfile":
         target_file = arg or "main.py"
         await context.bot.send_chat_action(chat_id=message.chat_id, action="upload_document")
