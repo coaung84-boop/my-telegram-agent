@@ -1,9 +1,17 @@
-import ast
-import base64
+import os
 import re
+import base64
 import requests
+from telegram import Update
+from telegram.ext import ContextTypes
 
-from config import ALLOWED_GITHUB_FILES, GITHUB_BRANCH, GITHUB_REPO, GITHUB_TOKEN
+from config import (
+    ADMIN_USER_ID,
+    GITHUB_TOKEN,
+    GITHUB_REPO,
+    GITHUB_BRANCH,
+    ALLOWED_GITHUB_FILES,
+)
 
 
 def _github_headers() -> dict:
@@ -14,215 +22,185 @@ def _github_headers() -> dict:
     }
 
 
-def get_github_file(file_path: str, branch: str | None = None) -> dict:
-    clean_path = (file_path or "").strip().lstrip("/")
+def _github_get_file(file_path: str) -> tuple[str, str | None]:
+    """GitHub repo ထဲမှ file content (utf-8) နှင့် sha ကို ဖတ်ယူသည်။"""
     if not GITHUB_TOKEN or not GITHUB_REPO:
-        return {"ok": False, "error": "GITHUB_TOKEN သို့မဟုတ် GITHUB_REPO မသတ်မှတ်ရသေးပါရှင်"}
-    if not clean_path:
-        return {"ok": False, "error": "File path လိုအပ်ပါတယ်ရှင်"}
-
-    ref = branch or GITHUB_BRANCH
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{clean_path}"
-    try:
-        resp = requests.get(url, headers=_github_headers(), params={"ref": ref}, timeout=10)
-        if resp.status_code != 200:
-            return {"ok": False, "error": f"GitHub read failed ({resp.status_code}): {resp.text[:180]}"}
-        data = resp.json()
-        raw_b64 = (data.get("content") or "").replace("\n", "")
-        content_str = base64.b64decode(raw_b64).decode("utf-8") if raw_b64 else ""
-        return {"ok": True, "path": clean_path, "sha": data.get("sha"), "content": content_str}
-    except Exception as e:
-        return {"ok": False, "error": f"GitHub read error: {type(e).__name__}: {str(e)[:150]}"}
+        raise RuntimeError("GITHUB_TOKEN သို့မဟုတ် GITHUB_REPO environment variable မထည့်ရသေးပါ။")
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
+    params = {"ref": GITHUB_BRANCH}
+    resp = requests.get(url, headers=_github_headers(), params=params, timeout=15)
+    if resp.status_code != 200:
+        raise RuntimeError(f"GitHub GET {file_path} failed ({resp.status_code}): {resp.text[:180]}")
+    data = resp.json()
+    sha = data.get("sha")
+    raw_b64 = (data.get("content") or "").replace("\n", "")
+    content = base64.b64decode(raw_b64).decode("utf-8")
+    return content, sha
 
 
-def upsert_github_file(
-    file_path: str,
-    new_content: str,
-    commit_message: str = "Update file via Thinzar AI Agent",
-    branch: str | None = None,
-) -> dict:
-    clean_path = (file_path or "").strip().lstrip("/")
-    if not GITHUB_TOKEN or not GITHUB_REPO:
-        return {"ok": False, "error": "GITHUB_TOKEN သို့မဟုတ် GITHUB_REPO မသတ်မှတ်ရသေးပါရှင်"}
-    if clean_path not in ALLOWED_GITHUB_FILES:
-        return {"ok": False, "error": f"'{clean_path}' ကို ခွင့်ပြုထားသည့် file စာရင်းထဲ ထည့်မထားပါရှင်"}
-
-    if clean_path.endswith(".py"):
-        try:
-            ast.parse(new_content)
-        except SyntaxError as se:
-            return {"ok": False, "error": f"Python syntax error ရှိနေလို့ commit မတင်ခဲ့ပါဘူး — line {se.lineno}: {se.msg}"}
-
-    ref = branch or GITHUB_BRANCH
-    existing = get_github_file(clean_path, branch=ref)
-    sha = existing.get("sha") if existing.get("ok") else None
-
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{clean_path}"
-    encoded = base64.b64encode(new_content.encode("utf-8")).decode("ascii")
+def _github_put_file(file_path: str, new_content: str, sha: str | None, commit_message: str) -> dict:
+    """GitHub repo ထဲသို့ file content အသစ်ကို commit & push လုပ်သည်။"""
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
+    encoded = base64.b64encode(new_content.encode("utf-8")).decode("utf-8")
     payload = {
-        "message": commit_message[:120] or "Update file via Thinzar AI Agent",
+        "message": commit_message,
         "content": encoded,
-        "branch": ref,
+        "branch": GITHUB_BRANCH,
     }
     if sha:
         payload["sha"] = sha
-
-    try:
-        resp = requests.put(url, headers=_github_headers(), json=payload, timeout=15)
-        if resp.status_code not in (200, 201):
-            return {"ok": False, "error": f"GitHub commit failed ({resp.status_code}): {resp.text[:180]}"}
-        res_json = resp.json()
-        commit_sha = ((res_json.get("commit") or {}).get("sha") or "")[:7]
-        return {"ok": True, "path": clean_path, "commit": commit_sha, "branch": ref}
-    except Exception as e:
-        return {"ok": False, "error": f"GitHub commit error: {type(e).__name__}: {str(e)[:150]}"}
+    resp = requests.put(url, headers=_github_headers(), json=payload, timeout=20)
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(f"GitHub PUT {file_path} failed ({resp.status_code}): {resp.text[:200]}")
+    return resp.json()
 
 
-def _normalize_mobile_text(s: str) -> str:
-    """ဖုန်းကနေ copy ကူးတဲ့အခါ ဖြစ်တတ်တဲ့ \r\n၊ NBSP (\u00a0)၊ smart quotes နဲ့ tabs တွေကို ညှိပေးသည်။"""
-    if not s:
-        return ""
-    s = s.replace("\r\n", "\n").replace("\r", "\n").replace("\u00a0", " ")
-    s = s.replace("\t", "    ")
-    s = s.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
-    return s
-
-
-def parse_patch_hunks(raw_body: str) -> list[tuple[str, str]]:
-    if not raw_body or "<<<OLD>>>" not in raw_body or "<<<NEW>>>" not in raw_body:
-        return []
-
+def _parse_unified_or_search_replace_patch(patch_text: str) -> list[tuple[str, str]]:
+    """
+    Patch format နှစ်မျိုးလုံးကို ပံ့ပိုးပေးသည်:
+    1) SEARCH / REPLACE blocks:
+       <<<<<<< SEARCH
+       old code
+       =======
+       new code
+       >>>>>>> REPLACE
+    2) Unified diff hunks (@@ ... @@ with '-' and '+' lines)
+    """
     hunks: list[tuple[str, str]] = []
-    chunks = raw_body.split("<<<OLD>>>")
-    for part in chunks[1:]:
-        if "<<<NEW>>>" not in part:
+
+    sr_pattern = re.compile(
+        r"<<<<<<< SEARCH\s*\n(.*?)\n=======\s*\n(.*?)\n>>>>>>> REPLACE",
+        re.DOTALL,
+    )
+    for m in sr_pattern.finditer(patch_text):
+        hunks.append((m.group(1), m.group(2)))
+    if hunks:
+        return hunks
+
+    lines = patch_text.splitlines()
+    old_buf: list[str] = []
+    new_buf: list[str] = []
+    in_hunk = False
+
+    for line in lines:
+        if line.startswith("@@"):
+            if old_buf or new_buf:
+                hunks.append(("\n".join(old_buf), "\n".join(new_buf)))
+                old_buf, new_buf = [], []
+            in_hunk = True
             continue
-        old_raw, new_raw = part.split("<<<NEW>>>", 1)
-        old_clean = _normalize_mobile_text(old_raw).strip("\n")
-        new_clean = _normalize_mobile_text(new_raw).strip("\n")
-        if old_clean:
-            hunks.append((old_clean, new_clean))
+        if not in_hunk:
+            continue
+        if line.startswith("---") or line.startswith("+++"):
+            continue
+        if line.startswith("-"):
+            old_buf.append(line[1:])
+        elif line.startswith("+"):
+            new_buf.append(line[1:])
+        elif line.startswith(" "):
+            old_buf.append(line[1:])
+            new_buf.append(line[1:])
+
+    if old_buf or new_buf:
+        hunks.append(("\n".join(old_buf), "\n".join(new_buf)))
+
     return hunks
 
 
-def _align_new_block_indent(matched_old_block: str, new_block: str) -> str:
-    old_lines = matched_old_block.splitlines()
-    new_lines = new_block.splitlines()
-    if not old_lines or not new_lines:
-        return new_block
+def _apply_hunks_to_content(original_content: str, hunks: list[tuple[str, str]]) -> tuple[str, int, list[str]]:
+    updated = original_content
+    applied = 0
+    failed = []
 
-    first_old = old_lines[0]
-    target_indent_len = len(first_old) - len(first_old.lstrip(" "))
-    target_indent = " " * target_indent_len
+    for idx, (old_block, new_block) in enumerate(hunks, start=1):
+        if not old_block and new_block:
+            updated = updated.rstrip() + "\n\n" + new_block.lstrip("\n") + "\n"
+            applied += 1
+            continue
 
-    non_empty = [ln for ln in new_lines if ln.strip()]
-    if not non_empty:
-        return "\n".join(["" for _ in new_lines])
-
-    min_new_indent = min((len(ln) - len(ln.lstrip(" ")) for ln in non_empty), default=0)
-    aligned = []
-    for ln in new_lines:
-        if not ln.strip():
-            aligned.append("")
+        if old_block in updated:
+            updated = updated.replace(old_block, new_block, 1)
+            applied += 1
         else:
-            cur_ind = len(ln) - len(ln.lstrip(" "))
-            rel_extra = max(0, cur_ind - min_new_indent)
-            aligned.append(target_indent + (" " * rel_extra) + ln.lstrip(" "))
-    return "\n".join(aligned)
+            norm_old = re.sub(r"[ \t]+", " ", old_block.strip())
+            norm_upd = re.sub(r"[ \t]+", " ", updated)
+            if norm_old and norm_old in norm_upd:
+                failed.append(f"Hunk #{idx}: whitespace/indentation mismatch")
+            else:
+                failed.append(f"Hunk #{idx}: target block not found")
+
+    return updated, applied, failed
 
 
-def _collapse_ws(line: str) -> str:
-    return re.sub(r"\s+", " ", (line or "").strip())
+async def handle_patch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /patch <filename>
+    <<<<<<< SEARCH
+    ...
+    =======
+    ...
+    >>>>>>> REPLACE
+    (သို့မဟုတ် unified diff hunk) ဖြင့် GitHub repo ရှိ ဖိုင်ကို update လုပ်ပြီး Render auto-deploy ဖြစ်စေသည်။
+    """
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID:
+        return
 
+    raw_msg = update.message.text or ""
+    lines = raw_msg.splitlines()
+    first_line_parts = lines[0].strip().split(maxsplit=1) if lines else []
+    target_file = first_line_parts[1].strip() if len(first_line_parts) > 1 else "main.py"
+    target_file = os.path.basename(target_file)
 
-def _find_matching_block_in_text(source_text: str, old_block: str) -> tuple[str | None, str]:
-    src_norm = _normalize_mobile_text(source_text)
-    old_norm = _normalize_mobile_text(old_block)
+    if target_file not in ALLOWED_GITHUB_FILES:
+        allowed_str = ", ".join(sorted(ALLOWED_GITHUB_FILES))
+        await update.message.reply_text(
+            f"'{target_file}' ကို patch ခွင့်မပြုထားပါဘူးရှင်\nခွင့်ပြုထားသော ဖိုင်များ: {allowed_str}"
+        )
+        return
 
-    if not old_norm.strip():
-        return None, "အစားထိုးမယ့် မူရင်းစာသား (OLD) လိုအပ်ပါတယ်ရှင်"
+    patch_body = "\n".join(lines[1:]).strip()
+    if not patch_body and update.message.reply_to_message and update.message.reply_to_message.text:
+        patch_body = update.message.reply_to_message.text.strip()
 
-    exact_cnt = src_norm.count(old_norm)
-    if exact_cnt == 1:
-        return old_norm, ""
-    if exact_cnt > 1:
-        return None, f"တူညီနေတဲ့ စာသား {exact_cnt} နေရာ တွေ့နေပါတယ်၊ ပိုတိကျအောင် ထည့်ပေးပါရှင်"
+    if not patch_body:
+        await update.message.reply_text(
+            "Patch အချက်အလက် ထည့်ပေးပါရှင်\n"
+            "ဥပမာ:\n"
+            "/patch main.py\n"
+            "<<<<<<< SEARCH\nold code\n=======\nnew code\n>>>>>>> REPLACE"
+        )
+        return
 
-    old_lines = [ln.strip() for ln in old_norm.splitlines() if ln.strip()]
-    src_lines = src_norm.splitlines()
-    if not old_lines or len(src_lines) < len(old_lines):
-        return None, "အစားထိုးမယ့် မူရင်းစာသားကို file ထဲမှာ မတွေ့ပါဘူးရှင်"
-
-    # Non-empty line-by-line match (blank line ကွာချက်ကို ကျော်လွှားနိုင်ရန်)
-    non_empty_indices = [idx for idx, ln in enumerate(src_lines) if ln.strip()]
-    n_old = len(old_lines)
-    if len(non_empty_indices) >= n_old:
-        candidates: list[str] = []
-        for pos in range(len(non_empty_indices) - n_old + 1):
-            sub_idx = non_empty_indices[pos:pos + n_old]
-            win_stripped = [src_lines[i].strip() for i in sub_idx]
-            if win_stripped == old_lines:
-                start_i = sub_idx[0]
-                end_i = sub_idx[-1] + 1
-                candidates.append("\n".join(src_lines[start_i:end_i]))
-
-        if len(candidates) == 1:
-            return candidates[0], ""
-        if len(candidates) > 1:
-            return None, f"တူညီနေတဲ့ စာသား {len(candidates)} နေရာ တွေ့နေပါတယ်၊ ပိုရှည်ပြီး တိကျတဲ့ line များ ထည့်ပေးပါရှင်"
-
-        # Whitespace-collapsed match (ဖုန်းကနေ space/quote ပြောင်းသွားရင် ရှာနိုင်ရန်)
-        old_collapsed = [_collapse_ws(ln) for ln in old_lines]
-        ws_candidates: list[str] = []
-        for pos in range(len(non_empty_indices) - n_old + 1):
-            sub_idx = non_empty_indices[pos:pos + n_old]
-            win_collapsed = [_collapse_ws(src_lines[i]) for i in sub_idx]
-            if win_collapsed == old_collapsed:
-                start_i = sub_idx[0]
-                end_i = sub_idx[-1] + 1
-                ws_candidates.append("\n".join(src_lines[start_i:end_i]))
-
-        if len(ws_candidates) == 1:
-            return ws_candidates[0], ""
-        if len(ws_candidates) > 1:
-            return None, f"တူညီနေတဲ့ စာသား {len(ws_candidates)} နေရာ တွေ့နေပါတယ်၊ ပိုတိကျအောင် ထည့်ပေးပါရှင်"
-
-    return None, "အစားထိုးမယ့် မူရင်းစာသားကို file ထဲမှာ မတွေ့ပါဘူးရှင်"
-
-
-def apply_hunks_to_source(source_text: str, hunks: list[tuple[str, str]]) -> tuple[bool, str, str]:
-    cur_text = _normalize_mobile_text(source_text)
-    for idx, (old_b, new_b) in enumerate(hunks, start=1):
-        matched_old, err = _find_matching_block_in_text(cur_text, old_b)
-        if not matched_old:
-            return False, cur_text, f"Hunk #{idx}: {err}"
-        aligned_new = _align_new_block_indent(matched_old, new_b)
-        cur_text = cur_text.replace(matched_old, aligned_new, 1)
-    return True, cur_text, ""
-
-
-def replace_github_snippet(
-    file_path: str,
-    old_text: str,
-    new_text: str,
-    commit_message: str = "Patch via Thinzar AI Agent",
-    branch: str | None = None,
-) -> dict:
-    clean_path = (file_path or "").strip().lstrip("/")
-    if clean_path not in ALLOWED_GITHUB_FILES:
-        return {"ok": False, "error": f"'{clean_path}' ကို ခွင့်ပြုထားသည့် file စာရင်းထဲ ထည့်မထားပါရှင်"}
-
-    current = get_github_file(clean_path, branch=branch)
-    if not current.get("ok"):
-        return current
-
-    original_content = current.get("content", "")
-    hunks = parse_patch_hunks(old_text) if "<<<OLD>>>" in old_text else [(old_text, new_text)]
+    hunks = _parse_unified_or_search_replace_patch(patch_body)
     if not hunks:
-        return {"ok": False, "error": "အစားထိုးမယ့် မူရင်းစာသား (old_text) လိုအပ်ပါတယ်ရှင်"}
+        await update.message.reply_text("SEARCH/REPLACE block သို့မဟုတ် diff hunk ကို ဖတ်မရပါဘူးရှင်၊ format ပြန်စစ်ပေးပါ")
+        return
 
-    ok, updated_content, err = apply_hunks_to_source(original_content, hunks)
-    if not ok:
-        return {"ok": False, "error": err}
+    try:
+        await update.message.reply_text(f"⏳ `{target_file}` ({GITHUB_REPO}@{GITHUB_BRANCH}) ကို patch လုပ်နေပါတယ်ရှင်...", parse_mode="Markdown")
+        current_content, sha = _github_get_file(target_file)
+        new_content, applied_count, failed_list = _apply_hunks_to_content(current_content, hunks)
 
-    return upsert_github_file(clean_path, updated_content, commit_message=commit_message, branch=branch)
+        if applied_count == 0:
+            fail_detail = "\n".join(failed_list) if failed_list else "No matching hunks"
+            await update.message.reply_text(f"❌ Patch မအောင်မြင်ပါရှင်:\n{fail_detail}")
+            return
+
+        commit_msg = f"bot(/patch): update {target_file} ({applied_count} hunk(s) via သင်ဇာ)"
+        res_json = _github_put_file(target_file, new_content, sha, commit_msg)
+        commit_sha = ((res_json.get("commit") or {}).get("sha") or "")[:7]
+
+        status_msg = (
+            f"✅ `{target_file}` ကို GitHub (`{GITHUB_BRANCH}`) မှာ update တင်ပြီးပါပြီရှင်\n"
+            f"• Applied hunks: {applied_count}/{len(hunks)}\n"
+            f"• Commit: `{commit_sha}`\n"
+            f"• Render auto-deploy ဆက်လုပ်သွားပါလိမ့်မယ်"
+        )
+        if failed_list:
+            status_msg += "\n⚠️ မကိုက်ညီသည့် hunk များ:\n" + "\n".join(failed_list)
+
+        await update.message.reply_text(status_msg, parse_mode="Markdown")
+    except Exception as e:
+        print(f"GitHub /patch error: {e}")
+        await update.message.reply_text(f"❌ GitHub patch လုပ်ရာမှာ error တက်ပါတယ်ရှင်:\n`{str(e)[:240]}`", parse_mode="Markdown")
