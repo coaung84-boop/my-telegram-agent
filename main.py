@@ -1141,21 +1141,21 @@ Return ONLY valid JSON:
 }}
 """
 parsed = _call_json_intelligence(prompt)
-    if not parsed:
-        return {
-            "intent": "GENERAL",
-            "search_query": None,
-            "task_action": "add",
-            "target_task_query": None,
-            "tasks": [],
-            "clean_title": _clean_task_title_fallback(user_message),
-            "reason": None,
-            "repeat_type": "once",
-            "remind_dt": None,
-            "group_name": None,
-            "group_mode": "query",
-            "period": "recent",
-        }
+if not parsed:
+    return {
+        "intent": "GENERAL",
+        "search_query": None,
+        "task_action": "add",
+        "target_task_query": None,
+        "tasks": [],
+        "clean_title": _clean_task_title_fallback(user_message),
+        "reason": None,
+        "repeat_type": "once",
+        "remind_dt": None,
+        "group_name": None,
+        "group_mode": "query",
+        "period": "recent",
+    }
 
     intent = str(parsed.get("intent") or "GENERAL").upper().strip()
     if intent not in {"TASK", "GROUP", "ADVICE", "GENERAL", "WEB_SEARCH"}:
