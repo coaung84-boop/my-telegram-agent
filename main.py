@@ -52,8 +52,8 @@ GITHUB_REPO = os.getenv("GITHUB_REPO", "").strip()
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip() or "main"
 ALLOWED_GITHUB_FILES = {
     "main.py",
-    "config.py",
     "database.py",
+    "config.py",
     "ai_engine.py",
     "memory_manager.py",
     "task_manager.py",
