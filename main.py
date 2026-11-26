@@ -50,7 +50,17 @@ import base64
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 GITHUB_REPO = os.getenv("GITHUB_REPO", "").strip()
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip() or "main"
-ALLOWED_GITHUB_FILES = {"main.py", "database.py"}
+ALLOWED_GITHUB_FILES = {
+    "main.py",
+    "config.py",
+    "database.py",
+    "ai_engine.py",
+    "memory_manager.py",
+    "task_manager.py",
+    "group_news_search.py",
+    "voice_handler.py",
+    "github_ops.py",
+}
 
 # Myanmar Standard Time (UTC+6:30), Retention & Quota Savers
 MM_TZ = timezone(timedelta(hours=6, minutes=30))
