@@ -2989,7 +2989,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Commit: `{c_msg}`\n"
             f"• Hunks: {len(hunks)} နေရာ | OLD: {total_old_chars} chars → NEW: {total_new_chars} chars"
         )
-    kb = InlineKeyboardMarkup([
+        kb = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("✅ Confirm Commit", callback_data=f"gh_ok:{req_id}"),
                 InlineKeyboardButton("❌ Cancel", callback_data=f"gh_no:{req_id}"),
@@ -2997,7 +2997,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         await message.reply_text(preview_msg, reply_markup=kb)
         return
-
+        
     if cmd == "/getfile":
         target_file = arg or "main.py"
         await context.bot.send_chat_action(chat_id=message.chat_id, action="upload_document")
