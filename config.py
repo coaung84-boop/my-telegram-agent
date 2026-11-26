@@ -4,12 +4,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
+# AI & Search Clients Initialization
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("MY_TELEGRAM_USER_ID", "0"))
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
@@ -27,9 +28,10 @@ ALLOWED_GITHUB_FILES = {
     "github_ops.py",
 }
 
+# Myanmar Standard Time (UTC+6:30), Retention & Quota Savers
 MM_TZ = timezone(timedelta(hours=6, minutes=30))
 RETENTION_DAYS = 30
-NEWS_CACHE_TTL_SECONDS = 1800
+NEWS_CACHE_TTL_SECONDS = 1800  # 30 minutes cache for /news & text summary
 MAX_GROUP_MEDIA_AI_PER_HOUR = 15
 
 MYANMAR_WEEKDAYS = [
@@ -42,6 +44,7 @@ MYANMAR_WEEKDAYS = [
     "တနင်္ဂနွေနေ့",
 ]
 
+# --- Trusted News Sources (Telegram Channels + Website Feeds + Domain Search) ---
 TELEGRAM_NEWS_CHANNELS = [
     ("The Irrawaddy", "theirrawaddy"),
     ("Myanmar Now", "MyanmarNowNews"),
