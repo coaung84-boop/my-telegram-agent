@@ -1,5 +1,6 @@
 import ast
 import base64
+import re
 import requests
 
 from config import ALLOWED_GITHUB_FILES, GITHUB_BRANCH, GITHUB_REPO, GITHUB_TOKEN
@@ -77,6 +78,16 @@ def upsert_github_file(
         return {"ok": False, "error": f"GitHub commit error: {type(e).__name__}: {str(e)[:150]}"}
 
 
+def _normalize_mobile_text(s: str) -> str:
+    """ဖုန်းကနေ copy ကူးတဲ့အခါ ဖြစ်တတ်တဲ့ \r\n၊ NBSP (\u00a0)၊ smart quotes နဲ့ tabs တွေကို ညှိပေးသည်။"""
+    if not s:
+        return ""
+    s = s.replace("\r\n", "\n").replace("\r", "\n").replace("\u00a0", " ")
+    s = s.replace("\t", "    ")
+    s = s.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+    return s
+
+
 def parse_patch_hunks(raw_body: str) -> list[tuple[str, str]]:
     if not raw_body or "<<<OLD>>>" not in raw_body or "<<<NEW>>>" not in raw_body:
         return []
@@ -87,8 +98,8 @@ def parse_patch_hunks(raw_body: str) -> list[tuple[str, str]]:
         if "<<<NEW>>>" not in part:
             continue
         old_raw, new_raw = part.split("<<<NEW>>>", 1)
-        old_clean = old_raw.strip("\r\n")
-        new_clean = new_raw.strip("\r\n")
+        old_clean = _normalize_mobile_text(old_raw).strip("\n")
+        new_clean = _normalize_mobile_text(new_raw).strip("\n")
         if old_clean:
             hunks.append((old_clean, new_clean))
     return hunks
@@ -101,8 +112,8 @@ def _align_new_block_indent(matched_old_block: str, new_block: str) -> str:
         return new_block
 
     first_old = old_lines[0]
-    leading_ws_len = len(first_old) - len(first_old.lstrip(" "))
-    target_indent = " " * leading_ws_len
+    target_indent_len = len(first_old) - len(first_old.lstrip(" "))
+    target_indent = " " * target_indent_len
 
     non_empty = [ln for ln in new_lines if ln.strip()]
     if not non_empty:
@@ -120,9 +131,13 @@ def _align_new_block_indent(matched_old_block: str, new_block: str) -> str:
     return "\n".join(aligned)
 
 
+def _collapse_ws(line: str) -> str:
+    return re.sub(r"\s+", " ", (line or "").strip())
+
+
 def _find_matching_block_in_text(source_text: str, old_block: str) -> tuple[str | None, str]:
-    src_norm = source_text.replace("\r\n", "\n")
-    old_norm = old_block.replace("\r\n", "\n")
+    src_norm = _normalize_mobile_text(source_text)
+    old_norm = _normalize_mobile_text(old_block)
 
     if not old_norm.strip():
         return None, "အစားထိုးမယ့် မူရင်းစာသား (OLD) လိုအပ်ပါတယ်ရှင်"
@@ -133,34 +148,50 @@ def _find_matching_block_in_text(source_text: str, old_block: str) -> tuple[str 
     if exact_cnt > 1:
         return None, f"တူညီနေတဲ့ စာသား {exact_cnt} နေရာ တွေ့နေပါတယ်၊ ပိုတိကျအောင် ထည့်ပေးပါရှင်"
 
-    old_lines = [ln.strip() for ln in old_norm.splitlines()]
-    while old_lines and old_lines[0] == "":
-        old_lines.pop(0)
-    while old_lines and old_lines[-1] == "":
-        old_lines.pop()
-
+    old_lines = [ln.strip() for ln in old_norm.splitlines() if ln.strip()]
     src_lines = src_norm.splitlines()
     if not old_lines or len(src_lines) < len(old_lines):
         return None, "အစားထိုးမယ့် မူရင်းစာသားကို file ထဲမှာ မတွေ့ပါဘူးရှင်"
 
-    candidates: list[str] = []
+    # Non-empty line-by-line match (blank line ကွာချက်ကို ကျော်လွှားနိုင်ရန်)
+    non_empty_indices = [idx for idx, ln in enumerate(src_lines) if ln.strip()]
     n_old = len(old_lines)
-    for i in range(len(src_lines) - n_old + 1):
-        win = src_lines[i:i + n_old]
-        win_stripped = [w.strip() for w in win]
-        if win_stripped == old_lines:
-            candidates.append("\n".join(win))
+    if len(non_empty_indices) >= n_old:
+        candidates: list[str] = []
+        for pos in range(len(non_empty_indices) - n_old + 1):
+            sub_idx = non_empty_indices[pos:pos + n_old]
+            win_stripped = [src_lines[i].strip() for i in sub_idx]
+            if win_stripped == old_lines:
+                start_i = sub_idx[0]
+                end_i = sub_idx[-1] + 1
+                candidates.append("\n".join(src_lines[start_i:end_i]))
 
-    if len(candidates) == 1:
-        return candidates[0], ""
-    if len(candidates) > 1:
-        return None, f"Line-level မှာ တူညီနေတဲ့ စာသား {len(candidates)} နေရာ တွေ့နေပါတယ်၊ ပိုရှည်ပြီး တိကျတဲ့ line များ ထည့်ပေးပါရှင်"
+        if len(candidates) == 1:
+            return candidates[0], ""
+        if len(candidates) > 1:
+            return None, f"တူညီနေတဲ့ စာသား {len(candidates)} နေရာ တွေ့နေပါတယ်၊ ပိုရှည်ပြီး တိကျတဲ့ line များ ထည့်ပေးပါရှင်"
+
+        # Whitespace-collapsed match (ဖုန်းကနေ space/quote ပြောင်းသွားရင် ရှာနိုင်ရန်)
+        old_collapsed = [_collapse_ws(ln) for ln in old_lines]
+        ws_candidates: list[str] = []
+        for pos in range(len(non_empty_indices) - n_old + 1):
+            sub_idx = non_empty_indices[pos:pos + n_old]
+            win_collapsed = [_collapse_ws(src_lines[i]) for i in sub_idx]
+            if win_collapsed == old_collapsed:
+                start_i = sub_idx[0]
+                end_i = sub_idx[-1] + 1
+                ws_candidates.append("\n".join(src_lines[start_i:end_i]))
+
+        if len(ws_candidates) == 1:
+            return ws_candidates[0], ""
+        if len(ws_candidates) > 1:
+            return None, f"တူညီနေတဲ့ စာသား {len(ws_candidates)} နေရာ တွေ့နေပါတယ်၊ ပိုတိကျအောင် ထည့်ပေးပါရှင်"
 
     return None, "အစားထိုးမယ့် မူရင်းစာသားကို file ထဲမှာ မတွေ့ပါဘူးရှင်"
 
 
 def apply_hunks_to_source(source_text: str, hunks: list[tuple[str, str]]) -> tuple[bool, str, str]:
-    cur_text = source_text.replace("\r\n", "\n")
+    cur_text = _normalize_mobile_text(source_text)
     for idx, (old_b, new_b) in enumerate(hunks, start=1):
         matched_old, err = _find_matching_block_in_text(cur_text, old_b)
         if not matched_old:
