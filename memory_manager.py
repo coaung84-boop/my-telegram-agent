@@ -1,12 +1,16 @@
+import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
+import requests
+from google.genai import types
 
-from ai_engine import call_json_intelligence
-from config import DEFAULT_CORE_RULES, MM_TZ, RETENTION_DAYS
+from config import DEFAULT_CORE_RULES, MM_TZ, OPENROUTER_API_KEY
 from database import supabase
+from ai_engine import gemini_client, groq_client
 
 
-def format_mm_timestamp(ts_str: str) -> str:
+# --- Timestamp, Chat Memory, Skill Versioning & Protected Core Rules Helpers ---
+def _format_mm_timestamp(ts_str: str) -> str:
     if not ts_str:
         return ""
     try:
@@ -16,26 +20,19 @@ def format_mm_timestamp(ts_str: str) -> str:
         return str(ts_str)[:16]
 
 
-def cleanup_old_raw_logs():
-    try:
-        cutoff_dt = datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)
-        supabase.table("raw_logs").delete().lt("created_at", cutoff_dt.isoformat()).execute()
-    except Exception as e:
-        print(f"Error cleaning up old raw_logs: {e}")
-
-
 def save_chat_message(user_id: int, role: str, content: str):
     try:
         supabase.table("chat_messages").insert({
             "user_id": user_id,
             "role": role,
-            "content": content,
+            "content": content
         }).execute()
     except Exception as e:
         print(f"Error saving chat message: {e}")
 
 
 def _sanitize_core_rules(raw_rules: str) -> str:
+    """အရင် DB ထဲမှာ ပုံသေစကားလုံးစည်းမျဉ်းဟောင်း ကျန်နေသေးရင် ဖယ်ရှားပေးသည်။"""
     text = (raw_rules or "").strip()
     if not text:
         return DEFAULT_CORE_RULES
@@ -49,6 +46,7 @@ def _sanitize_core_rules(raw_rules: str) -> str:
 
 
 def get_user_profile_record(user_id: int) -> dict:
+    """user_profile row တစ်ခုလုံး (core_rules, version, profile_summary, style_preferences) ကို ဖတ်သည်။"""
     try:
         res = (
             supabase.table("user_profile")
@@ -92,6 +90,7 @@ def get_user_profile(user_id: int) -> str:
 
 
 def update_core_rule_version(user_id: int, new_rule_line: str, note: str = "User rule update") -> str:
+    """Core rule အသစ် ထည့်/ပြင်တိုင်း အရင် version ကို မဖျက်ဘဲ version တိုးပြီး သိမ်းပေးသည်။"""
     clean_rule = (new_rule_line or "").strip().strip("<>").strip()
     if not clean_rule:
         return "ထည့်လိုသည့် Rule စာသားလေး ရေးပေးပါရှင်"
@@ -154,7 +153,7 @@ def get_skill_versions_summary(user_id: int) -> str:
         rows = hist_res.data or []
         if rows:
             hist_lines = [
-                f"• v{r.get('version')} ({format_mm_timestamp(r.get('created_at'))}) — {r.get('note') or 'Saved'}"
+                f"• v{r.get('version')} ({_format_mm_timestamp(r.get('created_at'))}) — {r.get('note') or 'Saved'}"
                 for r in rows
             ]
             lines.append("\n🗂️ သိမ်းထားပြီးသား Version မှတ်တမ်းများ:\n" + "\n".join(hist_lines))
@@ -165,7 +164,91 @@ def get_skill_versions_summary(user_id: int) -> str:
     return "\n".join(lines)
 
 
+def _extract_json_from_text(raw_text: str) -> dict | None:
+    if not raw_text:
+        return None
+    cleaned = re.sub(r"```(?:json)?", "", raw_text, flags=re.IGNORECASE).replace("```", "").strip()
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _call_json_intelligence(prompt: str) -> dict | None:
+    """စကားပြော system prompt မရောဘဲ သန့်ရှင်းတဲ့ JSON ကိုသာ ထုတ်ယူသည့် Intelligence helper (Qwen 3.8 27B fallback ပါဝင်)။"""
+    json_sys = "You are a strict JSON intent & entity parser. Return ONLY valid JSON with no markdown or extra text."
+
+    for model_name in ("gemini-3.5-flash-lite", "gemini-3.8-flash"):
+        try:
+            resp = gemini_client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=json_sys,
+                    response_mime_type="application/json",
+                    temperature=0.0,
+                ),
+            )
+            if resp and resp.text:
+                parsed = _extract_json_from_text(resp.text)
+                if parsed is not None:
+                    return parsed
+        except Exception as e:
+            print(f"[JSON Intel {model_name} Error]: {e}")
+
+    if OPENROUTER_API_KEY:
+        for or_model in ("qwen/qwen3.8-27b", "google/gemma-4-31b-it:free"):
+            try:
+                resp = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
+                    json={
+                        "model": or_model,
+                        "messages": [
+                            {"role": "system", "content": json_sys},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "temperature": 0.0,
+                        "max_tokens": 500,
+                    },
+                    timeout=8,
+                )
+                res_json = resp.json()
+                if "choices" in res_json and res_json["choices"]:
+                    txt = (res_json["choices"][0]["message"].get("content") or "").strip()
+                    parsed = _extract_json_from_text(txt)
+                    if parsed is not None:
+                        return parsed
+            except Exception as e:
+                print(f"[JSON Intel OpenRouter {or_model} Error]: {e}")
+
+    for g_model in ("qwen/qwen3.8-27b", "llama-3.1-8b-instant"):
+        try:
+            completion = groq_client.with_options(timeout=6.0).chat.completions.create(
+                model=g_model,
+                messages=[
+                    {"role": "system", "content": json_sys},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                max_tokens=500,
+            )
+            raw_groq = (completion.choices[0].message.content or "").strip()
+            parsed = _extract_json_from_text(raw_groq)
+            if parsed is not None:
+                return parsed
+        except Exception as e:
+            print(f"[JSON Intel Groq {g_model} Error]: {e}")
+
+    return None
+
+
 def evolve_user_profile(user_id: int, user_msg: str, assistant_reply: str):
+    """Locked core_rules ကို မထိဘဲ dynamic profile_summary နဲ့ style_preferences ကိုသာ Self-improve လုပ်သည်။"""
     try:
         rec = get_user_profile_record(user_id)
         current_profile = get_user_profile(user_id)
@@ -186,7 +269,7 @@ Return ONLY valid JSON with two concise fields in Burmese (max ~150 words each):
 JSON format:
 {{"profile_summary":"...","style_preferences":"..."}}
 """
-        parsed = call_json_intelligence(update_prompt)
+        parsed = _call_json_intelligence(update_prompt)
         if not parsed:
             return
 
@@ -294,14 +377,14 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 8
 
         if matched_rows:
             matched_lines = [
-                f"[{format_mm_timestamp(m.get('created_at'))} | {m.get('role')}]: {m.get('content')}"
+                f"[{_format_mm_timestamp(m.get('created_at'))} | {m.get('role')}]: {m.get('content')}"
                 for m in matched_rows[-15:]
             ]
             sections.append("--- Past Memory Matches ---\n" + "\n".join(matched_lines))
 
         if recent_rows:
             recent_lines = [
-                f"[{format_mm_timestamp(r.get('created_at'))} | {r.get('role')}]: {r.get('content')}"
+                f"[{_format_mm_timestamp(r.get('created_at'))} | {r.get('role')}]: {r.get('content')}"
                 for r in recent_rows
             ]
             sections.append("--- Recent Conversation ---\n" + "\n".join(recent_lines))
