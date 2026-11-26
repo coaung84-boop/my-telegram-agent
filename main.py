@@ -552,7 +552,7 @@ async def job_check_due_reminders(context: ContextTypes.DEFAULT_TYPE):
         res = (
             supabase.table("tasks")
             .select("*")
-            .eq("user_id", ADMIN_USER_ID)
+            # filter by status and reminded flag
             .eq("status", "pending")
             .eq("reminded", False)
             .execute()
@@ -572,7 +572,12 @@ async def job_check_due_reminders(context: ContextTypes.DEFAULT_TYPE):
                     text=f"⏰ **Reminder (`#{t.get('id')}`)**\n\n{reminder_msg}",
                     parse_mode="Markdown",
                 )
-                supabase.table("tasks").update({"reminded": True}).eq("id", t["id"]).execute()
+                rep_type = (t.get("repeat_type") or "once").strip().lower()
+                next_dt = compute_next_repeat_datetime(rem_dt, rep_type, now_mm)
+                if next_dt:
+                    supabase.table("tasks").update({"reminder_at": next_dt.isoformat(), "due_at": next_dt.isoformat(), "reminded": False}).eq("id", t["id"]).execute()
+                else:
+                    supabase.table("tasks").update({"reminded": True}).eq("id", t["id"]).execute()
     except Exception as e:
         print(f"[Reminder Job Error]: {e}")
 
