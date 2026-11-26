@@ -2635,11 +2635,8 @@ def answer_with_universal_search(
             clean_q = f"{prev_user_lines[-1]} {clean_q}".strip()
 
     en_q = (english_query or "").strip()
-    if en_q:
-        if "latest" not in en_q.lower():
-            en_q = f"latest {en_q}"
-        if now_mm.strftime("%Y") not in en_q:
-            en_q = f"{en_q} {now_mm.strftime('%B %Y')}"
+    if en_q and now_mm.strftime("%Y") not in en_q:
+        en_q = f"{en_q} {now_mm.strftime('%B %Y')}"
 
     primary_q = en_q or clean_q
     search_query_text = primary_q
@@ -2651,7 +2648,7 @@ def answer_with_universal_search(
     except Exception:
         profile_block = ""
 
-    tavily_raw = _tavily_worker(primary_q, max_results=6, exclude_social=True, days=7, topic="general")
+    tavily_raw = _tavily_worker(primary_q, max_results=6, exclude_social=True, days=14, topic="general")
     tavily_block = f"Search Snippets:\n{tavily_raw}" if tavily_raw else ""
 
     reply = _google_overview_search_summary(
