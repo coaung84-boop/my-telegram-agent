@@ -343,6 +343,16 @@ Latest User Message: "{user_text}"
 
 
 async def post_init(application):
+    await application.bot.set_my_commands([
+        BotCommand("start", "စတင်ရန်"),
+        BotCommand("menu", "Menu စာရင်းကြည့်ရန်"),
+        BotCommand("tasks", "လက်ရှိ Task စာရင်း"),
+        BotCommand("groups", "Group စာရင်းကြည့်ရန်"),
+        BotCommand("news", "သတင်းအနှစ်ချုပ်"),
+        BotCommand("skills", "Core Rules မှတ်တမ်း"),
+        BotCommand("setrule", "Core Rule အသစ်ထည့်ရန်"),
+        BotCommand("patch", "GitHub ဖိုင် patch လုပ်ရန်"),
+    ])
     application.create_task(reminder_loop(application))
 
 
@@ -362,7 +372,9 @@ def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("tasks", tasks_command))
+    app.add_handler(CommandHandler("groups", groups_command))
     app.add_handler(CommandHandler("news", news_command))
     app.add_handler(CommandHandler("skills", skills_command))
     app.add_handler(CommandHandler("setrule", setrule_command))
