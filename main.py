@@ -1243,6 +1243,8 @@ Return ONLY valid JSON:
     reason = str(raw_reason).strip() if raw_reason else None
 
     raw_sq = parsed.get("search_query")
+    raw_esq = parsed.get("english_search_query")
+    english_search_query = str(raw_esq).strip() if raw_esq else None
     search_query = str(raw_sq).strip() if raw_sq else None
 
     raw_esq = parsed.get("english_search_query")
