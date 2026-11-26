@@ -2923,140 +2923,45 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # old code
         # <<<NEW>>>
         # new code
-        if "<<<OLD>>>" not in arg or "<<<NEW>>>" not in arg:
+        hunks = _parse_patch_hunks(arg)
+        if not hunks:
             await message.reply_text(
                 "အသုံးပြုပုံ:\n"
                 "/patch main.py | commit message\n"
-                "<<<OLD>>>\nမူရင်း code\n<<<NEW>>>\nအသစ်ပြင်မယ့် code"
+                "<<<OLD>>>\nမူရင်း code\n<<<NEW>>>\nအသစ်ပြင်မယ့် code\n"
+                "(နောက်ထပ် နေရာလည်း ဆက်ထည့်လို့ ရပါတယ်)"
             )
             return
-        header_part, rest_part = arg.split("<<<OLD>>>", 1)
-        old_part, new_part = rest_part.split("<<<NEW>>>", 1)
+
+        header_part = arg.split("<<<OLD>>>", 1)[0]
         header_tokens = [x.strip() for x in header_part.strip().split("|", 1)]
         target_file = header_tokens[0] or "main.py"
         c_msg = header_tokens[1] if len(header_tokens) > 1 and header_tokens[1] else f"Patch {target_file} via Maya"
-        clean_old = old_part.strip("\r\n")
-        clean_new = new_part.strip("\r\n")
 
         cur_file = await asyncio.to_thread(get_github_file, target_file)
-        _src_text = cur_file.get("content") or "" if isinstance(cur_file, dict) else ""
+        if not isinstance(cur_file, dict) or not cur_file.get("ok"):
+            err_txt = cur_file.get("error") if isinstance(cur_file, dict) else "File ဖတ်မရပါ"
+            await message.reply_text(f"❌ {err_txt}")
+            return
 
-        # 1. Leading-space tolerant matching
-        if clean_old and clean_old not in _src_text:
-            _old_lines = clean_old.splitlines()
-            _old_stripped = [ln.lstrip(" ") for ln in _old_lines]
-            _src_lines = _src_text.splitlines()
-            _matches = []
-            for _i in range(len(_src_lines) - len(_old_stripped) + 1):
-                if [_src_lines[_i + _k].lstrip(" ") for _k in range(len(_old_stripped))] == _old_stripped:
-                    _matches.append("\n".join(_src_lines[_i : _i + len(_old_stripped)]))
-            if len(_matches) == 1:
-                clean_old = _matches[0]
+        _src_text = cur_file.get("content") or ""
+        _ok_apply, _preview_full, _apply_err = apply_hunks_to_source(_src_text, hunks)
+        if not _ok_apply:
+            await message.reply_text(f"❌ {_apply_err}")
+            return
 
-        # 2. Auto-indent alignment to match original file's indentation
-        if clean_old and clean_old in _src_text:
-            _first_old_line = clean_old.splitlines()[0]
-            _target_indent = " " * (len(_first_old_line) - len(_first_old_line.lstrip(" ")))
-            _new_lines = clean_new.splitlines()
-            if _new_lines:
-                _non_empty = [ln for ln in _new_lines if ln.strip()]
-                _min_new_indent = min((len(ln) - len(ln.lstrip(" ")) for ln in _non_empty), default=0)
-                _aligned_lines = [
-                    (_target_indent + ln[_min_new_indent:]) if ln.strip() else ""
-                    for ln in _new_lines
-                ]
-                clean_new = "\n".join(_aligned_lines)
-
-        # 3. Full-file syntax check before asking confirmation
-        if target_file.endswith(".py") and clean_old in _src_text:
-            _preview_full = _src_text.replace(clean_old, clean_new, 1)
+        if target_file.endswith(".py"):
             try:
                 ast.parse(_preview_full)
             except SyntaxError as se:
-                def _run_code_fixer(snippet_text: str, err_msg: str, err_line: int) -> str:
-                    fix_prompt = (
-                        f"Fix the Python SyntaxError ({err_msg} at line {err_line}) in the snippet below.\n"
-                        f"Return ONLY raw valid Python code. No markdown fences, no ```python, no explanations.\n\n"
-                        f"{snippet_text}"
-                    )
-                    code_sys = "You are a strict Python syntax fixer. Output ONLY valid Python code."
-                    for m_name in ("gemini-3.5-flash-lite", "gemini-3.8-flash"):
-                        try:
-                            r = gemini_client.models.generate_content(
-                                model=m_name,
-                                contents=fix_prompt,
-                                config=types.GenerateContentConfig(
-                                    system_instruction=code_sys,
-                                    temperature=0.0,
-                                ),
-                            )
-                            if r and r.text and r.text.strip():
-                                return r.text.strip()
-                        except Exception:
-                            pass
-                    if OPENROUTER_API_KEY:
-                        for or_m in ("qwen/qwen3.8-27b", "google/gemma-4-31b-it:free"):
-                            try:
-                                resp = requests.post(
-                                    "https://openrouter.ai/api/v1/chat/completions",
-                                    headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
-                                    json={
-                                        "model": or_m,
-                                        "messages": [
-                                            {"role": "system", "content": code_sys},
-                                            {"role": "user", "content": fix_prompt},
-                                        ],
-                                        "temperature": 0.0,
-                                    },
-                                    timeout=12,
-                                )
-                                j = resp.json()
-                                if j.get("choices"):
-                                    t = (j["choices"][0]["message"].get("content") or "").strip()
-                                    if t:
-                                        return t
-                            except Exception:
-                                pass
-                    return ""
+                await message.reply_text(f"❌ Patch ပြီးနောက် Python syntax error ဖြစ်နိုင်ပါတယ်ရှင် — line {se.lineno}: {se.msg}")
+                return
 
-                _healed = await asyncio.to_thread(_run_code_fixer, clean_new, se.msg, se.lineno)
-                if _healed:
-                    _clean_healed = _healed.strip()
-                    if _clean_healed.startswith("```"):
-                        _h_lines = _clean_healed.splitlines()
-                        if len(_h_lines) >= 2:
-                            _clean_healed = "\n".join(_h_lines[1:-1] if _h_lines[-1].strip().startswith("```") else _h_lines[1:])
-                    _h_lines_list = _clean_healed.splitlines()
-                    if _h_lines_list:
-                        _old_first = clean_old.splitlines()[0] if clean_old and clean_old.splitlines() else ""
-                        _base_len = len(_old_first) - len(_old_first.lstrip(" "))
-                        _src_idx = _src_text.find(clean_old) if clean_old else -1
-                        if _src_idx != -1:
-                            _line_start = _src_text.rfind("\n", 0, _src_idx) + 1
-                            _actual_line = _src_text[_line_start:_src_idx] + _old_first
-                            _base_len = len(_actual_line) - len(_actual_line.lstrip(" "))
-                        _base_ind = " " * _base_len
-                        _non_emp = [ln for ln in _h_lines_list if ln.strip()]
-                        _min_ind = min((len(ln) - len(ln.lstrip(" ")) for ln in _non_emp), default=0)
-                        _aligned = []
-                        for _idx, ln in enumerate(_h_lines_list):
-                            if not ln.strip():
-                                _aligned.append("")
-                            else:
-                                _rel_extra = max(0, (len(ln) - len(ln.lstrip(" "))) - _min_ind)
-                                _aligned.append(_base_ind + (" " * _rel_extra) + ln.lstrip(" "))
-                        _clean_healed = "\n".join(_aligned)
-                    _test_full = _src_text.replace(clean_old, _clean_healed, 1)
-                    try:
-                        ast.parse(_test_full)
-                        clean_new = _clean_healed
-                    except SyntaxError as se2:
-                        await message.reply_text(f"❌ Auto-fix ကြိုးစားပေမယ့် syntax error ကျန်နေပါတယ်ရှင် — line {se2.lineno}: {se2.msg}")
-                        return
-                else:
-                    await message.reply_text(f"❌ NEW code ကြောင့် syntax error ဖြစ်နေပါတယ်ရှင် — line {se.lineno}: {se.msg}")
-                    return
-                    
+        clean_old = arg[arg.find("<<<OLD>>>"):]
+        clean_new = ""
+        total_old_chars = sum(len(o) for o, _ in hunks)
+        total_new_chars = sum(len(n) for _, n in hunks)
+
         import uuid
         req_id = uuid.uuid4().hex[:10]
         _PENDING_GITHUB_ACTIONS[req_id] = {
@@ -3072,9 +2977,9 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ GitHub Patch အတည်ပြုချက် လိုအပ်ပါတယ်ရှင်\n"
             f"• File: `{target_file}` (`{GITHUB_BRANCH}`)\n"
             f"• Commit: `{c_msg}`\n"
-            f"• OLD length: {len(clean_old)} chars → NEW length: {len(clean_new)} chars"
+            f"• Hunks: {len(hunks)} နေရာ | OLD: {total_old_chars} chars → NEW: {total_new_chars} chars"
         )
-        kb = InlineKeyboardMarkup([
+    kb = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("✅ Confirm Commit", callback_data=f"gh_ok:{req_id}"),
                 InlineKeyboardButton("❌ Cancel", callback_data=f"gh_no:{req_id}"),
@@ -3387,6 +3292,105 @@ def upsert_github_file(
         return {"ok": False, "error": f"GitHub commit error: {type(e).__name__}: {str(e)[:150]}"}
 
 
+def _parse_patch_hunks(raw_body: str) -> list[tuple[str, str]]:
+    """<<<OLD>>> ... <<<NEW>>> ... (နောက်ထပ် <<<OLD>>> ရှိလျှင်လည်း ဆက်ဖတ်) အတွဲများကို ခွဲထုတ်သည်။"""
+    if not raw_body or "<<<OLD>>>" not in raw_body or "<<<NEW>>>" not in raw_body:
+        return []
+
+    hunks: list[tuple[str, str]] = []
+    chunks = raw_body.split("<<<OLD>>>")
+    for part in chunks[1:]:
+        if "<<<NEW>>>" not in part:
+            continue
+        old_raw, new_raw = part.split("<<<NEW>>>", 1)
+        old_clean = old_raw.strip("\r\n")
+        new_clean = new_raw.strip("\r\n")
+        if old_clean:
+            hunks.append((old_clean, new_clean))
+    return hunks
+
+
+def _align_new_block_indent(matched_old_block: str, new_block: str) -> str:
+    """File ထဲမှာ တကယ်ကိုက်ညီတဲ့ မူရင်း block ရဲ့ indentation အတိုင်း new_block ကို ညှိပေးသည်။"""
+    old_lines = matched_old_block.splitlines()
+    new_lines = new_block.splitlines()
+    if not old_lines or not new_lines:
+        return new_block
+
+    first_old = old_lines[0]
+    target_indent = " " * (len(first_old) - len(first_old.lstrip(" \t")).__max__(0))
+    # Tab များကို spaces အဖြစ် ညီမျှစေရန်
+    leading_ws_len = len(first_old) - len(first_old.lstrip(" "))
+    target_indent = " " * leading_ws_len
+
+    non_empty = [ln for ln in new_lines if ln.strip()]
+    if not non_empty:
+        return "\n".join(["" for _ in new_lines])
+
+    min_new_indent = min((len(ln) - len(ln.lstrip(" ")) for ln in non_empty), default=0)
+    aligned = []
+    for ln in new_lines:
+        if not ln.strip():
+            aligned.append("")
+        else:
+            cur_ind = len(ln) - len(ln.lstrip(" "))
+            rel_extra = max(0, cur_ind - min_new_indent)
+            aligned.append(target_indent + (" " * rel_extra) + ln.lstrip(" "))
+    return "\n".join(aligned)
+
+
+def _find_matching_block_in_text(source_text: str, old_block: str) -> tuple[str | None, str]:
+    """Exact match -> line-normalized match အစဉ်လိုက် ရှာပြီး (matched_block, error_msg) ပြန်ပေးသည်။"""
+    src_norm = source_text.replace("\r\n", "\n")
+    old_norm = old_block.replace("\r\n", "\n")
+
+    if not old_norm.strip():
+        return None, "အစားထိုးမယ့် မူရင်းစာသား (OLD) လိုအပ်ပါတယ်ရှင်"
+
+    exact_cnt = src_norm.count(old_norm)
+    if exact_cnt == 1:
+        return old_norm, ""
+    if exact_cnt > 1:
+        return None, f"တူညီနေတဲ့ စာသား {exact_cnt} နေရာ တွေ့နေပါတယ်၊ ပိုတိကျအောင် ထည့်ပေးပါရှင်"
+
+    old_lines = [ln.strip() for ln in old_norm.splitlines()]
+    while old_lines and old_lines[0] == "":
+        old_lines.pop(0)
+    while old_lines and old_lines[-1] == "":
+        old_lines.pop()
+
+    src_lines = src_norm.splitlines()
+    if not old_lines or len(src_lines) < len(old_lines):
+        return None, "အစားထိုးမယ့် မူရင်းစာသားကို file ထဲမှာ မတွေ့ပါဘူးရှင်"
+
+    candidates: list[str] = []
+    n_old = len(old_lines)
+    for i in range(len(src_lines) - n_old + 1):
+        win = src_lines[i:i + n_old]
+        win_stripped = [w.strip() for w in win]
+        if win_stripped == old_lines:
+            candidates.append("\n".join(win))
+
+    if len(candidates) == 1:
+        return candidates[0], ""
+    if len(candidates) > 1:
+        return None, f"Line-level မှာ တူညီနေတဲ့ စာသား {len(candidates)} နေရာ တွေ့နေပါတယ်၊ ပိုရှည်ပြီး တိကျတဲ့ line များ ထည့်ပေးပါရှင်"
+
+    return None, "အစားထိုးမယ့် မူရင်းစာသားကို file ထဲမှာ မတွေ့ပါဘူးရှင်"
+
+
+def apply_hunks_to_source(source_text: str, hunks: list[tuple[str, str]]) -> tuple[bool, str, str]:
+    """Hunk စာရင်းကို source_text ပေါ် အဆင့်လိုက် ထည့်စမ်းပြီး (ok, updated_source, error_msg) ပြန်ပေးသည်။"""
+    cur_text = source_text.replace("\r\n", "\n")
+    for idx, (old_b, new_b) in enumerate(hunks, start=1):
+        matched_old, err = _find_matching_block_in_text(cur_text, old_b)
+        if not matched_old:
+            return False, cur_text, f"Hunk #{idx}: {err}"
+        aligned_new = _align_new_block_indent(matched_old, new_b)
+        cur_text = cur_text.replace(matched_old, aligned_new, 1)
+    return True, cur_text, ""
+
+
 def replace_github_snippet(
     file_path: str,
     old_text: str,
@@ -3397,43 +3401,21 @@ def replace_github_snippet(
     clean_path = (file_path or "").strip().lstrip("/")
     if clean_path not in ALLOWED_GITHUB_FILES:
         return {"ok": False, "error": f"'{clean_path}' ကို ခွင့်ပြုထားသည့် file စာရင်းထဲ ထည့်မထားပါရှင်"}
-    if not old_text:
-        return {"ok": False, "error": "အစားထိုးမယ့် မူရင်းစာသား (old_text) လိုအပ်ပါတယ်ရှင်"}
 
     current = get_github_file(clean_path, branch=branch)
     if not current.get("ok"):
         return current
 
     original_content = current.get("content", "")
-    match_count = original_content.count(old_text)
-    if match_count == 0:
-        _norm_orig = original_content.replace("\r\n", "\n")
-        _norm_old = old_text.replace("\r\n", "\n")
-        if _norm_old and _norm_orig.count(_norm_old) == 1:
-            old_text = _norm_old
-            original_content = _norm_orig
-            match_count = 1
-    if match_count == 0:
-        _old_lines = old_text.splitlines()
-        _src_lines = original_content.splitlines()
-        _matched_block = None
-        if _old_lines and len(_src_lines) >= len(_old_lines):
-            _norm_old = [ln.lstrip(" ") for ln in _old_lines]
-            for _i in range(len(_src_lines) - len(_old_lines) + 1):
-                _win = _src_lines[_i:_i + len(_old_lines)]
-                if [w.lstrip(" ") for w in _win] == _norm_old:
-                    _matched_block = "\n".join(_win)
-                    break
-        if _matched_block is not None and original_content.count(_matched_block) == 1:
-            old_text = _matched_block
-        else:
-            return {"ok": False, "error": "အစားထိုးမယ့် မူရင်းစာသားကို file ထဲမှာ မတွေ့ပါဘူးရှင်"}
-    if match_count > 1:
-        return {"ok": False, "error": f"တူညီနေတဲ့ စာသား {match_count} နေရာ တွေ့နေပါတယ်၊ ပိုတိကျအောင် ထည့်ပေးပါရှင်"}
+    hunks = _parse_patch_hunks(old_text) if "<<<OLD>>>" in old_text else [(old_text, new_text)]
+    if not hunks:
+        return {"ok": False, "error": "အစားထိုးမယ့် မူရင်းစာသား (old_text) လိုအပ်ပါတယ်ရှင်"}
 
-    updated_content = original_content.replace(old_text, new_text, 1)
+    ok, updated_content, err = apply_hunks_to_source(original_content, hunks)
+    if not ok:
+        return {"ok": False, "error": err}
+
     return upsert_github_file(clean_path, updated_content, commit_message=commit_message, branch=branch)
-
 
 async def _handle_py_document_github_upload(message, context: ContextTypes.DEFAULT_TYPE) -> bool:
     doc = message.document
