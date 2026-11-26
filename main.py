@@ -586,8 +586,11 @@ def main():
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
 
-    start_health_server()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
+    start_health_server()
+    
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
