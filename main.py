@@ -1130,15 +1130,6 @@ Return ONLY valid JSON:
   "english_search_query": null,
   "task_action": "add",
   "target_task_query": null,
-    raw_esq = parsed.get("english_search_query")
-    english_search_query = str(raw_esq).strip() if raw_esq else None
-
-    return {
-        "intent": intent,
-        "search_query": search_query,
-        "english_search_query": english_search_query,
-        "task_action": str(parsed.get("task_action") or "add").lower().strip(),
-  "target_task_query": null,
   "tasks": [],
   "clean_title": null,
   "reason": null,
@@ -1149,7 +1140,7 @@ Return ONLY valid JSON:
   "period": "recent"
 }}
 """
-    parsed = _call_json_intelligence(prompt)
+parsed = _call_json_intelligence(prompt)
     if not parsed:
         return {
             "intent": "GENERAL",
