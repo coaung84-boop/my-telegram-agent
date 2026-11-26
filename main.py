@@ -2944,15 +2944,22 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # <<<NEW>>>
             # new code
             hunks = _parse_patch_hunks(arg)
-        if not hunks:
+            if not hunks:
+                await message.reply_text(
+                    "အသုံးပြုပုံ:\n"
+                    "/patch main.py | commit message\n"
+                    "<<<OLD>>>\nမူရင်း code\n<<<NEW>>>\nအသစ်ပြင်မယ့် code\n"
+                    "(နောက်ထပ် နေရာလည်း ဆက်ထည့်လို့ ရပါတယ်)"
+                )
+                return
+            # ... ကျန်တဲ့ /patch code များကိုလည်း ဒီ ၁၂ spaces indentation ထဲမှာပဲ ဆက်ထားပါ ...
+        except Exception as patch_err:
+            print(f"[/patch Error]: {type(patch_err).__name__}: {patch_err}")
             await message.reply_text(
-                "အသုံးပြုပုံ:\n"
-                "/patch main.py | commit message\n"
-                "<<<OLD>>>\nမူရင်း code\n<<<NEW>>>\nအသစ်ပြင်မယ့် code\n"
-                "(နောက်ထပ် နေရာလည်း ဆက်ထည့်လို့ ရပါတယ်)"
+                f"❌ /patch လုပ်ဆောင်ရာမှာ အခက်အခဲ ဖြစ်သွားပါတယ်ရှင်: {type(patch_err).__name__}: {str(patch_err)[:180]}"
             )
             return
-
+            
         header_part = arg.split("<<<OLD>>>", 1)[0]
         header_tokens = [x.strip() for x in header_part.strip().split("|", 1)]
         target_file = header_tokens[0] or "main.py"
