@@ -1130,15 +1130,6 @@ Return ONLY valid JSON:
   "english_search_query": null,
   "task_action": "add",
   "target_task_query": null,
-<<<OLD>>>
-    raw_esq = parsed.get("english_search_query")
-    english_search_query = str(raw_esq).strip() if raw_esq else None
-
-    return {
-        "intent": intent,
-        "search_query": search_query,
-        "task_action": str(parsed.get("task_action") or "add").lower().strip(),
-<<<NEW>>>
     raw_esq = parsed.get("english_search_query")
     english_search_query = str(raw_esq).strip() if raw_esq else None
 
