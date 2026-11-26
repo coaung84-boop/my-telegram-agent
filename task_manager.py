@@ -128,9 +128,34 @@ def _clean_task_title(raw_text: str) -> str:
     return title or (raw_text or "").strip()
 
 
+def _detect_repeat_type(text: str) -> str:
+    t = (text or "").lower()
+    if any(k in t for k in ["အပတ်စဉ်", "တစ်ပတ်တစ်ခါ", "weekly", "every week"]):
+        return "weekly"
+    if any(k in t for k in ["နေ့တိုင်း", "နေ့စဉ်", "daily", "every day", "everyday"]):
+        return "daily"
+    return "once"
+
+
+def compute_next_repeat_datetime(current_dt: datetime, repeat_type: str, now_mm: datetime) -> datetime | None:
+    rep = (repeat_type or "once").strip().lower()
+    if rep == "daily":
+        nxt = current_dt + timedelta(days=1)
+        while nxt <= now_mm:
+            nxt += timedelta(days=1)
+        return nxt
+    if rep == "weekly":
+        nxt = current_dt + timedelta(days=7)
+        while nxt <= now_mm:
+            nxt += timedelta(days=7)
+        return nxt
+    return None
+
+
 def parse_task_details_with_ai(raw_text: str) -> dict:
     now_mm = datetime.now(MM_TZ)
     now_str = now_mm.strftime("%Y-%m-%d %H:%M (%A)")
+    detected_rep = _detect_repeat_type(raw_text)
 
     rel_mins = _extract_reminder_minutes(raw_text)
     if rel_mins is not None:
@@ -139,6 +164,7 @@ def parse_task_details_with_ai(raw_text: str) -> dict:
             "title": _clean_task_title(raw_text),
             "due_at": due_dt.isoformat(),
             "reminder_at": due_dt.isoformat(),
+            "repeat_type": detected_rep,
             "priority": "high" if has_maung_trigger_context(raw_text) else "normal",
             "notes": "",
         }
@@ -149,6 +175,7 @@ def parse_task_details_with_ai(raw_text: str) -> dict:
             "title": _clean_task_title(raw_text),
             "due_at": explicit_dt.isoformat(),
             "reminder_at": explicit_dt.isoformat(),
+            "repeat_type": detected_rep,
             "priority": "high" if has_maung_trigger_context(raw_text) else "normal",
             "notes": "",
         }
@@ -162,6 +189,7 @@ Extract task details and return ONLY valid JSON:
   "title": "concise task title in user's language (Burmese/English)",
   "due_at": "ISO-8601 string with +06:30 offset or null if no time/date mentioned",
   "reminder_at": "ISO-8601 string with +06:30 offset or null if no reminder time mentioned",
+  "repeat_type": "once | daily | weekly",
   "priority": "high | normal | low",
   "notes": "optional short note"
 }}
@@ -169,16 +197,22 @@ Extract task details and return ONLY valid JSON:
 Rules:
 - If user says "in X minutes/hours" or "X မိနစ်/နာရီ", add to current time {now_mm.isoformat()}.
 - If user mentions a clock time like "8pm", "ည ၈ နာရီ", "09:30", convert accurately to +06:30 ISO format.
+- Detect repeat_type: "daily" for နေ့တိုင်း/နေ့စဉ်/daily, "weekly" for အပတ်စဉ်/weekly, otherwise "once".
 - If no time is specified, set due_at and reminder_at to null.
 """
     parsed = call_json_intelligence(prompt)
     if parsed and parsed.get("title"):
+        rep_val = parsed.get("repeat_type")
+        if rep_val not in ("once", "daily", "weekly"):
+            rep_val = detected_rep
+        parsed["repeat_type"] = rep_val
         return parsed
 
     return {
         "title": _clean_task_title(raw_text),
         "due_at": None,
         "reminder_at": None,
+        "repeat_type": detected_rep,
         "priority": "normal",
         "notes": "",
     }
@@ -189,16 +223,18 @@ def add_task_record(user_id: int, raw_text: str) -> dict:
     title = (details.get("title") or raw_text).strip()
     due_at = details.get("due_at")
     reminder_at = details.get("reminder_at") or due_at
+    repeat_type = details.get("repeat_type") if details.get("repeat_type") in ("once", "daily", "weekly") else "once"
     priority = details.get("priority") if details.get("priority") in ("high", "normal", "low") else "normal"
     notes = (details.get("notes") or "").strip()
 
+    effective_rem = reminder_at or due_at
     row_payload = {
-        "user_id": int(user_id),
         "title": title,
         "status": "pending",
+        "repeat_type": repeat_type,
         "priority": priority,
         "due_at": due_at,
-        "reminder_at": reminder_at,
+        "reminder_at": effective_rem,
         "reminded": False,
         "notes": notes,
     }
@@ -209,7 +245,6 @@ def add_task_record(user_id: int, raw_text: str) -> dict:
     except Exception as e:
         print(f"Error inserting task: {e}")
         return {"ok": False, "error": str(e)}
-
 
 def list_tasks_records(user_id: int, include_done: bool = False, limit: int = 20) -> list:
     try:
@@ -271,8 +306,10 @@ def format_tasks_list_message(tasks: list, title_header: str = "📋 လက်�
         dt_val = t.get("reminder_at") or t.get("due_at")
         if dt_val:
             time_str = f" ⏰ `{format_mm_timestamp(dt_val)}`"
+        rep_val = (t.get("repeat_type") or "once").lower()
+        rep_badge = " 🔁 `နေ့စဉ်`" if rep_val == "daily" else (" 🔁 `အပတ်စဉ်`" if rep_val == "weekly" else "")
         strike = f"~{t_title}~" if status == "done" else f"**{t_title}**"
-        lines.append(f"{icon} `#{tid}` {strike}{time_str}")
+        lines.append(f"{icon} `#{tid}` {strike}{time_str}{rep_badge}")
 
     lines.append("\nပြီးစီးရင် `/done <id>`၊ ဖျက်ချင်ရင် `/deltask <id>` လို့ ရိုက်နိုင်ပါတယ်ရှင်။")
     return "\n".join(lines)
