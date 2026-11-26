@@ -2936,13 +2936,14 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if cmd == "/patch":
-        # Format:
-        # /patch main.py | commit message
-        # <<<OLD>>>
-        # old code
-        # <<<NEW>>>
-        # new code
-        hunks = _parse_patch_hunks(arg)
+        try:
+            # Format:
+            # /patch main.py | commit message
+            # <<<OLD>>>
+            # old code
+            # <<<NEW>>>
+            # new code
+            hunks = _parse_patch_hunks(arg)
         if not hunks:
             await message.reply_text(
                 "အသုံးပြုပုံ:\n"
@@ -3004,7 +3005,10 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("❌ Cancel", callback_data=f"gh_no:{req_id}"),
             ]
         ])
-        await message.reply_text(preview_msg, reply_markup=kb)
+            await message.reply_text(preview_msg, reply_markup=kb)
+        except Exception as patch_err:
+            print(f"[/patch Error]: {type(patch_err).__name__}: {patch_err}")
+            await message.reply_text(f"❌ /patch လုပ်ဆောင်ရာမှာ အခက်အခဲ ဖြစ်သွားပါတယ်ရှင်: {type(patch_err).__name__}: {str(patch_err)[:180]}")
         return
 
     if cmd == "/getfile":
