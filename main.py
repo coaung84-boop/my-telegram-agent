@@ -1106,8 +1106,8 @@ Classify into ONE primary intent:
 - "WEB_SEARCH": Looking up external/live/current facts, news, sports/scores, weather, prices, or web info not from private/group logs.
 
 If intent is "WEB_SEARCH", also output:
-- "search_query": A self-contained search query combining Recent Conversation context if the user says a follow-up like "Yes, ရှာပေးပါ" or "အသေးစိတ် ရှာပေးပါ".
-- "english_search_query": A concise, high-accuracy English search query for live facts/sports/news/prices/schedules (e.g. "Chelsea next match schedule November 2026"), or null if already in English.
+- "search_query": A self-contained search query combining Recent Conversation context and prior assistant/user turns for follow-ups (such as "ဘယ်သူ ဂိုးသွင်းတာလဲ" after a match result).
+- "english_search_query": A concise, high-accuracy English search query combining Recent Conversation context for live facts/sports/news/prices/schedules, including "latest" and "November 2026" for current events/matches/results (e.g. "Nottingham Forest vs Chelsea 1-0 goal scorer latest November 2026"), or null if already in English.
                                                                                                                      
 If intent is "TASK", also extract:
 - "task_action": "add" | "edit" | "delete" | "done" | "list" | "cancel_last"
@@ -2578,8 +2578,9 @@ def _google_overview_search_summary(
     prompt = (
         f"ယနေ့အချိန်: {now_str} (မြန်မာစံတော်ချိန်)\n"
         f"Recent Context နှင့် မေးခွန်းကို ချိတ်ဆက်နားလည်ပြီး Search snippet များထဲမှ တွေ့ရှိသည့် အချက်ကိုသာ အခြေခံ၍ "
-        f"စာကြောင်းထပ်ခြင်း လုံးဝမရှိဘဲ အောက်ပါအတိုင်း စာ ၂ ပိုဒ် (စုစုပေါင်း ၂-၃ ကြောင်း) တည်း ဖြေပါ:\n"
-        f"- ပထမအပိုဒ်: မေးခွန်း၏ အဓိကအဖြေ (Key point) တစ်ခုတည်းကို သာမန်စကားပြောသလို လိုတိုရှင်း တိုက်ရိုက်ပြောပါ။\n"
+        f"'Search snippet များအရ...'၊ '- key point:'၊ 'အကြံပြုချက်:' စသည့် label များ လုံးဝမသုံးဘဲ စာကြောင်းထပ်ခြင်း မရှိစေဘဲ "
+        f"အောက်ပါအတိုင်း စာ ၂ ပိုဒ် (စုစုပေါင်း ၂-၃ ကြောင်း) တည်း ဖြေပါ:\n"
+        f"- ပထမအပိုဒ်: မေးခွန်း၏ အဓိကအဖြေ (Key point တစ်ခုတည်း) ကို အရပ်ထဲ စကားပြန်ပြောသလို သဘာဝကျကျ လိုတိုရှင်း တိုက်ရိုက်ပြောပါ။\n"
         f"- ဒုတိယအပိုဒ်: ထိုအဖြေနှင့် ဆက်စပ်ပြီး လက်တွေ့အသုံးဝင်မည့် အကြံလေး တစ်ကြောင်းကို ခေါင်းစဉ်မတပ်ဘဲ သဘာဝကျကျ ဆက်ပြောပေးပါ။\n\n"
         f"{profile_block}"
         f"{ctx_block}"
@@ -2634,8 +2635,11 @@ def answer_with_universal_search(
             clean_q = f"{prev_user_lines[-1]} {clean_q}".strip()
 
     en_q = (english_query or "").strip()
-    if en_q and now_mm.strftime("%Y") not in en_q:
-        en_q = f"{en_q} {now_mm.strftime('%B %Y')}"
+    if en_q:
+        if "latest" not in en_q.lower():
+            en_q = f"latest {en_q}"
+        if now_mm.strftime("%Y") not in en_q:
+            en_q = f"{en_q} {now_mm.strftime('%B %Y')}"
 
     primary_q = en_q or clean_q
     search_query_text = primary_q
@@ -2647,7 +2651,7 @@ def answer_with_universal_search(
     except Exception:
         profile_block = ""
 
-    tavily_raw = _tavily_worker(primary_q, max_results=6, exclude_social=True, days=14, topic="general")
+    tavily_raw = _tavily_worker(primary_q, max_results=6, exclude_social=True, days=7, topic="general")
     tavily_block = f"Search Snippets:\n{tavily_raw}" if tavily_raw else ""
 
     reply = _google_overview_search_summary(
