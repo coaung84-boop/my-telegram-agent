@@ -1127,7 +1127,25 @@ Return ONLY valid JSON:
 {{
   "intent": "TASK|GROUP|ADVICE|GENERAL|WEB_SEARCH",
   "search_query": null,
+  "english_search_query": null,
   "task_action": "add",
+<<<OLD>>>
+    raw_esq = parsed.get("english_search_query")
+    english_search_query = str(raw_esq).strip() if raw_esq else None
+
+    return {
+        "intent": intent,
+        "search_query": search_query,
+        "task_action": str(parsed.get("task_action") or "add").lower().strip(),
+<<<NEW>>>
+    raw_esq = parsed.get("english_search_query")
+    english_search_query = str(raw_esq).strip() if raw_esq else None
+
+    return {
+        "intent": intent,
+        "search_query": search_query,
+        "english_search_query": english_search_query,
+        "task_action": str(parsed.get("task_action") or "add").lower().strip(),
   "target_task_query": null,
   "tasks": [],
   "clean_title": null,
