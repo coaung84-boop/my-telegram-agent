@@ -1145,6 +1145,7 @@ if not parsed:
     return {
         "intent": "GENERAL",
         "search_query": None,
+        "english_search_query": None,
         "task_action": "add",
         "target_task_query": None,
         "tasks": [],
