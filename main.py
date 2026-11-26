@@ -2979,7 +2979,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Commit: `{c_msg}`\n"
             f"• Hunks: {len(hunks)} နေရာ | OLD: {total_old_chars} chars → NEW: {total_new_chars} chars"
         )
-    kb = InlineKeyboardMarkup([
+        kb = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("✅ Confirm Commit", callback_data=f"gh_ok:{req_id}"),
                 InlineKeyboardButton("❌ Cancel", callback_data=f"gh_no:{req_id}"),
