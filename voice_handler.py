@@ -1,7 +1,6 @@
 import os
 import re
 import tempfile
-import asyncio
 import edge_tts
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -15,6 +14,7 @@ from task_manager import (
     handle_task_intent,
 )
 from group_news_search import get_available_group_names, handle_group_query, perform_hybrid_web_search
+
 
 def _clean_text_for_tts(text: str) -> str:
     """Voice message အဖြစ် ဖတ်ပြရန် emoji၊ markdown symbols နဲ့ link တွေကို ရှင်းလင်းပေးသည်။"""
@@ -31,6 +31,74 @@ def _clean_text_for_tts(text: str) -> str:
     )
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned[:900]
+
+
+def _resolve_audio_extension_and_mime(voice_obj) -> tuple[str, str]:
+    """Telegram voice/audio object မှ file extension နှင့် mime_type ကို ခန့်မှန်းပေးသည်။"""
+    fname = (getattr(voice_obj, "file_name", None) or "").lower()
+    mime = (getattr(voice_obj, "mime_type", None) or "").lower()
+
+    ext_map = {
+        ".ogg": (".ogg", "audio/ogg"),
+        ".oga": (".oga", "audio/ogg"),
+        ".mp3": (".mp3", "audio/mpeg"),
+        ".m4a": (".m4a", "audio/mp4"),
+        ".mp4": (".mp4", "audio/mp4"),
+        ".wav": (".wav", "audio/wav"),
+        ".webm": (".webm", "audio/webm"),
+    }
+    for k, v in ext_map.items():
+        if fname.endswith(k):
+            return v
+
+    if "mpeg" in mime or "mp3" in mime:
+        return ".mp3", "audio/mpeg"
+    if "mp4" in mime or "m4a" in mime or "aac" in mime:
+        return ".m4a", "audio/mp4"
+    if "wav" in mime:
+        return ".wav", "audio/wav"
+    if "webm" in mime:
+        return ".webm", "audio/webm"
+    return ".ogg", "audio/ogg"
+
+
+def _transcribe_audio_file(audio_path: str, filename: str, mime_type: str) -> str:
+    """Groq Whisper (primary + fallback model) ဖြင့် အသံဖိုင်ကို စာသားပြောင်းသည်။"""
+    for model_name in ("whisper-large-v3-turbo", "whisper-large-v3"):
+        try:
+            with open(audio_path, "rb") as audio_file:
+                transcription = groq_client.with_options(timeout=25.0).audio.transcriptions.create(
+                    file=(filename, audio_file, mime_type),
+                    model=model_name,
+                    language="my",
+                    response_format="json",
+                )
+            txt = (
+                transcription
+                if isinstance(transcription, str)
+                else getattr(transcription, "text", "") or ""
+            ).strip()
+            if txt:
+                return txt
+        except Exception as e:
+            print(f"Whisper transcription error ({model_name}): {e}")
+
+    try:
+        with open(audio_path, "rb") as f_raw:
+            raw_bytes = f_raw.read()
+        if raw_bytes:
+            ai_txt = call_ai_with_3tier_fallback(
+                "ဤအသံဖိုင်ထဲတွင် ပြောထားသော စကားကို စာသားအဖြစ် တိကျစွာ ဖတ်ပြပါ။ စာသားသက်သက်ကိုသာ ပြန်ဖြေပါ။",
+                audio_bytes=raw_bytes,
+                mime_type=mime_type,
+                use_google_search=False,
+            )
+            if ai_txt and "ခဏအလုပ်များနေပါတယ်" not in ai_txt:
+                return ai_txt.strip()
+    except Exception as e:
+        print(f"Fallback audio transcription error: {e}")
+
+    return ""
 
 
 async def send_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, reply_text: str):
@@ -57,31 +125,25 @@ async def send_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, r
 
 
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User ပို့လိုက်သော voice message ကို Groq Whisper ဖြင့် စာသားပြောင်းပြီး စာရော အသံပါ ပြန်ဖြေသည်။"""
+    """User ပို့လိုက်သော voice message ကို စာသားပြောင်းပြီး စာရော အသံပါ ပြန်ဖြေသည်။"""
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID:
         return
 
-    ogg_path = None
+    audio_path = None
     try:
         voice = update.message.voice or update.message.audio
         if not voice:
             return
 
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        ext, mime_type = _resolve_audio_extension_and_mime(voice)
         tg_file = await context.bot.get_file(voice.file_id)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp:
-            ogg_path = tmp.name
-        await tg_file.download_to_drive(ogg_path)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            audio_path = tmp.name
+        await tg_file.download_to_drive(audio_path)
 
-        with open(ogg_path, "rb") as audio_file:
-            transcription = groq_client.with_options(timeout=20.0).audio.transcriptions.create(
-                file=("voice.ogg", audio_file),
-                model="whisper-large-v3-turbo",
-                response_format="text",
-            )
-
-        transcript_text = (transcription if isinstance(transcription, str) else getattr(transcription, "text", "") or "").strip()
+        transcript_text = _transcribe_audio_file(audio_path, f"voice{ext}", mime_type)
         if not transcript_text:
             await update.message.reply_text("အသံဖိုင်ကို ရှင်းရှင်းလင်းလင်း ဖမ်းယူလို့ မရသေးပါဘူးရှင်၊ ထပ်ပြောပေးပါ")
             return
@@ -135,8 +197,8 @@ User Voice Transcript: "{transcript_text}"
         print(f"Error handling voice message: {e}")
         await update.message.reply_text("Voice message ကို ဖြေဆိုရာမှာ ခဏအဆင်မပြေ ဖြစ်သွားပါတယ်ရှင်")
     finally:
-        if ogg_path and os.path.exists(ogg_path):
+        if audio_path and os.path.exists(audio_path):
             try:
-                os.remove(ogg_path)
+                os.remove(audio_path)
             except Exception:
                 pass
