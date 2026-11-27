@@ -269,42 +269,68 @@ def _split_into_expressive_clauses(spoken_text: str) -> list[tuple[str, str]]:
     return clauses or [(spoken_text, "mid")]
 
 
+def _split_burmese_and_english_segments(text: str) -> list[tuple[str, str]]:
+    """Clause တစ်ခုကို မြန်မာအပိုင်း ('mm') နဲ့ English/Latin အပိုင်း ('en') ခွဲထုတ်သည်။"""
+    parts = re.findall(r"[A-Za-z0-9][A-Za-z0-9\s\.\-\/]*[A-Za-z0-9]|[A-Za-z]+|[^A-Za-z]+", text)
+    segments: list[tuple[str, str]] = []
+    for p in parts:
+        cleaned = p.strip()
+        if not cleaned:
+            continue
+        if re.fullmatch(r"[A-Za-z0-9\s\.\-\/]+", cleaned) and re.search(r"[A-Za-z]", cleaned):
+            segments.append(("en", cleaned))
+        else:
+            segments.append(("mm", cleaned))
+    return segments
+
+
 async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
-    """အသံပိုငယ်ပြီး နွေးထွေးတဲ့ voice tone တစ်မျိုးတည်းဖြင့် clause အလိုက် အတက်အကျနှင့် pause ထုတ်သည်။"""
+    """မြန်မာစာကို သွက်သွက်ပြောပြီး English အပိုင်းများတွင် ခြားပြီး ပိုနှေးနှေး ဖတ်ပြသည်။"""
     clauses = _split_into_expressive_clauses(spoken_text)
 
-    # အသံငယ်တဲ့ pitch (+10Hz to +14Hz) ထဲမှာပဲ အတက်အကျ အနည်းငယ် ထည့်မယ်
     lift_cycle = [
-        ("+12Hz", "+16%", 0.08),
-        ("+14Hz", "+19%", 0.07),
-        ("+11Hz", "+15%", 0.11),
+        ("+12Hz", "+24%", 0.06),
+        ("+14Hz", "+27%", 0.05),
+        ("+11Hz", "+23%", 0.09),
     ]
 
     out_buf = io.BytesIO()
     for idx, (clause_txt, role) in enumerate(clauses):
         if role == "settle":
-            pitch = "+9Hz"
-            rate = "+11%"
-            pause_sec = 0.24
+            mm_pitch, mm_rate, mm_pause = "+10Hz", "+18%", 0.20
         elif role == "lift":
-            pitch = "+14Hz"
-            rate = "+17%"
-            pause_sec = 0.12
+            mm_pitch, mm_rate, mm_pause = "+14Hz", "+25%", 0.10
         else:
-            pitch, rate, pause_sec = lift_cycle[idx % len(lift_cycle)]
+            mm_pitch, mm_rate, mm_pause = lift_cycle[idx % len(lift_cycle)]
 
-        communicate = edge_tts.Communicate(
-            text=clause_txt,
-            voice="my-MM-NilarNeural",
-            rate=rate,
-            pitch=pitch,
-        )
-        async for ev in communicate.stream():
-            if ev.get("type") == "audio" and ev.get("data"):
-                out_buf.write(ev["data"])
+        sub_segs = _split_burmese_and_english_segments(clause_txt)
+        for s_idx, (kind, seg_txt) in enumerate(sub_segs):
+            if kind == "en":
+                if s_idx > 0:
+                    await asyncio.sleep(0.14)
+                communicate = edge_tts.Communicate(
+                    text=seg_txt,
+                    voice="my-MM-NilarNeural",
+                    rate="+2%",
+                    pitch="+11Hz",
+                )
+                async for ev in communicate.stream():
+                    if ev.get("type") == "audio" and ev.get("data"):
+                        out_buf.write(ev["data"])
+                await asyncio.sleep(0.14)
+            else:
+                communicate = edge_tts.Communicate(
+                    text=seg_txt,
+                    voice="my-MM-NilarNeural",
+                    rate=mm_rate,
+                    pitch=mm_pitch,
+                )
+                async for ev in communicate.stream():
+                    if ev.get("type") == "audio" and ev.get("data"):
+                        out_buf.write(ev["data"])
 
-        if idx < len(clauses) - 1 and pause_sec > 0:
-            await asyncio.sleep(pause_sec)
+        if idx < len(clauses) - 1 and mm_pause > 0:
+            await asyncio.sleep(mm_pause)
 
     audio_data = out_buf.getvalue()
     if not audio_data:
@@ -313,7 +339,6 @@ async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
     with open(out_path, "wb") as f:
         f.write(audio_data)
     return os.path.exists(out_path) and os.path.getsize(out_path) > 0
-
 
 async def send_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, reply_text: str):
     """Reply အားလုံးအတွက် ရင်းရင်းနှီးနှီး ပွင့်ပွင့်လင်းလင်းနဲ့ အသံငယ်တဲ့ voice note ပို့ပေးသည်။"""
