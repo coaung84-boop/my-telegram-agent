@@ -4,7 +4,7 @@ import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
-from telegram import Update, BotCommand
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -42,6 +42,7 @@ from group_news_search import (
     save_group_message,
     get_available_group_names,
     handle_group_query,
+    generate_all_groups_summary,
     handle_news_command,
     perform_hybrid_web_search,
 )
@@ -128,6 +129,35 @@ async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = "\n".join(f"• {g}" for g in groups)
     await update.message.reply_text(f"📌 မှတ်တမ်းရှိသော Group များ:\n{lines}")
+
+
+async def groupsummary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📅 Today", callback_data="gsummary:today"),
+            InlineKeyboardButton("📆 Yesterday", callback_data="gsummary:yesterday"),
+        ]
+    ])
+    await update.message.reply_text("📊 Group Summary ကြည့်လိုသည့် ရက်ကို ရွေးပါရှင်:", reply_markup=kb)
+
+
+async def handle_groupsummary_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    if query.from_user.id != ADMIN_USER_ID:
+        await query.answer()
+        return
+    data = query.data or ""
+    if not data.startswith("gsummary:"):
+        return
+    period = data.split(":", 1)[1].strip().lower()
+    await query.answer("Summary ထုတ်နေပါတယ်...")
+    await context.bot.send_chat_action(chat_id=query.message.chat.id, action="typing")
+    summary_text = generate_all_groups_summary(period)
+    await query.message.reply_text(summary_text)
 
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
