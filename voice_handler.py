@@ -2,6 +2,7 @@ import os
 import re
 import tempfile
 import edge_tts
+import asyncio
 from telegram import Update
 from telegram.ext import ContextTypes
 
@@ -110,8 +111,13 @@ async def send_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, r
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
             tmp_path = tmp.name
-        communicate = edge_tts.Communicate(text=spoken, voice="my-MM-NilarNeural")
-        await communicate.save(tmp_path)
+        for _ in range(2):
+            try:
+                communicate = edge_tts.Communicate(text=spoken[:500], voice="my-MM-NilarNeural")
+                await asyncio.wait_for(communicate.save(tmp_path), timeout=15.0)
+                break
+            except Exception:
+                await asyncio.sleep(0.5)
         with open(tmp_path, "rb") as audio_f:
             await update.message.reply_voice(voice=audio_f)
     except Exception as e:
