@@ -429,8 +429,8 @@ async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
                 communicate = edge_tts.Communicate(
                     text=seg_txt,
                     voice="my-MM-NilarNeural",
-                    rate="-16%",
-                    pitch="+9Hz",
+                    rate="-4%",
+                    pitch="+11Hz",
                 )
                 async for ev in communicate.stream():
                     if ev.get("type") == "audio" and ev.get("data"):
