@@ -46,7 +46,13 @@ from group_news_search import (
     perform_hybrid_web_search,
 )
 from voice_handler import handle_voice_message
-from github_ops import handle_patch_command, getfile_command, handle_getfile_callback
+from github_ops import (
+    handle_patch_command,
+    handle_patch_callback,
+    getfile_command,
+    handle_getfile_callback,
+    notify_render_deploy_if_pending,
+)
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
@@ -88,7 +94,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /news [local|intl] [topic] — ပြည်တွင်း/နိုင်ငံတကာ သတင်းအနှစ်ချုပ်\n"
         "• /skills — Locked Core Rules & Version မှတ်တမ်း\n"
         "• /setrule <rule> — Core Rule အသစ်ထည့်ပြီး version တိုးရန်\n"
-        "• /patch <file> — GitHub ဖိုင်ကို patch လုပ်ရန်\n"
+        "• /patch <file> — GitHub ဖိုင် patch လုပ်ရန်\n"
         "• /getfile — GitHub ဖိုင်ဆွဲချရန်"
     )
 
@@ -459,6 +465,7 @@ async def post_init(application):
         BotCommand("patch", "GitHub ဖိုင် patch လုပ်ရန်"),
         BotCommand("getfile", "GitHub ဖိုင်ဆွဲချရန်"),
     ])
+    await notify_render_deploy_if_pending(application)
     application.create_task(reminder_loop(application))
 
 
@@ -488,6 +495,7 @@ def main():
     app.add_handler(CommandHandler("patch", handle_patch_command))
     app.add_handler(CommandHandler("getfile", getfile_command))
     app.add_handler(CallbackQueryHandler(handle_getfile_callback, pattern=r"^getfile:"))
+    app.add_handler(CallbackQueryHandler(handle_patch_callback, pattern=r"^patch(ok|no):"))
     app.add_handler(CallbackQueryHandler(
         handle_groupsummary_callback,
         pattern=r"^(gsummary:|grpsel:|grpday:|grpback)",
