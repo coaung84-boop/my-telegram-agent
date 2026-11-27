@@ -409,35 +409,32 @@ async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
     clauses = _split_into_expressive_clauses(spoken_text)
 
     lift_cycle = [
-        ("+12Hz", "+21%", 0.03),
-        ("+14Hz", "+23%", 0.03),
-        ("+11Hz", "+20%", 0.04),
+        ("+12Hz", "+21%"),
+        ("+14Hz", "+23%"),
+        ("+11Hz", "+20%"),
     ]
 
     out_buf = io.BytesIO()
     for idx, (clause_txt, role) in enumerate(clauses):
         if role == "settle":
-            mm_pitch, mm_rate, mm_pause = "+9Hz", "+17%", 0.08
+            mm_pitch, mm_rate = "+9Hz", "+17%"
         elif role == "lift":
-            mm_pitch, mm_rate, mm_pause = "+14Hz", "+22%", 0.04
+            mm_pitch, mm_rate = "+14Hz", "+22%"
         else:
-            mm_pitch, mm_rate, mm_pause = lift_cycle[idx % len(lift_cycle)]
+            mm_pitch, mm_rate = lift_cycle[idx % len(lift_cycle)]
 
         sub_segs = _split_burmese_and_english_segments(clause_txt)
-        for s_idx, (kind, seg_txt) in enumerate(sub_segs):
+        for kind, seg_txt in sub_segs:
             if kind == "en":
-                if s_idx > 0:
-                    await asyncio.sleep(0.04)
                 communicate = edge_tts.Communicate(
                     text=seg_txt,
                     voice="my-MM-NilarNeural",
-                    rate="+8%",
-                    pitch="+11Hz",
+                    rate="-16%",
+                    pitch="+9Hz",
                 )
                 async for ev in communicate.stream():
                     if ev.get("type") == "audio" and ev.get("data"):
                         out_buf.write(ev["data"])
-                await asyncio.sleep(0.05)
             else:
                 communicate = edge_tts.Communicate(
                     text=seg_txt,
@@ -448,9 +445,6 @@ async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
                 async for ev in communicate.stream():
                     if ev.get("type") == "audio" and ev.get("data"):
                         out_buf.write(ev["data"])
-
-        if idx < len(clauses) - 1 and mm_pause > 0:
-            await asyncio.sleep(mm_pause)
 
     audio_data = out_buf.getvalue()
     if not audio_data:
