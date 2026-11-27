@@ -1,8 +1,10 @@
 import io
 import os
 import re
+import json
 import base64
 import requests
+from datetime import datetime
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
@@ -12,7 +14,13 @@ from config import (
     GITHUB_REPO,
     GITHUB_BRANCH,
     ALLOWED_GITHUB_FILES,
+    MM_TZ,
 )
+from database import supabase
+
+_PENDING_PATCHES: dict[str, dict] = {}
+_PENDING_DEPLOY_MEM: dict | None = None
+_PATCH_SEQ = 0
 
 
 def _github_headers() -> dict:
@@ -133,6 +141,75 @@ def _apply_hunks_to_content(original_content: str, hunks: list[tuple[str, str]])
     return updated, applied, failed
 
 
+def _save_pending_deploy_info(info: dict):
+    """GitHub push ပြီးနောက် Render deploy ပြီးလျှင် အသိပေးရန် pending deploy info သိမ်းသည်။"""
+    global _PENDING_DEPLOY_MEM
+    _PENDING_DEPLOY_MEM = info
+    try:
+        payload_str = json.dumps(info, ensure_ascii=False)
+        supabase.table("daily_reports").insert({
+            "report_content": f"[RENDER_DEPLOY_PENDING] {payload_str}"
+        }).execute()
+    except Exception as e:
+        print(f"Warning: could not persist pending deploy marker to DB: {e}")
+
+
+def _pop_pending_deploy_info() -> dict | None:
+    """Startup ချိန်တွင် pending deploy info ရှိလျှင် ယူပြီး ရှင်းလင်းသည်။"""
+    global _PENDING_DEPLOY_MEM
+    found = _PENDING_DEPLOY_MEM
+    _PENDING_DEPLOY_MEM = None
+    try:
+        res = (
+            supabase.table("daily_reports")
+            .select("id, report_content")
+            .like("report_content", "[RENDER_DEPLOY_PENDING]%")
+            .order("id", desc=True)
+            .limit(10)
+            .execute()
+        )
+        rows = res.data or []
+        for r in rows:
+            raw_txt = str(r.get("report_content") or "")
+            json_part = raw_txt.replace("[RENDER_DEPLOY_PENDING]", "", 1).strip()
+            if not found and json_part:
+                try:
+                    found = json.loads(json_part)
+                except Exception:
+                    pass
+            try:
+                supabase.table("daily_reports").delete().eq("id", r["id"]).execute()
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"Warning: could not read/clear pending deploy marker from DB: {e}")
+    return found
+
+
+async def notify_render_deploy_if_pending(app):
+    """Render deploy ပြီး၍ bot startup တက်လာချိန်တွင် pending deploy ရှိပါက Telegram ၌ အသိပေးသည်။"""
+    info = _pop_pending_deploy_info()
+    if not info or not ADMIN_USER_ID:
+        return
+    file_name = info.get("file", "code")
+    sha = info.get("sha", "")
+    hunks_info = info.get("hunks", "")
+    now_mm = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
+    lines = [
+        "🚀 Render Deploy Success ဖြစ်သွားပါပြီရှင်!",
+        f"• File: `{file_name}`",
+    ]
+    if sha:
+        lines.append(f"• Commit: `{sha}`")
+    if hunks_info:
+        lines.append(f"• Hunks: {hunks_info}")
+    lines.append(f"• Time: {now_mm}")
+    try:
+        await app.bot.send_message(chat_id=ADMIN_USER_ID, text="\n".join(lines), parse_mode="Markdown")
+    except Exception as e:
+        print(f"Error sending Render deploy notification: {e}")
+
+
 async def _send_github_file(target_file: str, reply_target):
     content, _ = _github_get_file(target_file)
     bio = io.BytesIO(content.encode("utf-8"))
@@ -146,14 +223,9 @@ async def _send_github_file(target_file: str, reply_target):
 
 async def handle_patch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /patch <filename>
-    <<<<<<< SEARCH
-    ...
-    =======
-    ...
-    >>>>>>> REPLACE
-    (သို့မဟုတ် unified diff hunk) ဖြင့် GitHub repo ရှိ ဖိုင်ကို update လုပ်ပြီး Render auto-deploy ဖြစ်စေသည်။
+    /patch <filename> ဖြင့် patch ကို dry-run စစ်ပြီး Confirm / Cancel button ဖြင့် အတည်ပြုခိုင်းသည်။
     """
+    global _PATCH_SEQ
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID:
         return
@@ -190,7 +262,10 @@ async def handle_patch_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     try:
-        await update.message.reply_text(f"⏳ `{target_file}` ({GITHUB_REPO}@{GITHUB_BRANCH}) ကို patch လုပ်နေပါတယ်ရှင်...", parse_mode="Markdown")
+        await update.message.reply_text(
+            f"🔍 `{target_file}` ({GITHUB_REPO}@{GITHUB_BRANCH}) အတွက် patch preview စစ်နေပါတယ်ရှင်...",
+            parse_mode="Markdown",
+        )
         current_content, sha = _github_get_file(target_file)
         new_content, applied_count, failed_list = _apply_hunks_to_content(current_content, hunks)
 
@@ -199,23 +274,95 @@ async def handle_patch_command(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(f"❌ Patch မအောင်မြင်ပါရှင်:\n{fail_detail}")
             return
 
-        commit_msg = f"bot(/patch): update {target_file} ({applied_count} hunk(s) via သင်ဇာ)"
-        res_json = _github_put_file(target_file, new_content, sha, commit_msg)
-        commit_sha = ((res_json.get("commit") or {}).get("sha") or "")[:7]
+        _PATCH_SEQ += 1
+        patch_id = f"p{_PATCH_SEQ}"
+        _PENDING_PATCHES[patch_id] = {
+            "target_file": target_file,
+            "new_content": new_content,
+            "sha": sha,
+            "applied_count": applied_count,
+            "total_hunks": len(hunks),
+            "failed_list": failed_list,
+        }
 
-        status_msg = (
-            f"✅ `{target_file}` ကို GitHub (`{GITHUB_BRANCH}`) မှာ update တင်ပြီးပါပြီရှင်\n"
-            f"• Applied hunks: {applied_count}/{len(hunks)}\n"
-            f"• Commit: `{commit_sha}`\n"
-            f"• Render auto-deploy ဆက်လုပ်သွားပါလိမ့်မယ်"
-        )
+        preview_lines = [
+            f"🧩 Patch Confirm လိုအပ်ပါတယ်ရှင် — `{target_file}`",
+            f"• Branch: `{GITHUB_BRANCH}`",
+            f"• Matched hunks: {applied_count}/{len(hunks)}",
+        ]
         if failed_list:
-            status_msg += "\n⚠️ မကိုက်ညီသည့် hunk များ:\n" + "\n".join(failed_list)
+            preview_lines.append("⚠️ မကိုက်ညီသည့် hunk များ: " + ", ".join(failed_list))
+        preview_lines.append("\nGitHub သို့ တင်ပြီး Render deploy ဆက်လုပ်မလားရှင်?")
 
-        await update.message.reply_text(status_msg, parse_mode="Markdown")
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Confirm & Push", callback_data=f"patchok:{patch_id}"),
+                InlineKeyboardButton("❌ Cancel", callback_data=f"patchno:{patch_id}"),
+            ]
+        ])
+        await update.message.reply_text("\n".join(preview_lines), reply_markup=kb, parse_mode="Markdown")
     except Exception as e:
-        print(f"GitHub /patch error: {e}")
-        await update.message.reply_text(f"❌ GitHub patch လုပ်ရာမှာ error တက်ပါတယ်ရှင်:\n`{str(e)[:240]}`", parse_mode="Markdown")
+        print(f"GitHub /patch preview error: {e}")
+        await update.message.reply_text(f"❌ Patch စစ်ဆေးရာမှာ error တက်ပါတယ်ရှင်:\n`{str(e)[:240]}`", parse_mode="Markdown")
+
+
+async def handle_patch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Patch Confirm / Cancel inline button များကို ကိုင်တွယ်သည်။"""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    if query.from_user.id != ADMIN_USER_ID:
+        await query.answer()
+        return
+
+    data = query.data or ""
+    await query.answer()
+
+    if data.startswith("patchno:"):
+        patch_id = data.split(":", 1)[1].strip()
+        _PENDING_PATCHES.pop(patch_id, None)
+        await query.message.edit_text("🛑 Patch တင်ခြင်းကို Cancel လုပ်လိုက်ပါပြီရှင်။")
+        return
+
+    if data.startswith("patchok:"):
+        patch_id = data.split(":", 1)[1].strip()
+        item = _PENDING_PATCHES.pop(patch_id, None)
+        if not item:
+            await query.message.edit_text("⚠️ ဒီ patch က သက်တမ်းကုန်သွားပါပြီ (သို့မဟုတ်) ပြီးသွားပါပြီရှင်။")
+            return
+
+        target_file = item["target_file"]
+        new_content = item["new_content"]
+        sha = item["sha"]
+        applied_count = item["applied_count"]
+        total_hunks = item["total_hunks"]
+        failed_list = item["failed_list"]
+
+        try:
+            await query.message.edit_text(f"⏳ `{target_file}` ကို GitHub (`{GITHUB_BRANCH}`) သို့ push လုပ်နေပါတယ်ရှင်...", parse_mode="Markdown")
+            commit_msg = f"bot(/patch): update {target_file} ({applied_count} hunk(s) via သင်ဇာ)"
+            res_json = _github_put_file(target_file, new_content, sha, commit_msg)
+            commit_sha = ((res_json.get("commit") or {}).get("sha") or "")[:7]
+
+            _save_pending_deploy_info({
+                "file": target_file,
+                "sha": commit_sha,
+                "hunks": f"{applied_count}/{total_hunks}",
+            })
+
+            status_msg = (
+                f"✅ `{target_file}` ကို GitHub (`{GITHUB_BRANCH}`) မှာ update တင်ပြီးပါပြီရှင်\n"
+                f"• Applied hunks: {applied_count}/{total_hunks}\n"
+                f"• Commit: `{commit_sha}`\n"
+                f"• Render auto-deploy ပြီးသွားရင် ထပ်အသိပေးပါ့မယ်ရှင်"
+            )
+            if failed_list:
+                status_msg += "\n⚠️ မကိုက်ညီသည့် hunk များ:\n" + "\n".join(failed_list)
+
+            await query.message.edit_text(status_msg, parse_mode="Markdown")
+        except Exception as e:
+            print(f"GitHub patch push error: {e}")
+            await query.message.edit_text(f"❌ GitHub push လုပ်ရာမှာ error တက်ပါတယ်ရှင်:\n`{str(e)[:240]}`", parse_mode="Markdown")
 
 
 async def getfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
