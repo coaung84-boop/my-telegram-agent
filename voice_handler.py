@@ -146,12 +146,34 @@ def _to_spoken_chat_prose(raw_text: str) -> str:
     combined = " ".join(spoken_lines)
     combined = re.sub(r"\s+", " ", combined).strip()
 
-    if len(combined) > 380:
-        cut = combined[:380]
-        last_p = max(cut.rfind("။"), cut.rfind("၊"), cut.rfind(" "))
-        if last_p > 70:
-            cut = cut[: last_p + 1]
-        combined = f"{cut} ကျန်တဲ့ အသေးစိတ်ကိုတော့ စာထဲမှာ အပြည့်အစုံ ရေးပေးထားတယ်နော်။"
+    if len(combined) > 260:
+        try:
+            short_prompt = (
+                "အောက်ပါ စာသားရဲ့ အဓိက အချက်ကို မြန်မာမိန်းကလေးတစ်ယောက် စကားပြောသလို "
+                "ရင်းရင်းနှီးနှီးနဲ့ စာကြောင်း ၂–၃ ကြောင်းစာလောက်ပဲ တိုတိုရှင်းရှင်း ချုံ့ပြောပေးပါ။ "
+                "စာထဲမှာ အပြည့်အစုံ ရေးထားတယ် စသဖြင့် မညွှန်းပါနှင့်။\n\n"
+                f"{combined}"
+            )
+            ai_short = (call_ai_with_3tier_fallback(short_prompt) or "").strip()
+            if ai_short and "ခဏအလုပ်များနေပါတယ်" not in ai_short:
+                ai_short = re.sub(r"[*_`~#>\-]+", " ", ai_short)
+                ai_short = re.sub(r"\s+", " ", ai_short).strip()
+                if not ai_short.endswith(("။", "!", "?")):
+                    ai_short = f"{ai_short}။"
+                return ai_short[:300]
+        except Exception:
+            pass
+
+        sentences = [s.strip() for s in re.split(r"(?<=[။!?])\s*", combined) if s.strip()]
+        picked = " ".join(sentences[:2]).strip() if sentences else combined[:220]
+        if len(picked) > 240:
+            cut = picked[:240]
+            last_p = max(cut.rfind("။"), cut.rfind("၊"), cut.rfind(" "))
+            if last_p > 60:
+                picked = cut[: last_p + 1]
+        if not picked.endswith(("။", "!", "?")):
+            picked = f"{picked}။"
+        return picked
 
     return combined
 
