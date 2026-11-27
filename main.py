@@ -55,6 +55,7 @@ from github_ops import (
     handle_patch_callback,
     getfile_command,
     handle_getfile_callback,
+    handle_py_file_upload,
     notify_render_deploy_if_pending,
 )
 
