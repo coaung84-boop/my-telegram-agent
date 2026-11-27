@@ -3,7 +3,7 @@ import os
 import re
 import base64
 import requests
-from telegram import Update, InputFile
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from config import (
@@ -133,6 +133,17 @@ def _apply_hunks_to_content(original_content: str, hunks: list[tuple[str, str]])
     return updated, applied, failed
 
 
+async def _send_github_file(target_file: str, reply_target):
+    content, _ = _github_get_file(target_file)
+    bio = io.BytesIO(content.encode("utf-8"))
+    bio.name = target_file
+    await reply_target.reply_document(
+        document=InputFile(bio, filename=target_file),
+        caption=f"📄 `{target_file}` (`{GITHUB_REPO}@{GITHUB_BRANCH}`)",
+        parse_mode="Markdown",
+    )
+
+
 async def handle_patch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /patch <filename>
@@ -209,7 +220,7 @@ async def handle_patch_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def getfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /getfile <filename> ဖြင့် GitHub repo ရှိ ခွင့်ပြုထားသော ဖိုင်ကို Telegram document အဖြစ် ပြန်ပို့ပေးသည်။
+    /getfile (သို့မဟုတ် /getfile <filename>) ဖြင့် ဖိုင်ရွေးရန် button ပြခြင်း သို့မဟုတ် ဖိုင်ကို document အဖြစ် ပို့ပေးခြင်း။
     """
     if not update.message or not update.effective_user:
         return
@@ -218,32 +229,64 @@ async def getfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     raw = (update.message.text or "").strip()
     parts = raw.split(maxsplit=1)
+    files_sorted = sorted(ALLOWED_GITHUB_FILES)
+
     if len(parts) < 2 or not parts[1].strip():
-        allowed_str = ", ".join(sorted(ALLOWED_GITHUB_FILES))
+        if not files_sorted:
+            await update.message.reply_text("ခွင့်ပြုထားသော ဖိုင်စာရင်း မရှိသေးပါဘူးရှင်။")
+            return
+        rows = []
+        for i in range(0, len(files_sorted), 2):
+            pair = files_sorted[i:i + 2]
+            rows.append([
+                InlineKeyboardButton(f"📄 {fname}", callback_data=f"getfile:{fname}")
+                for fname in pair
+            ])
         await update.message.reply_text(
-            f"ဖိုင်နာမည် ထည့်ပေးပါရှင်\nဥပမာ: `/getfile group_news_search.py`\nခွင့်ပြုထားသော ဖိုင်များ: {allowed_str}",
-            parse_mode="Markdown",
+            "ယူလိုသည့် ဖိုင်ကို ရွေးနှိပ်ပါရှင်:",
+            reply_markup=InlineKeyboardMarkup(rows),
         )
         return
 
     target_file = os.path.basename(parts[1].strip())
     if target_file not in ALLOWED_GITHUB_FILES:
-        allowed_str = ", ".join(sorted(ALLOWED_GITHUB_FILES))
+        allowed_str = ", ".join(files_sorted)
         await update.message.reply_text(
             f"'{target_file}' ကို ဖတ်ခွင့်မပြုထားပါဘူးရှင်\nခွင့်ပြုထားသော ဖိုင်များ: {allowed_str}"
         )
         return
 
     try:
-        content, _ = _github_get_file(target_file)
-        bio = io.BytesIO(content.encode("utf-8"))
-        bio.name = target_file
-        await update.message.reply_document(
-            document=InputFile(bio, filename=target_file),
-            caption=f"📄 `{target_file}` (`{GITHUB_REPO}@{GITHUB_BRANCH}`)",
-            parse_mode="Markdown",
-        )
+        await _send_github_file(target_file, update.message)
     except Exception as e:
         print(f"GitHub /getfile error: {e}")
         await update.message.reply_text(f"❌ ဖိုင်ယူရာမှာ error တက်ပါတယ်ရှင်:\n`{str(e)[:240]}`", parse_mode="Markdown")
-        
+
+
+async def handle_getfile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /getfile button နှိပ်သည့်အခါ သက်ဆိုင်ရာ ဖိုင်ကို ပြန်ပို့ပေးသည်။
+    """
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    if query.from_user.id != ADMIN_USER_ID:
+        await query.answer()
+        return
+
+    data = query.data or ""
+    if not data.startswith("getfile:"):
+        return
+
+    target_file = os.path.basename(data.split(":", 1)[1].strip())
+    await query.answer("ဖိုင်ယူနေပါတယ်...")
+
+    if target_file not in ALLOWED_GITHUB_FILES:
+        await query.message.reply_text(f"'{target_file}' ကို ဖတ်ခွင့်မပြုထားပါဘူးရှင်။")
+        return
+
+    try:
+        await _send_github_file(target_file, query.message)
+    except Exception as e:
+        print(f"GitHub getfile callback error: {e}")
+        await query.message.reply_text(f"❌ ဖိုင်ယူရာမှာ error တက်ပါတယ်ရှင်:\n`{str(e)[:240]}`", parse_mode="Markdown")
