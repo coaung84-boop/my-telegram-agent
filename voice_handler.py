@@ -493,26 +493,26 @@ async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
                     if ev.get("type") == "audio" and ev.get("data"):
                         out_buf.write(ev["data"])
 
-        # Clause ထဲက English pitch ကို မြန်မာ pitch နဲ့ နီးစပ်အောင် ညှိပြီး rate ကို အနည်းငယ်နှေးထားသည်
+        # မြန်မာနဲ့ English ကြား အရှိန်နဲ့ pitch သိပ်မကွာဘဲ ပိုကပ်စေရန် ညှိထားသည်
         en_pitch = mm_pitch
-        en_rate = "-6%"
+        en_rate = "+4%"
 
         sub_segs = _split_burmese_and_english_segments(clause_txt)
+        merged_segs: list[tuple[str, str]] = []
         for kind, seg_txt in sub_segs:
-            if kind == "en":
-                communicate = edge_tts.Communicate(
-                    text=seg_txt,
-                    voice="my-MM-NilarNeural",
-                    rate=en_rate,
-                    pitch=en_pitch,
-                )
+            if merged_segs and merged_segs[-1][0] == kind:
+                prev_kind, prev_txt = merged_segs[-1]
+                merged_segs[-1] = (prev_kind, f"{prev_txt} {seg_txt}".strip())
             else:
-                communicate = edge_tts.Communicate(
-                    text=seg_txt,
-                    voice="my-MM-NilarNeural",
-                    rate=mm_rate,
-                    pitch=mm_pitch,
-                )
+                merged_segs.append((kind, seg_txt))
+
+        for kind, seg_txt in merged_segs:
+            communicate = edge_tts.Communicate(
+                text=seg_txt,
+                voice="my-MM-NilarNeural",
+                rate=en_rate if kind == "en" else mm_rate,
+                pitch=en_pitch if kind == "en" else mm_pitch,
+            )
             async for ev in communicate.stream():
                 if ev.get("type") == "audio" and ev.get("data"):
                     out_buf.write(ev["data"])
