@@ -379,6 +379,7 @@ def main():
     app.add_handler(CommandHandler("skills", skills_command))
     app.add_handler(CommandHandler("setrule", setrule_command))
     app.add_handler(CommandHandler("patch", handle_patch_command))
+    app.add_handler(CommandHandler("getfile", getfile_command))
 
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice_message))
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, handle_message))
