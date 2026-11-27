@@ -5,7 +5,14 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from telegram import Update, BotCommand
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+    ContextTypes,
+)
 
 from config import TELEGRAM_BOT_TOKEN, ADMIN_USER_ID, MM_TZ, MYANMAR_WEEKDAYS
 from database import supabase
@@ -39,7 +46,7 @@ from group_news_search import (
     perform_hybrid_web_search,
 )
 from voice_handler import handle_voice_message, send_voice_reply
-from github_ops import handle_patch_command
+from github_ops import handle_patch_command, getfile_command, handle_getfile_callback
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
@@ -71,7 +78,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /news [local|intl] [topic] — ပြည်တွင်း/နိုင်ငံတကာ သတင်းအနှစ်ချုပ်\n"
         "• /skills — Locked Core Rules & Version မှတ်တမ်း\n"
         "• /setrule <rule> — Core Rule အသစ်ထည့်ပြီး version တိုးရန်\n"
-        "• /patch <file> — GitHub ဖိုင်ကို patch လုပ်ရန်"
+        "• /patch <file> — GitHub ဖိုင်ကို patch လုပ်ရန်\n"
+        "• /getfile — GitHub ဖိုင်ဆွဲချရန်"
     )
 
 
@@ -132,7 +140,8 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /news — သတင်းအနှစ်ချုပ်\n"
         "• /skills — Core Rules\n"
         "• /setrule — Rule ထည့်ရန်\n"
-        "• /patch — GitHub ဖိုင် patch လုပ်ရန်"
+        "• /patch — GitHub ဖိုင် patch လုပ်ရန်\n"
+        "• /getfile — GitHub ဖိုင်ဆွဲချရန်"
     )
 
 
@@ -348,10 +357,12 @@ async def post_init(application):
         BotCommand("menu", "Menu စာရင်းကြည့်ရန်"),
         BotCommand("tasks", "လက်ရှိ Task စာရင်း"),
         BotCommand("groups", "Group စာရင်းကြည့်ရန်"),
+        BotCommand("group", "Group စာရင်းကြည့်ရန်"),
         BotCommand("news", "သတင်းအနှစ်ချုပ်"),
         BotCommand("skills", "Core Rules မှတ်တမ်း"),
         BotCommand("setrule", "Core Rule အသစ်ထည့်ရန်"),
         BotCommand("patch", "GitHub ဖိုင် patch လုပ်ရန်"),
+        BotCommand("getfile", "GitHub ဖိုင်ဆွဲချရန်"),
     ])
     application.create_task(reminder_loop(application))
 
@@ -381,6 +392,7 @@ def main():
     app.add_handler(CommandHandler("setrule", setrule_command))
     app.add_handler(CommandHandler("patch", handle_patch_command))
     app.add_handler(CommandHandler("getfile", getfile_command))
+    app.add_handler(CallbackQueryHandler(handle_getfile_callback, pattern=r"^getfile:"))
 
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice_message))
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, handle_message))
