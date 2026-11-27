@@ -158,29 +158,33 @@ def _normalize_heard_transcript(text: str) -> str:
 
 
 def _to_spoken_chat_prose(raw_text: str) -> str:
-    text = re.sub(r"https?://\S+", "", raw_text)
-    text = re.sub(r"\[[^\]]+\]\([^\)]+\)", "", text)
-    text = re.sub(r"\[(Verified|Deduced|Unverified)\]", "", text, flags=re.IGNORECASE)
-    text = re.sub(
+    base_clean = re.sub(r"https?://\S+", "", raw_text)
+    base_clean = re.sub(r"\[[^\]]+\]\([^\)]+\)", "", base_clean)
+    base_clean = re.sub(r"\[(Verified|Deduced|Unverified)\]", "", base_clean, flags=re.IGNORECASE)
+    base_clean = re.sub(
         r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF]",
         " ",
-        text,
+        base_clean,
     )
-    text = _humanize_dates_and_times_for_speech(text)
+    base_clean = re.sub(r"[*_`~#>\-]+", " ", base_clean)
+    source_for_summary = re.sub(r"\s+", " ", base_clean).strip()
+
+    text = _humanize_dates_and_times_for_speech(base_clean)
 
     text = re.sub(r"(?im)^\s*[-•*]+\s*key\s*point\s*:\s*", "အဓိက ကတော့ ", text)
     text = re.sub(r"(?im)^\s*အကြံပြုချက်\s*:\s*", "သင်ဇာ့အနေနဲ့ ပြောရရင်တော့ ", text)
     text = re.sub(r"(?im)^\s*\d+[\.\)]\s*", "", text)
     text = re.sub(r"(?m)^\s*[-•*]+\s*", "", text)
-    text = re.sub(r"[*_`~#>\-]+", " ", text)
 
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     spoken_lines: list[str] = []
-    for ln in lines:
+    for idx, ln in enumerate(lines):
         ln = re.sub(r"\s*:\s*", "၊ ", ln)
         ln = re.sub(r"\s+", " ", ln).strip()
         if not ln:
             continue
+        if idx > 0 and not ln.startswith(("အင်း", "ဟုတ်", "ဒါဆို", "ပြီးတော့", "အဓိက", "သင်ဇာ")):
+            ln = f"ပြီးတော့ {ln}"
         if not ln.endswith(("။", "၊", "!", "?")):
             ln = f"{ln}။"
         spoken_lines.append(ln)
@@ -188,32 +192,49 @@ def _to_spoken_chat_prose(raw_text: str) -> str:
     combined = " ".join(spoken_lines)
     combined = re.sub(r"\s+", " ", combined).strip()
 
-    if len(combined) > 320:
-        sentences = [s.strip() for s in re.split(r"(?<=[။!?])\s*", combined) if s.strip()]
-        picked: list[str] = []
-        total_len = 0
-        for sent in sentences:
-            if not sent:
-                continue
-            s_norm = sent if sent.endswith(("။", "!", "?")) else f"{sent}။"
-            if total_len + len(s_norm) > 300 and picked:
-                break
-            picked.append(s_norm)
-            total_len += len(s_norm) + 1
-            if len(picked) >= 3:
-                break
+    # စာတိုရင် မဖြတ်တောက်ဘဲ သဘာဝကျတဲ့ စကားပြောအတိုင်း အကုန်ပြောမယ်
+    if len(combined) <= 360:
+        return combined
 
-        result = " ".join(picked).strip() if picked else combined[:300]
-        if len(result) > 300:
-            cut = result[:300]
-            last_p = max(cut.rfind("။"), cut.rfind("၊"), cut.rfind(" "))
-            if last_p > 80:
-                result = cut[: last_p + 1]
-        if not result.endswith(("။", "!", "?")):
-            result = f"{result}။"
-        return result
+    # စာရှည်ရင် မူရင်း reply စာသားကို အခြေခံပြီး စာနဲ့ အဆက်အစပ်မိအောင် summary လုပ်ပြောမယ်
+    try:
+        summary_prompt = (
+            "အောက်ပါ မူရင်း reply စာသားကို ဖတ်နေသူနဲ့ အတူလိုက်ပြီး နားလည်လွယ်အောင် "
+            "မူရင်းစာရဲ့ အဓိက အချက်နဲ့ အစီအစဉ်ကို မလွဲစေဘဲ မြန်မာမိန်းကလေးတစ်ယောက် "
+            "ရင်းရင်းနှီးနှီး ပြန်ပြောပြသလို စကားပြောပုံစံနဲ့ အတိုချုပ် summary လုပ်ပေးပါ။\n"
+            "စည်းမျဉ်းများ:\n"
+            "- မူရင်းစာထဲမှာ မပါတဲ့ အချက်အသစ်တွေ ထပ်မထည့်ပါနှင့်။\n"
+            "- စာကြောင်း ၂–၄ ကြောင်းစာလောက် တိုတိုရှင်းရှင်း ပြောပါ။\n"
+            "- bullet, number, colon, emoji, markdown တွေ မသုံးပါနှင့်။\n"
+            "- 'စာထဲမှာ ဖော်ပြထားသလို' စတဲ့ စာဖတ်ဟန် မသုံးပါနှင့်။\n\n"
+            f"{source_for_summary}"
+        )
+        ai_summary = (call_ai_with_3tier_fallback(summary_prompt) or "").strip()
+        if ai_summary and "ခဏအလုပ်များနေပါတယ်" not in ai_summary:
+            ai_summary = re.sub(r"[*_`~#>\-]+", " ", ai_summary)
+            ai_summary = re.sub(r"(?m)^\s*(?:[-•*]|\d+[\.\)])\s*", "", ai_summary)
+            ai_summary = re.sub(r"\s+", " ", ai_summary).strip()
+            if not ai_summary.endswith(("။", "!", "?")):
+                ai_summary = f"{ai_summary}။"
+            return ai_summary[:380]
+    except Exception:
+        pass
 
-    return combined
+    sentences = [s.strip() for s in re.split(r"(?<=[။!?])\s*", combined) if s.strip()]
+    picked: list[str] = []
+    total_len = 0
+    for sent in sentences:
+        if not sent:
+            continue
+        s_norm = sent if sent.endswith(("။", "!", "?")) else f"{sent}။"
+        if total_len + len(s_norm) > 340 and picked:
+            break
+        picked.append(s_norm)
+        total_len += len(s_norm) + 1
+        if len(picked) >= 3:
+            break
+
+    return " ".join(picked).strip() if picked else combined
 
 
 def _build_conversational_speech(reply_text: str) -> str:
@@ -445,7 +466,7 @@ def _split_burmese_and_english_segments(text: str) -> list[tuple[str, str]]:
 
 
 async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
-    """မြန်မာအဆွဲအငင် မူလအတိုင်း ထားပြီး English စကားလုံးများကို အနည်းငယ်နှေးပြီး ပြေပြစ်စွာ ထွက်စေသည်။"""
+    """မြန်မာအဆွဲအငင် မူလအတိုင်း ထားပြီး English စကားလုံးများကို ပြေပြစ်စွာ ထွက်စေသည်။"""
     clauses = _split_into_expressive_clauses(spoken_text)
 
     lift_cycle = [
@@ -457,11 +478,11 @@ async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
     out_buf = io.BytesIO()
     for idx, (clause_txt, role) in enumerate(clauses):
         if role == "settle":
-            mm_pitch, mm_rate, mm_pause = "+9Hz", "+17%", 0.08
+            mm_pitch, mm_rate, _ = "+9Hz", "+17%", 0.08
         elif role == "lift":
-            mm_pitch, mm_rate, mm_pause = "+14Hz", "+22%", 0.04
+            mm_pitch, mm_rate, _ = "+14Hz", "+22%", 0.04
         else:
-            mm_pitch, mm_rate, mm_pause = lift_cycle[idx % len(lift_cycle)]
+            mm_pitch, mm_rate, _ = lift_cycle[idx % len(lift_cycle)]
 
         # မြန်မာအရှိန်ကို မနှေးဘဲ English စကားလုံးတွေကို ခဏရပ်ပြီး ပိုရှင်းရှင်း ဖတ်စေရန် ညှိထားသည်
         paced_clause = re.sub(
