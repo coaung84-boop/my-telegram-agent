@@ -246,6 +246,4 @@ async def getfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"GitHub /getfile error: {e}")
         await update.message.reply_text(f"❌ ဖိုင်ယူရာမှာ error တက်ပါတယ်ရှင်:\n`{str(e)[:240]}`", parse_mode="Markdown")
-```[cite: 4]
-
-ဒီဖိုင်ကို GitHub ပေါ်က `github_ops.py` ထဲ တင်ပြီး deploy ပြီးသွားရင် `/getfile group_news_search.py` နဲ့ ဆွဲချကြည့်လို့ ရပါပြီရှင်[cite: 4, 5]။ `/getfile` ကို စမ်းပြီးတဲ့အခါ ဘယ်ဖိုင်ကို ဆက်ကြည့်ချင်ပါသလဲရှင်?
+        
