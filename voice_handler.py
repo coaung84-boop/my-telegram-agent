@@ -105,6 +105,16 @@ def _humanize_dates_and_times_for_speech(text: str) -> str:
     return text
 
 
+def _normalize_heard_transcript(text: str) -> str:
+    """STT မှာ အသံထွက်ဆင်တူ မှားကြားနိုင်တာတွေကို ဆိုလိုရင်းအတိုင်း ညှိပေးသည်။"""
+    if not text:
+        return ""
+    s = text.strip()
+    # "တင်ဇာ" / "တင်စာ" / "သင်စာ" -> "သင်ဇာ"
+    s = re.sub(r"(?:တင်ဇာ|တင်စာ|သင်စာ)", "သင်ဇာ", s)
+    return s
+
+
 def _to_spoken_chat_prose(raw_text: str) -> str:
     text = re.sub(r"https?://\S+", "", raw_text)
     text = re.sub(r"\[[^\]]+\]\([^\)]+\)", "", text)
@@ -156,16 +166,8 @@ def _build_conversational_speech(reply_text: str) -> str:
         m_title = re.search(r'"([^"]+)"\s*မှတ်ထားလိုက်ပါပြီ', raw)
         title_clean = (m_title.group(1) if m_title else "").strip()
         if not title_clean or title_clean.lower() in {"er ပေးရန်", "reminder ပေးရန်", "remind ပေးရန်"}:
-            return (
-                "အင်း၊ မှတ်ထားလိုက်ပြီနော်။ "
-                "အချိန်ရောက်တာနဲ့ သင်ဇာ လှမ်းသတိပေးလိုက်မယ်။ "
-                "တခြား ဘာရှိသေးလဲ ပြောပါဦး။"
-            )
-        return (
-            f"အင်း၊ {title_clean} ကို မှတ်ထားလိုက်ပြီနော်။ "
-            "အချိန်ရောက်ရင် သေချာ လှမ်းသတိပေးလိုက်မယ်။ "
-            "နောက်ထပ် ဘာလုပ်စရာ ရှိသေးလဲ ပြောပါဦး။"
-        )
+            return "အင်း၊ မှတ်ထားလိုက်ပြီနော်။ အချိန်ရောက်တာနဲ့ သင်ဇာ သတိပေးမယ်။"
+        return f"အင်း၊ {title_clean} ကို မှတ်ထားလိုက်ပြီနော်။ အချိန်ရောက်ရင် သင်ဇာ သတိပေးမယ်။"
 
     return _to_spoken_chat_prose(raw)
 
@@ -221,17 +223,17 @@ def transcribe_and_analyze_voice(
 Return ONLY valid JSON:
 {{
   "transcript": "ပြောထားတဲ့စကားကို မြန်မာ (Unicode) / English မှန်ကန်အောင် စာပြန်ရေးထားချက်",
-  "tone": "အသံနေအသံထား (ဥပမာ — အလောတကြီး/စိတ်စောနေတာ၊ အေးအေးဆေးဆေး/စဉ်းစားနေတာ၊ သေချာမေးမြန်းတာ၊ တိုတိုတုတ်တုတ် ခိုင်းတာ)",
+  "tone": "အသံနေအသံထား (ဥပမာ — အလောတကြီး/စိတ်စောနေတာ၊ အေးအေးဆေးဆေး/စဉ်းစားနေတာ၊ သေချာမေးမြန်းတာ၊ ရင်းရင်းနှီးနှီးခေါ်တာ)",
   "intent_hint": "TASK | GROUP | WEB_SEARCH | GENERAL",
   "interpreted_meaning": "ဒီလေသံနဲ့ ဒီစကားရဲ့ အဓိက ဆိုလိုရင်းကို တိုတိုရှင်းရှင်း ဖော်ပြချက်",
-  "ambiguous": true or false,
-  "clarification_question": "ambiguous ဖြစ်ရင် 'ဒါကို ဆိုလိုတာလားရှင်' လို့ သဘာဝကျကျ မေးတဲ့ မေးခွန်းတို"
+  "ambiguous": false,
+  "clarification_question": ""
 }}
 
 Rules:
 - transcript မှာ ကြားသည့်အတိုင်း တိတိကျကျ ရေးပါ။
-- အသံပြတ်တောက်တာ၊ စကားမပြည့်စုံတာ၊ ဒါမှမဟုတ် အဓိပ္ပာယ် နှစ်မျိုးဖြစ်နိုင်ရင် ambiguous=true ထားပြီး clarification_question မှာ 'ဒါကို ဆိုလိုတာလားရှင်' ဆိုတဲ့ ဟန်နဲ့ တိုတိုရှင်းရှင်း မေးပါ။
-- အရင်က အလားတူ လေသံ/အခြေအနေမျိုးမှာ ဘာကို ဆိုလိုလေ့ရှိလဲ ဆိုတာကိုလည်း ထည့်စဉ်းစားပါ။
+- တော်ရုံဆို ကိုယ့်ဘာသာ ဆိုလိုရင်းကို အလိုက်သိ နားလည်ပြီး ambiguous=false ထားပါ (ဥပမာ 'တင်ဇာ' လို့ ကြားလည်း 'သင်ဇာ' ကို ခေါ်တာပဲလို့ ဖမ်းယူပါ၊ မေးခွန်း/နှုတ်ဆက်/စကားပြော/task တွေကို သဘာဝကျကျ ဖြေပါ)။
+- အသံလုံးဝ မကြားရတာ/လုံးဝ မပီတာ သို့မဟုတ် ဘာလုပ်ရမှန်း လုံးဝ မသေချာတဲ့ အခြေအနေလောက်မှသာ ambiguous=true ထားပြီး 'ဒါကို ဆိုလိုတာလားရှင်' လို့ မေးပါ။
 """
         for model_name in ("gemini-3.5-flash-lite", "gemini-3.8-flash"):
             try:
@@ -245,16 +247,18 @@ Rules:
                 if m:
                     parsed = json.loads(m.group(0))
                     if isinstance(parsed, dict) and parsed.get("transcript"):
+                        t_clean = _normalize_heard_transcript(str(parsed["transcript"]).strip())
+                        m_clean = _normalize_heard_transcript(str(parsed.get("interpreted_meaning") or "").strip())
                         return {
-                            "transcript": str(parsed["transcript"]).strip(),
+                            "transcript": t_clean,
                             "tone": str(parsed.get("tone") or tone_label).strip(),
                             "intent_hint": str(parsed.get("intent_hint") or intent_hint).strip().upper(),
-                            "interpreted_meaning": str(parsed.get("interpreted_meaning") or "").strip(),
+                            "interpreted_meaning": m_clean or t_clean,
                             "ambiguous": bool(parsed.get("ambiguous", False)),
                             "clarification_question": str(parsed.get("clarification_question") or "").strip(),
                         }
                 if raw and not raw.startswith("{"):
-                    transcript = raw
+                    transcript = _normalize_heard_transcript(raw)
                     break
             except Exception as e:
                 print(f"[Voice Analysis {model_name} Error]: {e}")
@@ -275,7 +279,7 @@ Rules:
                     else getattr(transcription, "text", "") or ""
                 ).strip()
                 if txt:
-                    transcript = txt
+                    transcript = _normalize_heard_transcript(txt)
                     break
             except Exception as e:
                 print(f"[Voice Whisper {model_name} Error]: {e}")
@@ -322,8 +326,20 @@ def _get_voice_profile_summary(user_id: int) -> str:
         for item in hist[-6:]
     ]
     return "\n".join(lines)
-  
+def _add_burmese_intonation_cues(clause_txt: str, role: str) -> str:
+    """လိုအပ်တဲ့နေရာမှာ အသံအဆွဲအငင် ပိုသဘာဝကျအောင် punctuation/phrasing အနည်းငယ် ညှိပေးသည်။"""
+    s = clause_txt.strip()
+    if not s:
+        return s
+    # စကားလုံးဆုံးအဆွဲ ("နော်", "ရှင်", "ပဲ", "ပါ", "လား", "လဲ") တွေမှာ သဘာဝကျတဲ့ အငင်လေးထည့်မယ်
+    if role == "lift" and not s.endswith(("၊", "။", "?", "!")):
+        if re.search(r"(?:နော်|ရှင်|ပဲ|ပါ|လား|လဲ|တော့)$", s):
+            return f"{s}၊"
+    return s
+
+
 def _split_into_expressive_clauses(spoken_text: str) -> list[tuple[str, str]]:
+    """စကားပြောကို လိုအပ်သလောက်သာ ခွဲပြီး လိုတာထက် ပိုမခြားအောင် ထိန်းညှိသည်။"""
     raw_parts = [p.strip() for p in re.split(r"(?<=[။၊,!?])\s*", spoken_text) if p.strip()]
     clauses: list[tuple[str, str]] = []
 
@@ -335,21 +351,24 @@ def _split_into_expressive_clauses(spoken_text: str) -> list[tuple[str, str]]:
             continue
 
         words = core.split()
-        if len(words) >= 7:
+        # ရှည်လွန်းတဲ့ စာကြောင်းကိုသာ နှစ်ပိုင်းခွဲမယ်၊ တော်ရုံအရှည်ဆို တစ်ဆက်တည်း ထားမယ်
+        if len(words) >= 11:
             mid = len(words) // 2
             left = " ".join(words[:mid]).strip()
             right = " ".join(words[mid:]).strip()
             if left:
-                clauses.append((left, "lift"))
+                clauses.append((_add_burmese_intonation_cues(left, "lift"), "lift"))
             if right:
-                clauses.append((right, "settle" if ends_period else "lift"))
+                clauses.append((_add_burmese_intonation_cues(right, "settle" if ends_period else "mid"), "settle" if ends_period else "mid"))
         else:
-            clauses.append((core, "settle" if ends_period else ("lift" if ends_comma else "mid")))
+            role = "settle" if ends_period else ("lift" if ends_comma else "mid")
+            clauses.append((_add_burmese_intonation_cues(core, role), role))
 
     return clauses or [(spoken_text, "mid")]
 
 
 def _split_burmese_and_english_segments(text: str) -> list[tuple[str, str]]:
+    """Clause တစ်ခုကို မြန်မာ ('mm') နဲ့ English ('en') ခွဲထုတ်သည်။"""
     parts = re.findall(r"[A-Za-z0-9][A-Za-z0-9\s\.\-\/]*[A-Za-z0-9]|[A-Za-z]+|[^A-Za-z]+", text)
     segments: list[tuple[str, str]] = []
     for p in parts:
@@ -364,20 +383,21 @@ def _split_burmese_and_english_segments(text: str) -> list[tuple[str, str]]:
 
 
 async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
+    """မြန်မာအဆွဲအငင် သဘာဝကျကျနဲ့ စကားစုကြား/English ကြား လိုတာထက် ပိုမခြားဘဲ ချောချောမွေ့မွေ့ ထွက်စေသည်။"""
     clauses = _split_into_expressive_clauses(spoken_text)
 
     lift_cycle = [
-        ("+12Hz", "+24%", 0.06),
-        ("+14Hz", "+27%", 0.05),
-        ("+11Hz", "+23%", 0.09),
+        ("+12Hz", "+21%", 0.03),
+        ("+14Hz", "+23%", 0.03),
+        ("+11Hz", "+20%", 0.04),
     ]
 
     out_buf = io.BytesIO()
     for idx, (clause_txt, role) in enumerate(clauses):
         if role == "settle":
-            mm_pitch, mm_rate, mm_pause = "+10Hz", "+18%", 0.20
+            mm_pitch, mm_rate, mm_pause = "+9Hz", "+17%", 0.08
         elif role == "lift":
-            mm_pitch, mm_rate, mm_pause = "+14Hz", "+25%", 0.10
+            mm_pitch, mm_rate, mm_pause = "+14Hz", "+22%", 0.04
         else:
             mm_pitch, mm_rate, mm_pause = lift_cycle[idx % len(lift_cycle)]
 
@@ -385,17 +405,17 @@ async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
         for s_idx, (kind, seg_txt) in enumerate(sub_segs):
             if kind == "en":
                 if s_idx > 0:
-                    await asyncio.sleep(0.14)
+                    await asyncio.sleep(0.04)
                 communicate = edge_tts.Communicate(
                     text=seg_txt,
                     voice="my-MM-NilarNeural",
-                    rate="+2%",
+                    rate="+8%",
                     pitch="+11Hz",
                 )
                 async for ev in communicate.stream():
                     if ev.get("type") == "audio" and ev.get("data"):
                         out_buf.write(ev["data"])
-                await asyncio.sleep(0.14)
+                await asyncio.sleep(0.05)
             else:
                 communicate = edge_tts.Communicate(
                     text=seg_txt,
@@ -439,7 +459,7 @@ async def send_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, r
                 if saved_ok:
                     break
             except Exception:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.4)
 
         if not saved_ok:
             def _make_gtts():
@@ -481,7 +501,7 @@ def _resolve_pending_clarification(user_id: int, transcript_text: str) -> str | 
 
     if any(tok in low for tok in no_tokens):
         _PENDING_VOICE_CLARIFICATION.pop(user_id, None)
-        return "ဟုတ်ကဲ့ရှင်၊ ဒါဆို ဘယ်လို ဆိုလိုတာလဲ အသေးစိတ် ပြန်ပြောပြပေးပါဦးနော်။"
+        return "ဟုတ်ကဲ့ရှင်၊ ဒါဆို ဘယ်လို ဆိုလိုတာလဲ ပြန်ပြောပြပေးပါဦးနော်။"
 
     _PENDING_VOICE_CLARIFICATION.pop(user_id, None)
     return None
@@ -511,7 +531,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             voice_profile_ctx,
         )
 
-        transcript_text = (analysis.get("transcript") or "").strip()
+        transcript_text = _normalize_heard_transcript((analysis.get("transcript") or "").strip())
         if not transcript_text:
             _PENDING_VOICE_CLARIFICATION[user_id] = {
                 "original_transcript": "",
@@ -524,7 +544,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             return
 
         tone_label = analysis.get("tone") or "သဘာဝကျကျ"
-        meaning_hint = analysis.get("interpreted_meaning") or transcript_text
+        meaning_hint = _normalize_heard_transcript(analysis.get("interpreted_meaning") or transcript_text)
         _record_voice_profile(user_id, transcript_text, tone_label, meaning_hint)
         save_chat_message(user_id, "user", f"[Voice | {tone_label}]: {transcript_text}")
 
@@ -554,13 +574,10 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         intent = route.get("intent", "GENERAL")
 
-        is_ambiguous = bool(analysis.get("ambiguous"))
-        if not is_ambiguous and intent == "TASK" and (route.get("task_action") or "").upper() == "ADD":
-            clean_t = (route.get("title") or "").strip().lower()
-            if clean_t in {"", "task အသစ်", "reminder သတိပေးရန်", "er ပေးရန်"}:
-                is_ambiguous = True
+        # သိပ်မသေချာတဲ့/လုံးဝ မပြည့်စုံတဲ့ အခြေအနေလောက်မှသာ ပြန်မေးမယ်
+        is_very_uncertain = bool(analysis.get("ambiguous")) and len(transcript_text.strip()) <= 4
 
-        if is_ambiguous:
+        if is_very_uncertain:
             q_txt = (analysis.get("clarification_question") or "").strip()
             if not q_txt:
                 q_txt = f"“{meaning_hint}” ကို ဆိုလိုတာလားရှင်၊ သေချာအောင် ထပ်ပြောပြပေးပါလားရှင်။"
@@ -604,6 +621,7 @@ User Voice Transcript: "{transcript_text}"
 
 ညွှန်ကြားချက်များ:
 - သင်ဇာ (Thinzar) အမည်ရှိ မြန်မာမိန်းကလေးဟန် AI Assistant အဖြစ် ရင်းရင်းနှီးနှီး၊ ပွင့်ပွင့်လင်းလင်းနဲ့ လူတစ်ယောက် စကားပြောသလို သဘာဝကျကျ ဖြေဆိုပါ။
+- အသံထွက်ဆင်တူ ကြားမှားနိုင်တာမျိုး (ဥပမာ 'တင်ဇာ' ကြားလည်း 'သင်ဇာ' ကို ခေါ်တာမျိုး) ကို ဆိုလိုရင်းအတိုင်း အလိုက်သိ နားလည်ပြီး တန်းဖြေပါ။
 - အသံနေအသံထားနဲ့ အရင်ပြောခဲ့ဖူးတဲ့ ဆိုလိုရင်း profile ကို ဆက်စပ်မှတ်မိပြီး အလိုက်သိသိ ဖြေပါ။
 - အကြံဉာဏ်/ရွေးချယ်စရာ မေးလျှင် အကျိုးကျေးဇူး၊ အားနည်းချက်နှင့် လက်တွေ့အသုံးဝင်မည့် အကြံပြုချက်များ ရှင်းပြပါ။
 - 'မောင်' ဟု ဆေးသောက်ရန်နှင့် မိသားစု/ကလေး Task များမှလွဲ၍ မသုံးပါနှင့်။
@@ -619,4 +637,3 @@ User Voice Transcript: "{transcript_text}"
     except Exception as e:
         print(f"Error handling voice message: {e}")
         await update.message.reply_text("အသံနဲ့ ပြန်ဖြေရာမှာ ခဏအခက်အခဲ ရှိနေပါတယ်ရှင်၊ နောက်မှ ထပ်စမ်းကြည့်ပါ")
-
