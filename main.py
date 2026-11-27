@@ -1,651 +1,648 @@
-import os
-import asyncio
-import threading
-from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
-    ContextTypes,
-)
+import re
+import json
+import uuid
+from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes
 
-from config import TELEGRAM_BOT_TOKEN, ADMIN_USER_ID, MM_TZ, MYANMAR_WEEKDAYS
-from database import supabase
+from config import ADMIN_USER_ID, MM_TZ
 from ai_engine import call_ai_with_3tier_fallback
-from memory_manager import (
-    save_chat_message,
-    update_core_rule_version,
-    edit_core_rule_line,
-    delete_core_rule_line,
-    get_core_rule_lines,
-    get_skill_versions_summary,
-    evolve_user_profile,
-    recall_relevant_history,
-)
-from task_manager import (
-    _compute_next_repeat_datetime,
-    _unpack_task_meta,
-    _category_label_mm,
-    _priority_badge_mm,
-    _is_health_or_family_task,
-    cleanup_old_done_tasks,
-    get_myanmar_calendar_context,
-    format_myanmar_date_short,
-    smart_route_and_parse,
-    handle_task_intent,
-    send_smart_task_list,
-    handle_task_callback,
-    consume_pending_task_input,
-)
-from group_news_search import (
-    cleanup_old_group_messages,
-    save_group_message,
-    get_available_group_names,
-    handle_group_query,
-    generate_all_groups_summary,
-    get_group_report,
-    handle_news_command,
-    perform_hybrid_web_search,
-)
-from voice_handler import handle_voice_message
-from github_ops import (
-    handle_patch_command,
-    handle_patch_callback,
-    getfile_command,
-    handle_getfile_callback,
-    handle_py_file_upload,
-    notify_render_deploy_if_pending,
-)
+from database import supabase
 
-_PENDING_RULE_INPUT: dict[int, dict] = {}
+# Inline callback state caches
+_TASK_LIST_VIEW_STATE: dict[str, dict] = {}
+_PENDING_TASK_EDITS: dict[int, dict] = {}
 
 
-class _HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
+def _get_mm_date_info(dt_obj: datetime) -> dict:
+    """ကျောင်းဖွင့်ရက်/ရုံးပိတ်ရက် အခြေအနေကို နောက်ကွယ် context အတွက် တွက်ချက်သည်။"""
+    weekday = dt_obj.weekday()  # 0=Mon .. 4=Fri, 5=Sat, 6=Sun
+    mm_str = f"{dt_obj.month:02d}-{dt_obj.day:02d}"
+    holidays = {
+        "01-04": "လွတ်လပ်ရေးနေ့ (ရုံးပိတ်ရက်)",
+        "02-12": "ပြည်ထောင်စုနေ့ (ရုံးပိတ်ရက်)",
+        "03-02": "တောင်သူလယ်သမားနေ့ (ရုံးပိတ်ရက်)",
+        "03-27": "တပ်မတော်နေ့ (ရုံးပိတ်ရက်)",
+        "05-01": "အလုပ်သမားနေ့ (ရုံးပိတ်ရက်)",
+        "07-19": "အာဇာနည်နေ့ (ရုံးပိတ်ရက်)",
+        "12-25": "ခရစ္စမတ်နေ့ (ရုံးပိတ်ရက်)",
+    }
+    if mm_str in holidays:
+        day_type = holidays[mm_str]
+        is_school_day = False
+    elif weekday in (5, 6):
+        day_type = "စနေ/တနင်္ဂနွေ (ကျောင်းပိတ်/ရုံးပိတ်)"
+        is_school_day = False
+    else:
+        day_type = "ကျောင်းဖွင့်ရက်/ပုံမှန်ရက်"
+        is_school_day = True
 
-    def log_message(self, format, *args):
-        return
+    return {
+        "day_type": day_type,
+        "is_school_day": is_school_day,
+    }
 
 
-def _start_port_server():
-    port = int(os.environ.get("PORT", "10000"))
-    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+def format_myanmar_date_short(dt_obj: datetime | None = None) -> str:
+    """Reminder notification မှာ ကျောင်းဖွင့်ရက်/ရုံးပိတ်ရက် context နှင့်အတူ ရှင်းလင်းစွာ ပြရန် format လုပ်သည်။"""
+    now = dt_obj or datetime.now(MM_TZ)
+    info = _get_mm_date_info(now)
+    return f"{now.strftime('%m-%d %H:%M')} · {info['day_type']}"
 
 
-def _build_groups_keyboard(groups: list[str]) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(f"📁 {g}", callback_data=f"grpsel:{i}")]
-        for i, g in enumerate(groups)
+def cleanup_old_done_tasks(days_old: int = 14) -> int:
+    """သတ်မှတ်ရက်ထက် ကျော်သွားသော done task ဟောင်းများကို ရှင်းလင်းသည်။"""
+    try:
+        cutoff = (datetime.now(MM_TZ) - timedelta(days=days_old)).isoformat()
+        res = supabase.table("tasks").delete().eq("status", "done").lt("completed_at", cutoff).execute()
+        return len(res.data or [])
+    except Exception:
+        return 0
+
+
+def get_myanmar_calendar_context(target_dt: datetime | None = None) -> str:
+    """AI prompt များအတွက် လက်ရှိအချိန်နှင့် ကျောင်းဖွင့်ရက်/ရုံးပိတ်ရက် context ကို ပြန်ပေးသည်။"""
+    now = target_dt or datetime.now(MM_TZ)
+    mm_days = ["တနင်္လာ", "အင်္ဂါ", "ဗုဒ္ဓဟူး", "ကြာသပတေး", "သောကြာ", "စနေ", "တနင်္ဂနွေ"]
+    day_name = mm_days[now.weekday()]
+    info = _get_mm_date_info(now)
+    return (
+        f"Current Time (MMT): {now.strftime('%Y-%m-%d %H:%M')} ({day_name}နေ့)\n"
+        f"Calendar Status: {info['day_type']} | School Day: {'Yes' if info['is_school_day'] else 'No'}"
+    )
+
+
+def _category_label_mm(category: str | None) -> str:
+    cat = (category or "general").strip().lower()
+    mapping = {
+        "health": "🩺 ကျန်းမာရေး",
+        "family": "👨‍👩‍👧 မိသားစု",
+        "မိသားစု": "👨‍👩‍👧 မိသားစု",
+        "ကလေး": "👨‍👩‍👧 မိသားစု",
+        "work": "💼 လုပ်ငန်း",
+        "အလုပ်": "💼 လုပ်ငန်း",
+        "ရုံး": "💼 လုပ်ငန်း",
+        "general": "📌 အထွေထွေ",
+        "အထွေထွေ": "📌 အထွေထွေ",
+    }
+    if cat in mapping:
+        return mapping[cat]
+    return f"💼 {category}" if category else "📌 အထွေထွေ"
+
+
+def _priority_badge_mm(priority: str | None) -> str:
+    p = (priority or "normal").strip().lower()
+    return "🔥 အရေးကြီး" if p in {"urgent", "high"} else ""
+
+
+def _unpack_task_meta(task_row: dict) -> tuple[str | None, str, str]:
+    """Task row မှ user reason/note၊ category နှင့် priority တို့ကို ခွဲထုတ်ပေးသည်။"""
+    if not isinstance(task_row, dict):
+        return None, "general", "normal"
+
+    raw_reason = str(task_row.get("reason") or task_row.get("notes") or "").strip()
+    clean_reason = re.sub(r"\[meta:[^\]]*\]", "", raw_reason).strip() or None
+
+    cat = str(task_row.get("category") or "general").strip().lower() or "general"
+    prio = str(task_row.get("priority") or "normal").strip().lower() or "normal"
+
+    m = re.search(r"\[meta:cat=([a-z_]+),prio=([a-z_]+)\]", raw_reason)
+    if m:
+        if not task_row.get("category"):
+            cat = m.group(1)
+        if not task_row.get("priority"):
+            prio = m.group(2)
+
+    return clean_reason, cat, prio
+
+
+def _is_health_or_family_task(text: str, reason: str | None = None) -> bool:
+    """ဆေးသောက်ရန် သို့မဟုတ် မိသားစု/ကလေးများနှင့် ပတ်သက်သော task ဟုတ်မဟုတ် စစ်သည်။"""
+    combined = f"{text or ''} {reason or ''}".lower()
+    keywords = [
+        "ဆေး", "medicine", "pill", "tablet", "ဆေးသောက်",
+        "မိသားစု", "family", "ကလေး", "ကလေးတွေ", "သား", "သမီး",
+        "child", "children", "kid", "kids", "ကျောင်း", "school",
     ]
-    return InlineKeyboardMarkup(rows)
+    return any(k in combined for k in keywords)
 
 
-def _build_skills_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📌 လက်ရှိ Rule", callback_data="rule:view")],
+def _compute_next_repeat_datetime(
+    current_rem_dt: datetime,
+    repeat_type: str,
+    now_mm: datetime | None = None,
+) -> datetime | None:
+    """Repeat task (daily / weekly / school_days) ပြီးသွားလျှင် နောက်တစ်ကြိမ် remind_at ကို တွက်ပေးသည်။"""
+    now_ref = now_mm or datetime.now(MM_TZ)
+    r_type = (repeat_type or "once").strip().lower()
+    if r_type not in {"daily", "weekly", "school_days"}:
+        return None
+
+    next_dt = current_rem_dt
+    if r_type == "daily":
+        next_dt = current_rem_dt + timedelta(days=1)
+        while next_dt <= now_ref:
+            next_dt += timedelta(days=1)
+    elif r_type == "weekly":
+        next_dt = current_rem_dt + timedelta(days=7)
+        while next_dt <= now_ref:
+            next_dt += timedelta(days=7)
+    elif r_type == "school_days":
+        next_dt = current_rem_dt + timedelta(days=1)
+        while not _get_mm_date_info(next_dt)["is_school_day"] or next_dt <= now_ref:
+            next_dt += timedelta(days=1)
+
+    return next_dt
+
+
+def _normalize_iso_mmt(due_at: str | None) -> str | None:
+    if not due_at:
+        return None
+    s = str(due_at).strip()
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(s[:19], fmt).replace(tzinfo=MM_TZ)
+            return dt.isoformat()
+        except ValueError:
+            continue
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        dt = dt.replace(tzinfo=MM_TZ) if dt.tzinfo is None else dt.astimezone(MM_TZ)
+        return dt.isoformat()
+    except Exception:
+        return None
+
+
+def add_task(title: str, due_at: str | None = None, category: str = "general", note: str | None = None):
+    now_iso = datetime.now(MM_TZ).isoformat()
+    rem_iso = _normalize_iso_mmt(due_at)
+    cat_val = "family" if category in {"မိသားစု", "ကလေး", "family"} else "general"
+    payload = {
+        "title": title,
+        "status": "pending",
+        "priority": "normal",
+        "repeat_type": "once",
+        "category": cat_val,
+        "reminded": False,
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+    if rem_iso:
+        payload["due_at"] = rem_iso
+        payload["remind_at"] = rem_iso
+        payload["reminder_at"] = rem_iso
+    if note:
+        payload["notes"] = note
+        payload["reason"] = note
+    res = supabase.table("tasks").insert(payload).execute()
+    return res.data
+
+
+def list_tasks(status: str = "pending"):
+    res = (
+        supabase.table("tasks")
+        .select("*")
+        .eq("status", status)
+        .order("id", desc=False)
+        .execute()
+    )
+    rows = res.data or []
+    for r in rows:
+        if not r.get("due_at") and r.get("remind_at"):
+            r["due_at"] = r["remind_at"]
+    return rows
+
+
+def mark_task_done(task_id: int):
+    now_iso = datetime.now(MM_TZ).isoformat()
+    res = (
+        supabase.table("tasks")
+        .update({
+            "status": "done",
+            "reminded": True,
+            "completed_at": now_iso,
+            "updated_at": now_iso,
+        })
+        .eq("id", int(task_id))
+        .execute()
+    )
+    return res.data
+
+
+def delete_task(task_id: int):
+    res = supabase.table("tasks").delete().eq("id", int(task_id)).execute()
+    return res.data
+
+
+def update_task_fields(task_id: int, **kwargs):
+    now_iso = datetime.now(MM_TZ).isoformat()
+    upd: dict = {"updated_at": now_iso}
+    if "title" in kwargs and kwargs["title"]:
+        upd["title"] = kwargs["title"]
+    if "category" in kwargs and kwargs["category"]:
+        c = kwargs["category"]
+        upd["category"] = "family" if c in {"မိသားစု", "ကလေး", "family"} else "general"
+    if "note" in kwargs and kwargs["note"] is not None:
+        upd["notes"] = kwargs["note"]
+        upd["reason"] = kwargs["note"]
+    if "due_at" in kwargs:
+        rem_iso = _normalize_iso_mmt(kwargs["due_at"])
+        if rem_iso:
+            upd["due_at"] = rem_iso
+            upd["remind_at"] = rem_iso
+            upd["reminder_at"] = rem_iso
+            upd["reminded"] = False
+            upd["status"] = "pending"
+    res = supabase.table("tasks").update(upd).eq("id", int(task_id)).execute()
+    return res.data
+
+
+def _format_short_due(due_at: str | None) -> str:
+    if not due_at:
+        return ""
+    s = str(due_at).strip()
+    m = re.match(r"^\d{4}-(\d{2}-\d{2})[T\s](\d{2}:\d{2})", s)
+    if m:
+        return f"{m.group(1)} {m.group(2)}"
+    m2 = re.match(r"^(\d{2}-\d{2})\s+(\d{2}:\d{2})", s)
+    if m2:
+        return f"{m2.group(1)} {m2.group(2)}"
+    return s[:16]
+
+
+def _clean_task_title(raw_title: str) -> str:
+    t = (raw_title or "").strip().strip('"').strip("'")
+    t = re.sub(r"^(?:နောက်\s*\d+\s*မိနစ်(?:အတွင်း|နေရင်)?|မနက်ဖြန်|ဒီနေ့)\s*", "", t).strip()
+    t = re.sub(r"\s*reminder\s*ပေးပါ\s*$", "", t, flags=re.IGNORECASE).strip()
+    if t.lower() in {"er ပေးရန်", "er", "reminder ပေးရန်"}:
+        return "Reminder သတိပေးရန်"
+    return t or "Task အသစ်"
+
+
+def smart_route_and_parse(
+    user_text: str,
+    available_groups: list[str] | None = None,
+    recent_ctx: str = "",
+    user_pref_ctx: str = "",
+) -> dict:
+    """User message ကို TASK / GROUP / WEB_SEARCH / GENERAL အဖြစ် ခွဲခြားပြီး structured info ထုတ်သည်။"""
+    now = datetime.now(MM_TZ)
+    cal_ctx = get_myanmar_calendar_context(now)
+    groups_str = ", ".join(available_groups or [])
+
+    prompt = f"""
+Classify the user's message into one of: TASK, GROUP, WEB_SEARCH, GENERAL.
+Current context:
+{cal_ctx}
+Available Telegram groups: [{groups_str}]
+Recent chat context:
+{recent_ctx[:600]}
+
+User message: "{user_text}"
+
+Return ONLY valid JSON with keys:
+- "intent": "TASK" | "GROUP" | "WEB_SEARCH" | "GENERAL"
+- "task_action": "ADD" | "LIST" | "DONE" | "DELETE" | "UPDATE" | "REMIND" | null
+- "title": string | null (concise clean Burmese/English title without filler words)
+- "due_at": string | null (format "YYYY-MM-DD HH:MM" in MMT, e.g. "{(now + timedelta(minutes=8)).strftime('%Y-%m-%d %H:%M')}" for "in 8 minutes")
+- "category": string (default "general", or "family" for family/kids)
+- "note": string | null
+- "task_id": int | null
+- "search_query": string | null
+- "english_search_query": string | null
+- "group_name": string | null
+
+Rules:
+- If user asks to show/check/list tasks or reminders (e.g. "task စာရင်း", "reminder ဘာရှိလဲ", "လုပ်စရာစာရင်း"), set intent="TASK", task_action="LIST".
+- If user asks to set/add a reminder or task (e.g. "နောက် ၈ မိနစ်နေရင် reminder ပေး", "မနက်ဖြန် ၉ နာရီ ... မှတ်ထား"), set intent="TASK", task_action="ADD" and compute exact due_at.
+"""
+    try:
+        raw = call_ai_with_3tier_fallback(prompt) or ""
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            parsed = json.loads(m.group(0))
+            if isinstance(parsed, dict) and parsed.get("intent"):
+                return parsed
+    except Exception as e:
+        print(f"[Route Parse Error]: {e}")
+
+    low = user_text.lower()
+    if any(k in low for k in ["task စာရင်း", "လုပ်စရာ", "reminder ဘာ", "စာရင်းပြ"]):
+        return {"intent": "TASK", "task_action": "LIST"}
+    rel_m = re.search(r"နောက်\s*(\d+)\s*မိနစ်", user_text)
+    if rel_m or "reminder" in low or "မှတ်ထား" in user_text:
+        mins = int(rel_m.group(1)) if rel_m else 10
+        due_str = (now + timedelta(minutes=mins)).strftime("%Y-%m-%d %H:%M")
+        return {
+            "intent": "TASK",
+            "task_action": "ADD",
+            "title": _clean_task_title(user_text),
+            "due_at": due_str,
+            "category": "general",
+        }
+    return {"intent": "GENERAL"}
+
+
+def _build_task_list_payload(show_done: bool = False) -> tuple[str, InlineKeyboardMarkup]:
+    """Pending စာရင်းကို ဦးစားပေးပြပြီး ခလုတ်နှိပ်မှ Done စာရင်းကို ကြည့်နိုင်အောင် တည်ဆောက်သည်။"""
+    pending_rows = list_tasks(status="pending") or []
+    done_rows = list_tasks(status="done") or []
+
+    if not show_done:
+        lines = [f"📋 **Task စာရင်း** · Pending **{len(pending_rows)}** ခု", ""]
+        if not pending_rows:
+            lines.append("လက်ရှိ လုပ်စရာ Pending task မရှိသေးပါဘူးရှင်။")
+        else:
+            for idx, t in enumerate(pending_rows[:12], start=1):
+                tid = t.get("id")
+                title = _clean_task_title(t.get("title") or "")
+                due_txt = _format_short_due(t.get("due_at"))
+                clean_reason, cat, prio = _unpack_task_meta(t)
+                cat_badge = _category_label_mm(cat)
+                prio_badge = _priority_badge_mm(prio)
+                due_part = f" · ⏰ `{due_txt}`" if due_txt else ""
+                prio_part = f" · {prio_badge}" if prio_badge else ""
+                lines.append(f"**{idx}.** {title}{due_part}{prio_part} — [{cat_badge}] *(ID #{tid})*")
+                if clean_reason:
+                    lines.append(f"   📝 {clean_reason}")
+            if len(pending_rows) > 12:
+                lines.append(f"… နောက်ထပ် **{len(pending_rows) - 12}** ခု ကျန်ပါသေးတယ်။")
+
+        lines.append("")
+        lines.append("💡 ပြီးစီးစာရင်း ကြည့်ရန် အောက်က **✅ ပြီးစီးပြီး** ကို နှိပ်ပါ။")
+    else:
+        lines = [f"✅ **ပြီးစီးပြီး Task စာရင်း** ({len(done_rows)} ခု)", ""]
+        if not done_rows:
+            lines.append("ပြီးစီးထားတဲ့ task မရှိသေးပါဘူးရှင်။")
+        else:
+            for t in done_rows[:15]:
+                title = _clean_task_title(t.get("title") or "")
+                _, cat, _ = _unpack_task_meta(t)
+                cat_badge = _category_label_mm(cat)
+                lines.append(f"• ✓ {title} — [{cat_badge}]")
+            if len(done_rows) > 15:
+                lines.append(f"… နောက်ထပ် **{len(done_rows) - 15}** ခု ကျန်ပါသေးတယ်။")
+
+    view_id = uuid.uuid4().hex[:8]
+    _TASK_LIST_VIEW_STATE[view_id] = {"show_done": show_done}
+
+    rows: list[list[InlineKeyboardButton]] = [
         [
-            InlineKeyboardButton("✏️ ပြင်ရန်", callback_data="rule:edit_list"),
-            InlineKeyboardButton("➕ အသစ်ထည့်ရန်", callback_data="rule:add_prompt"),
-        ],
-    ])
-
-
-# --- Command Handlers ---
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        return
-    await update.message.reply_text(
-        "မင်္ဂလာပါရှင်! သင်ဇာ (Thinzar) ရောက်ပါပြီ\n"
-        "Task/Reminder မှတ်တာ၊ ပြင်တာ၊ ဖျက်တာ၊ မြန်မာပြက္ခဒိန် မေးတာ၊ Group မှတ်တမ်း/Summary ကြည့်တာ၊ "
-        "သတင်းနဲ့ Web Search ရှာတာ၊ Voice message ပြောတာတွေကို သဘာဝကျကျ ပြောနိုင်ပါတယ်ရှင်\n\n"
-        "Command များ:\n"
-        "• /tasks — လက်ရှိ Task စာရင်း\n"
-        "• /groups — Group ရွေးပြီး Report ထုတ်ရန်\n"
-        "• /groupsummary — Group Summary (Today/Yesterday)\n"
-        "• /news [local|intl] [topic] — ပြည်တွင်း/နိုင်ငံတကာ သတင်းအနှစ်ချုပ်\n"
-        "• /skills — Core Rules (ကြည့်ရန် / ပြင်ရန် / အသစ်ထည့်ရန်)\n"
-        "• /patch <file> — GitHub ဖိုင် patch လုပ်ရန်\n"
-        "• /getfile — GitHub ဖိုင်ဆွဲချရန်"
-    )
-
-
-async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        return
-    await send_smart_task_list(update, context, show_done=False)
-
-
-async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        return
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    summary_text = handle_news_command(update.message.text or "/news")
-    await update.message.reply_text(summary_text)
-
-
-async def skills_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        return
-    await update.message.reply_text(
-        "⚙️ Core Rules စီမံရန် ရွေးချယ်ပါရှင်:",
-        reply_markup=_build_skills_menu_keyboard(),
-    )
-
-
-async def setrule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        return
-    raw = (update.message.text or "").strip()
-    parts = raw.split(maxsplit=1)
-    rule_text = parts[1].strip() if len(parts) > 1 else ""
-    if not rule_text:
-        await update.message.reply_text(
-            "⚙️ Core Rules စီမံရန် ရွေးချယ်ပါရှင်:",
-            reply_markup=_build_skills_menu_keyboard(),
-        )
-        return
-    msg = update_core_rule_version(update.effective_user.id, rule_text, note=f"/setrule: {rule_text[:60]}")
-    await update.message.reply_text(msg)
-
-
-async def handle_rule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not query or not query.from_user:
-        return
-    user_id = query.from_user.id
-    if user_id != ADMIN_USER_ID:
-        await query.answer()
-        return
-
-    data = query.data or ""
-    await query.answer()
-
-    if data == "rule:menu":
-        _PENDING_RULE_INPUT.pop(user_id, None)
-        await query.message.edit_text(
-            "⚙️ Core Rules စီမံရန် ရွေးချယ်ပါရှင်:",
-            reply_markup=_build_skills_menu_keyboard(),
-        )
-        return
-
-    if data == "rule:view":
-        summary = get_skill_versions_summary(user_id)
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="rule:menu")]])
-        await query.message.edit_text(summary, reply_markup=kb)
-        return
-
-    if data == "rule:add_prompt":
-        _PENDING_RULE_INPUT[user_id] = {"mode": "add"}
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="rule:menu")]])
-        await query.message.edit_text(
-            "➕ ထည့်လိုသည့် Core Rule အသစ်ကို စာရိုက်ပို့ပေးပါရှင်:",
-            reply_markup=kb,
-        )
-        return
-
-    if data == "rule:edit_list":
-        rule_lines = get_core_rule_lines(user_id)
-        rows = []
-        for idx, r_txt in enumerate(rule_lines):
-            short_txt = r_txt[:34] + ("..." if len(r_txt) > 34 else "")
-            rows.append([InlineKeyboardButton(f"{idx + 1}. {short_txt}", callback_data=f"rule:pick:{idx}")])
-        rows.append([InlineKeyboardButton("⬅️ Back", callback_data="rule:menu")])
-        await query.message.edit_text(
-            "✏️ ပြင်ဆင်/ဖျက်လိုသည့် Rule ကို ရွေးပါရှင်:",
-            reply_markup=InlineKeyboardMarkup(rows),
-        )
-        return
-
-    if data.startswith("rule:pick:"):
-        try:
-            idx = int(data.split(":", 2)[2])
-        except ValueError:
-            return
-        rule_lines = get_core_rule_lines(user_id)
-        if not (0 <= idx < len(rule_lines)):
-            return
-        kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✏️ ပြင်မယ်", callback_data=f"rule:do_edit:{idx}"),
-                InlineKeyboardButton("🗑 ဖျက်မယ်", callback_data=f"rule:do_del:{idx}"),
-            ],
-            [InlineKeyboardButton("⬅️ Back", callback_data="rule:edit_list")],
-        ])
-        await query.message.edit_text(
-            f"📌 Rule #{idx + 1}:\n{rule_lines[idx]}\n\nဘာလုပ်ချင်လဲ ရွေးပါရှင်:",
-            reply_markup=kb,
-        )
-        return
-
-    if data.startswith("rule:do_edit:"):
-        try:
-            idx = int(data.split(":", 2)[2])
-        except ValueError:
-            return
-        rule_lines = get_core_rule_lines(user_id)
-        if not (0 <= idx < len(rule_lines)):
-            return
-        _PENDING_RULE_INPUT[user_id] = {"mode": "edit", "index": idx}
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"rule:pick:{idx}")]])
-        await query.message.edit_text(
-            f"✏️ Rule #{idx + 1} လက်ရှိစာသား:\n{rule_lines[idx]}\n\nအသစ်ပြင်လိုသည့် Rule စာသားကို ရိုက်ပို့ပေးပါရှင်:",
-            reply_markup=kb,
-        )
-        return
-
-    if data.startswith("rule:do_del:"):
-        try:
-            idx = int(data.split(":", 2)[2])
-        except ValueError:
-            return
-        res_msg = delete_core_rule_line(user_id, idx)
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Rule Menu", callback_data="rule:menu")]])
-        await query.message.edit_text(res_msg, reply_markup=kb)
-        return
-
-
-async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        return
-    groups = get_available_group_names()
-    if not groups:
-        await update.message.reply_text("လက်ရှိ မှတ်တမ်းရှိတဲ့ Group စာရင်း မတွေ့သေးပါဘူးရှင်။")
-        return
-    await update.message.reply_text(
-        "📌 ကြည့်လိုသည့် Group ကို ရွေးပါရှင်:",
-        reply_markup=_build_groups_keyboard(groups),
-    )
-
-
-async def groupsummary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        return
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📅 Today", callback_data="gsummary:today"),
-            InlineKeyboardButton("📆 Yesterday", callback_data="gsummary:yesterday"),
+            InlineKeyboardButton(
+                f"{'▸ ' if not show_done else ''}⏳ Pending ({len(pending_rows)})",
+                callback_data=f"tskview:{view_id}:pending",
+            ),
+            InlineKeyboardButton(
+                f"{'▸ ' if show_done else ''}✅ ပြီးစီးပြီး ({len(done_rows)})",
+                callback_data=f"tskview:{view_id}:done",
+            ),
         ]
+    ]
+
+    if not show_done and pending_rows:
+        for t in pending_rows[:5]:
+            tid = t.get("id")
+            short_lbl = _clean_task_title(t.get("title") or "")[:16]
+            rows.append([
+                InlineKeyboardButton(f"✓ {short_lbl}", callback_data=f"tskact:done:{tid}:{view_id}"),
+                InlineKeyboardButton("✏️ Edit", callback_data=f"tskact:edit:{tid}:{view_id}"),
+                InlineKeyboardButton("⏰ ချိန်း", callback_data=f"tskact:sched:{tid}:{view_id}"),
+                InlineKeyboardButton("🔔 သတိပေး", callback_data=f"tskact:remind:{tid}:{view_id}"),
+            ])
+
+    rows.append([
+        InlineKeyboardButton("➕ Task ထပ်ထည့်မယ်", callback_data=f"tskact:add:0:{view_id}"),
+        InlineKeyboardButton("🔄 Refresh", callback_data=f"tskact:refresh:0:{view_id}"),
     ])
-    await update.message.reply_text("📊 Group Summary ကြည့်လိုသည့် ရက်ကို ရွေးပါရှင်:", reply_markup=kb)
+
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
-async def handle_groupsummary_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_task_intent(user_text: str, route: dict) -> str:
+    """Non-list task intents (ADD / DONE / DELETE / UPDATE / REMIND) ကို လုပ်ဆောင်သည်။"""
+    action = (route.get("task_action") or "ADD").upper()
+    now = datetime.now(MM_TZ)
+
+    if action == "LIST":
+        txt, _ = _build_task_list_payload(show_done=False)
+        return txt
+
+    if action == "DONE":
+        tid = route.get("task_id")
+        if tid:
+            mark_task_done(int(tid))
+            return f"✅ Task #{tid} ကို ပြီးစီးပြီးအဖြစ် မှတ်သားလိုက်ပါပြီရှင်။"
+        return "ပြီးစီးကြောင်း မှတ်လိုတဲ့ Task ID သို့မဟုတ် အမည်ကို ပြောပြပေးပါရှင်။"
+
+    if action == "DELETE":
+        tid = route.get("task_id")
+        if tid:
+            delete_task(int(tid))
+            return f"🗑️ Task #{tid} ကို ဖျက်လိုက်ပါပြီရှင်။"
+        return "ဖျက်လိုတဲ့ Task ID ကို ပြောပြပေးပါရှင်။"
+
+    title = _clean_task_title(route.get("title") or user_text)
+    due_at = route.get("due_at")
+    if not due_at:
+        m_min = re.search(r"နောက်\s*(\d+)\s*မိနစ်", user_text)
+        m_hr = re.search(r"နောက်\s*(\d+)\s*နာရီ", user_text)
+        if m_min:
+            due_at = (now + timedelta(minutes=int(m_min.group(1)))).strftime("%Y-%m-%d %H:%M")
+        elif m_hr:
+            due_at = (now + timedelta(hours=int(m_hr.group(1)))).strftime("%Y-%m-%d %H:%M")
+
+    category = (route.get("category") or "general").strip()
+    note = route.get("note")
+
+    if action in {"UPDATE", "REMIND"} and route.get("task_id"):
+        tid = int(route["task_id"])
+        update_task_fields(tid, title=title, due_at=due_at, category=category, note=note)
+        due_short = _format_short_due(due_at)
+        return f"🔔 Task #{tid} (**{title}**) ကို ပြင်ဆင်/သတိပေးချိန် ညှိပြီးပါပြီရှင်" + (f" · ⏰ `{due_short}`" if due_short else "")
+
+    add_task(title=title, due_at=due_at, category=category, note=note)
+    due_short = _format_short_due(due_at)
+    cat_badge = _category_label_mm(category)
+    due_line = f"\n⏰ `{due_short}`" if due_short else ""
+    return f"“{title}” မှတ်ထားလိုက်ပါပြီရှင်\n[{cat_badge}]{due_line}"
+
+
+async def send_smart_task_list(update: Update, context: ContextTypes.DEFAULT_TYPE, show_done: bool = False):
+    """Task စာရင်းကို inline buttons နှင့်အတူ ပို့ပေးသည်။"""
+    text, markup = _build_task_list_payload(show_done=show_done)
+    await update.message.reply_text(text, reply_markup=markup)
+
+
+async def handle_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pending/Done toggle နှင့် Task တစ်ခုချင်းစီ၏ Done / Edit / Reschedule / Remind action များကို ကိုင်တွယ်သည်။"""
     query = update.callback_query
     if not query or not query.from_user:
         return
     if query.from_user.id != ADMIN_USER_ID:
-        await query.answer()
+        await query.answer("Unauthorized.", show_alert=True)
         return
-    data = query.data or ""
-    await query.answer()
 
-    if data.startswith("grpsel:"):
+    await query.answer()
+    data = query.data or ""
+    parts = data.split(":")
+
+    # tskview:<view_id>:<pending|done>
+    if parts[0] == "tskview" and len(parts) == 3:
+        _, view_id, mode = parts
+        show_done = mode == "done"
+        _TASK_LIST_VIEW_STATE[view_id] = {"show_done": show_done}
+        text, markup = _build_task_list_payload(show_done=show_done)
         try:
-            idx = int(data.split(":", 1)[1])
-        except ValueError:
+            await query.edit_message_text(text=text, reply_markup=markup)
+        except Exception:
+            await query.message.reply_text(text=text, reply_markup=markup)
+        return
+
+    # tskact:<action>:<tid>:<view_id>
+    if parts[0] == "tskact" and len(parts) == 4:
+        _, act, tid_str, view_id = parts
+        cur_show_done = bool((_TASK_LIST_VIEW_STATE.get(view_id) or {}).get("show_done", False))
+        tid = int(tid_str) if tid_str.isdigit() else 0
+
+        if act == "done" and tid > 0:
+            mark_task_done(tid)
+            text, markup = _build_task_list_payload(show_done=cur_show_done)
+            try:
+                await query.edit_message_text(text=text, reply_markup=markup)
+            except Exception:
+                await query.message.reply_text(f"✅ Task #{tid} ပြီးစီးကြောင်း မှတ်ပြီးပါပြီရှင်။")
             return
-        groups = get_available_group_names()
-        if 0 <= idx < len(groups):
+
+        if act == "refresh":
+            text, markup = _build_task_list_payload(show_done=cur_show_done)
+            try:
+                await query.edit_message_text(text=text, reply_markup=markup)
+            except Exception:
+                await query.message.reply_text(text=text, reply_markup=markup)
+            return
+
+        if act == "add":
+            _PENDING_TASK_EDITS[query.from_user.id] = {"mode": "ADD", "view_id": view_id}
+            await query.message.reply_text(
+                "➕ **Task အသစ် ထည့်ရန်**\n"
+                "အမည်နဲ့ အချိန်ကို သဘာဝကျကျ ရေးပို့ပေးပါရှင်\n"
+                "*(ဥပမာ — မနက်ဖြန် နေ့လယ် ၁ နာရီ Vendor ဖုန်းဆက်ရန်)*"
+            )
+            return
+
+        if act == "edit" and tid > 0:
+            _PENDING_TASK_EDITS[query.from_user.id] = {"mode": "EDIT", "task_id": tid, "view_id": view_id}
+            await query.message.reply_text(
+                f"✏️ **Task #{tid} ပြင်ဆင်ရန်**\n"
+                "ပြင်လိုတဲ့ အမည်အသစ် (သို့မဟုတ် အချိန်ပါတဲ့ စာသားအသစ်) ကို ရေးပို့ပေးပါရှင်။"
+            )
+            return
+
+        if act == "sched" and tid > 0:
+            _PENDING_TASK_EDITS[query.from_user.id] = {"mode": "SCHED", "task_id": tid, "view_id": view_id}
             kb = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("📅 Today", callback_data=f"grpday:{idx}:today"),
-                    InlineKeyboardButton("📆 Yesterday", callback_data=f"grpday:{idx}:yesterday"),
-                ],
-                [InlineKeyboardButton("⬅️ Back to Groups", callback_data="grpback")],
+                    InlineKeyboardButton("+15 Min", callback_data=f"tskquick:{tid}:15m:{view_id}"),
+                    InlineKeyboardButton("+1 Hr", callback_data=f"tskquick:{tid}:1h:{view_id}"),
+                    InlineKeyboardButton("မနက်ဖြန် 9:00", callback_data=f"tskquick:{tid}:tmr9:{view_id}"),
+                ]
             ])
-            await query.message.edit_text(
-                f"📁 Group: {groups[idx]}\nကြည့်လိုသည့် ရက်ကို ရွေးပါရှင်:",
+            await query.message.reply_text(
+                f"⏰ **Task #{tid} Schedule ပြောင်းရန်**\n"
+                "အောက်က shortcut ကို နှိပ်ပါ (သို့မဟုတ်) `2026-11-28 10:30` / `နောက် ၃၀ မိနစ်` လို့ ရေးပို့ပါရှင်။",
                 reply_markup=kb,
             )
-        return
-
-    if data == "grpback":
-        groups = get_available_group_names()
-        if not groups:
-            await query.message.edit_text("လက်ရှိ မှတ်တမ်းရှိတဲ့ Group စာရင်း မတွေ့သေးပါဘူးရှင်။")
             return
-        await query.message.edit_text(
-            "📌 ကြည့်လိုသည့် Group ကို ရွေးပါရှင်:",
-            reply_markup=_build_groups_keyboard(groups),
-        )
-        return
 
-    if data.startswith("grpday:"):
-        parts = data.split(":", 2)
-        if len(parts) != 3:
+        if act == "remind" and tid > 0:
+            _PENDING_TASK_EDITS[query.from_user.id] = {"mode": "REMIND", "task_id": tid, "view_id": view_id}
+            kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🔔 နောက် ၁၀ မိနစ်", callback_data=f"tskquick:{tid}:10m:{view_id}"),
+                    InlineKeyboardButton("🔔 နောက် ၁ နာရီ", callback_data=f"tskquick:{tid}:1h:{view_id}"),
+                ]
+            ])
+            await query.message.reply_text(
+                f"🔔 **Task #{tid} သတိပေးချိန် ညှိရန်**\n"
+                "ဘယ်အချိန်မှာ ပြန်သတိပေးစေချင်လဲ ရွေးပါ (သို့မဟုတ်) အချိန် ရေးပို့ပေးပါရှင်။",
+                reply_markup=kb,
+            )
             return
-        _, idx_s, period = parts
-        try:
-            idx = int(idx_s)
-        except ValueError:
-            return
-        groups = get_available_group_names()
-        if 0 <= idx < len(groups):
-            await context.bot.send_chat_action(chat_id=query.message.chat.id, action="typing")
-            rep = get_group_report(exact_group_name=groups[idx], day_mode=period)
-            await query.message.reply_text(rep)
-        return
 
-    if data.startswith("gsummary:"):
-        period = data.split(":", 1)[1].strip().lower()
-        await context.bot.send_chat_action(chat_id=query.message.chat.id, action="typing")
-        summary_text = generate_all_groups_summary(period)
-        await query.message.reply_text(summary_text)
-
-
-async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
-        return
-    await update.message.reply_text(
-        "📋 Command Menu:\n"
-        "• /tasks — လက်ရှိ Task စာရင်း\n"
-        "• /groups — Group ရွေးပြီး Report ထုတ်ရန်\n"
-        "• /groupsummary — Group Summary (Today/Yesterday)\n"
-        "• /news — သတင်းအနှစ်ချုပ်\n"
-        "• /skills — Core Rules (ကြည့်ရန် / ပြင်ရန် / အသစ်ထည့်ရန်)\n"
-        "• /patch — GitHub ဖိုင် patch လုပ်ရန်\n"
-        "• /getfile — GitHub ဖိုင်ဆွဲချရန်"
-    )
-
-
-# --- Background Reminder Loop ---
-async def reminder_loop(app):
-    while True:
-        try:
-            now_mm = datetime.now(MM_TZ)
-            cleanup_old_done_tasks()
-            cleanup_old_group_messages()
-
-            res = supabase.table("tasks").select("*").eq("status", "pending").execute()
-            tasks = res.data or []
-            for t in tasks:
-                rem_raw = t.get("remind_at")
-                if not rem_raw:
-                    continue
-                if t.get("reminded") is True:
-                    continue
-                try:
-                    rem_dt = datetime.fromisoformat(str(rem_raw).replace("Z", "+00:00"))
-                    rem_mm = rem_dt.replace(tzinfo=MM_TZ) if rem_dt.tzinfo is None else rem_dt.astimezone(MM_TZ)
-                except Exception:
-                    continue
-
-                if rem_mm <= now_mm:
-                    title = t.get("title", "Task")
-                    clean_reason, cat, prio = _unpack_task_meta(t)
-                    use_maung = (cat in ("health", "family")) or _is_health_or_family_task(title, clean_reason)
-                    prefix = "မောင်ရေ — " if use_maung else ""
-                    ending = "နော်" if use_maung else "ရှင်"
-
-                    cat_lbl = _category_label_mm(cat)
-                    prio_badge = _priority_badge_mm(prio)
-                    badge_line = f"{cat_lbl}" + (f" · {prio_badge}" if prio_badge else "")
-                    mm_cal_short = format_myanmar_date_short(rem_mm)
-
-                    msg = f"⏰ {prefix}\"{title}\" လုပ်ရမယ့် အချိန်ရောက်ပါပြီ{ending}\n{badge_line}\n🗓 {mm_cal_short}"
-                    if clean_reason:
-                        msg += f"\n📝 အကြောင်းရင်း — {clean_reason}"
-
-                    rep_type = (t.get("repeat_type") or "once").strip().lower()
-                    next_rem_dt = _compute_next_repeat_datetime(rem_mm, rep_type, now_mm)
-
-                    if next_rem_dt:
-                        next_mm_cal = format_myanmar_date_short(next_rem_dt)
-                        if rep_type == "school_days":
-                            msg += f"\n🔁 ကျောင်းဖွင့်ရက်တိုင်း ဆက်လက်သတိပေးပါမည် (နောက်တစ်ကြိမ်: {next_rem_dt.strftime('%m-%d %H:%M')} · {next_mm_cal})"
-                        elif rep_type == "weekly":
-                            msg += f"\n🔁 အပတ်စဉ် {MYANMAR_WEEKDAYS[next_rem_dt.weekday()]} ဆက်လက်သတိပေးပါမည် (နောက်တစ်ကြိမ်: {next_rem_dt.strftime('%m-%d %H:%M')} · {next_mm_cal})"
-                        elif rep_type == "daily":
-                            msg += f"\n🔁 နေ့စဉ် ဆက်လက်သတိပေးပါမည် (နောက်တစ်ကြိမ်: {next_rem_dt.strftime('%m-%d %H:%M')} · {next_mm_cal})"
-
-                        await app.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
-                        try:
-                            supabase.table("tasks").update({
-                                "remind_at": next_rem_dt.isoformat(),
-                                "reminded": False,
-                                "updated_at": now_mm.isoformat(),
-                            }).eq("id", t["id"]).execute()
-                        except Exception:
-                            supabase.table("tasks").update({
-                                "remind_at": next_rem_dt.isoformat(),
-                                "reminded": False,
-                            }).eq("id", t["id"]).execute()
-                    else:
-                        msg += f"\n\nပြီးသွားရင် \"ပြီးပြီ\" လို့ ပြောလိုက်ပါ{ending}"
-                        await app.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
-                        try:
-                            supabase.table("tasks").update({
-                                "reminded": True,
-                                "updated_at": now_mm.isoformat(),
-                            }).eq("id", t["id"]).execute()
-                        except Exception:
-                            supabase.table("tasks").update({"reminded": True}).eq("id", t["id"]).execute()
-
-        except Exception as e:
-            print(f"Reminder loop error: {e}")
-
-        await asyncio.sleep(20)
-
-
-# --- Message & Photo Handler ---
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-
-    chat = update.effective_chat
-    user = update.effective_user
-    user_id = user.id if user else 0
-    sender_name = (
-        f"{user.first_name or ''} {user.last_name or ''}".strip()
-        if user else "Member"
-    ) or (user.username if user and user.username else "Member")
-
-    # Group / Supergroup messages -> save to raw_logs for later summary/search
-    if chat and chat.type in ("group", "supergroup"):
-        chat_title = chat.title or f"Group {chat.id}"
-        text_content = (update.message.text or update.message.caption or "").strip()
-
-        if update.message.photo and not text_content:
-            from group_news_search import _allow_group_media_ai
-            if _allow_group_media_ai():
-                try:
-                    photo = update.message.photo[-1]
-                    tg_file = await context.bot.get_file(photo.file_id)
-                    img_bytes = await tg_file.download_as_bytearray()
-                    caption_res = call_ai_with_3tier_fallback(
-                        "ဤပုံထဲတွင် မြင်ရသော အဓိကအချက်အလက် သို့မဟုတ် စာသားကို မြန်မာဘာသာဖြင့် တိုတိုတုတ်တုတ် ဖော်ပြပါ။",
-                        image_bytes=img_bytes,
-                        mime_type="image/jpeg",
-                    )
-                    if caption_res and "ခဏအလုပ်များနေပါတယ်" not in caption_res:
-                        text_content = f"[ဓာတ်ပုံ]: {caption_res}"
-                    else:
-                        text_content = "[ဓာတ်ပုံ ပေးပို့ခဲ့သည်]"
-                except Exception:
-                    text_content = "[ဓာတ်ပုံ ပေးပို့ခဲ့သည်]"
+    # tskquick:<tid>:<preset>:<view_id>
+    if parts[0] == "tskquick" and len(parts) == 4:
+        _, tid_str, preset, view_id = parts
+        tid = int(tid_str) if tid_str.isdigit() else 0
+        now = datetime.now(MM_TZ)
+        if tid > 0:
+            if preset == "10m":
+                new_due = (now + timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M")
+            elif preset == "15m":
+                new_due = (now + timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M")
+            elif preset == "1h":
+                new_due = (now + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
+            elif preset == "tmr9":
+                new_due = (now + timedelta(days=1)).strftime("%Y-%m-%d 09:00")
             else:
-                text_content = "[ဓာတ်ပုံ ပေးပို့ခဲ့သည်]"
-        elif update.message.document and not text_content:
-            doc_name = update.message.document.file_name or "document"
-            text_content = f"[ဖိုင်]: {doc_name}"
+                new_due = (now + timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M")
 
-        if text_content:
-            save_group_message(chat.id, chat_title, sender_name, text_content)
-        return
+            update_task_fields(tid, due_at=new_due)
+            cur_show_done = bool((_TASK_LIST_VIEW_STATE.get(view_id) or {}).get("show_done", False))
+            text, markup = _build_task_list_payload(show_done=cur_show_done)
+            await query.message.reply_text(f"⏰ Task #{tid} အတွက် အချိန်ကို `{_format_short_due(new_due)}` သို့ ညှိပြီးပါပြီရှင်။")
+            await query.message.reply_text(text=text, reply_markup=markup)
 
-    # Private chat with admin user only
-    if user_id != ADMIN_USER_ID:
-        return
 
-    if update.message.document and await handle_py_file_upload(update, context):
-        return
+async def consume_pending_task_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Add / Edit / Schedule / Remind button နှိပ်ပြီးနောက် user ရေးပို့လာသော စာကို လက်ခံဆောင်ရွက်သည်။"""
+    msg = update.message
+    if not msg or not msg.text or not update.effective_user:
+        return False
+    uid = update.effective_user.id
+    if uid != ADMIN_USER_ID or uid not in _PENDING_TASK_EDITS:
+        return False
 
-    if await consume_pending_task_input(update, context):
-        return
+    state = _PENDING_TASK_EDITS.pop(uid)
+    txt = msg.text.strip()
+    mode = state.get("mode")
+    tid = int(state.get("task_id") or 0)
+    view_id = state.get("view_id") or ""
+    now = datetime.now(MM_TZ)
 
-    user_text = (update.message.text or update.message.caption or "").strip()
-    image_bytes = None
-    mime_type = None
+    parsed = smart_route_and_parse(txt)
+    due_at = parsed.get("due_at")
+    if not due_at:
+        m_dt = re.search(r"(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})", txt)
+        m_min = re.search(r"နောက်\s*(\d+)\s*မိနစ်", txt)
+        m_hr = re.search(r"နောက်\s*(\d+)\s*နာရီ", txt)
+        if m_dt:
+            hh, mm = m_dt.group(2).split(":")
+            due_at = f"{m_dt.group(1)} {int(hh):02d}:{int(mm):02d}"
+        elif m_min:
+            due_at = (now + timedelta(minutes=int(m_min.group(1)))).strftime("%Y-%m-%d %H:%M")
+        elif m_hr:
+            due_at = (now + timedelta(hours=int(m_hr.group(1)))).strftime("%Y-%m-%d %H:%M")
 
-    if update.message.photo:
-        photo = update.message.photo[-1]
-        tg_file = await context.bot.get_file(photo.file_id)
-        image_bytes = await tg_file.download_as_bytearray()
-        mime_type = "image/jpeg"
-        if not user_text:
-            user_text = "ဤပုံထဲက အချက်အလက်များကို ဖတ်ပြီး ရှင်းပြပေးပါရှင်"
-
-    if not user_text and not image_bytes:
-        return
-
-    if user_id in _PENDING_RULE_INPUT and user_text and not image_bytes:
-        pending_rule = _PENDING_RULE_INPUT.pop(user_id)
-        mode = pending_rule.get("mode")
-        if mode == "add":
-            res_msg = update_core_rule_version(user_id, user_text, note=f"Add rule: {user_text[:60]}")
-        elif mode == "edit":
-            res_msg = edit_core_rule_line(user_id, int(pending_rule.get("index", -1)), user_text)
+    if mode == "ADD":
+        title = _clean_task_title(parsed.get("title") or txt)
+        cat = (parsed.get("category") or "general").strip()
+        add_task(title=title, due_at=due_at, category=cat)
+        await msg.reply_text(f"➕ **“{title}”** ကို Task စာရင်းထဲ ထည့်ပြီးပါပြီရှင်" + (f" · ⏰ `{_format_short_due(due_at)}`" if due_at else ""))
+    elif mode == "EDIT" and tid > 0:
+        new_title = _clean_task_title(parsed.get("title") or txt)
+        if due_at:
+            update_task_fields(tid, title=new_title, due_at=due_at)
         else:
-            res_msg = "လုပ်ဆောင်ချက် မသေချာပါဘူးရှင်"
-        await update.message.reply_text(res_msg, reply_markup=_build_skills_menu_keyboard())
-        return
+            update_task_fields(tid, title=new_title)
+        await msg.reply_text(f"✏️ Task #{tid} ကို **“{new_title}”** ဟု ပြင်ဆင်ပြီးပါပြီရှင်။")
+    elif mode in {"SCHED", "REMIND"} and tid > 0:
+        if due_at:
+            update_task_fields(tid, due_at=due_at)
+            await msg.reply_text(f"🔔 Task #{tid} အတွက် အချိန်ကို `{_format_short_due(due_at)}` သို့ ပြောင်းပြီးပါပြီရှင်။")
+        else:
+            await msg.reply_text("အချိန်ပုံစံကို မရှင်းလင်းသေးပါရှင် (ဥပမာ `နောက် ၂၀ မိနစ်` သို့မဟုတ် `2026-11-28 10:00`)။")
 
-    await context.bot.send_chat_action(chat_id=chat.id, action="typing")
-    save_chat_message(user_id, "user", user_text)
-
-    if image_bytes:
-        history_ctx = recall_relevant_history(user_id, user_text, recent_limit=6, search_limit=6)
-        cal_ctx = get_myanmar_calendar_context()
-        prompt = f"""
-Current Myanmar Calendar & Time:
-{cal_ctx}
-
-အသုံးပြုသူက ပုံတစ်ပုံ ပေးပို့ထားသည်။
-Memory & User Context:
-{history_ctx}
-
-User Prompt: {user_text}
-
-သင်ဇာ (Thinzar) အမည်ရှိ မြန်မာမိန်းကလေးဟန် AI Assistant အဖြစ် ပုံထဲမှ အချက်အလက်များကို တိကျစွာ ဖတ်ရှုဖြေဆိုပါ။
-'မောင်' ဟု လုံးဝ မသုံးပါနှင့်။
-"""
-        reply = call_ai_with_3tier_fallback(prompt, image_bytes=image_bytes, mime_type=mime_type)
-        save_chat_message(user_id, "assistant", reply)
-        evolve_user_profile(user_id, user_text, reply)
-        await update.message.reply_text(reply)
-        return
-
-    history_ctx = recall_relevant_history(user_id, user_text, recent_limit=8, search_limit=10)
-    available_groups = get_available_group_names()
-    route = smart_route_and_parse(
-        user_text,
-        available_groups,
-        recent_ctx=history_ctx[-1400:],
-        user_pref_ctx=history_ctx[:1000],
-    )
-    intent = route.get("intent", "GENERAL")
-
-    if intent == "TASK":
-        if (route.get("task_action") or "").upper() == "LIST":
-            await send_smart_task_list(update, context, show_done=False)
-            return
-        reply = handle_task_intent(user_text, route)
-    elif intent == "GROUP":
-        reply = handle_group_query(user_text, route)
-    elif intent == "WEB_SEARCH":
-        search_q = route.get("search_query") or user_text
-        eng_q = route.get("english_search_query")
-        reply = perform_hybrid_web_search(search_q, english_query=eng_q, history_ctx=history_ctx)
-    else:
-        cal_ctx = get_myanmar_calendar_context()
-        prompt = f"""
-Current Myanmar Calendar & Time:
-{cal_ctx}
-
-Memory & User Context:
-{history_ctx}
-
-Latest User Message: "{user_text}"
-
-ညွှန်ကြားချက်များ:
-1. သင်ဇာ (Thinzar) အမည်ရှိ မြန်မာမိန်းကလေးဟန် ကိုယ်ပိုင် AI Assistant အဖြစ် သဘာဝကျကျ၊ ရင်းနှီးနွေးထွေးစွာ ဖြေဆိုပါ။
-2. အကြံဉာဏ် / ရွေးချယ်စရာ / ဆုံးဖြတ်ချက် အကူအညီ တောင်းလျှင် အကျိုး/အပြစ်၊ လက်တွေ့အသုံးဝင်မှု နှင့် အကြံပြုချက်များကို ရှင်းရှင်းလင်းလင်း စဉ်းစားသုံးသပ် ဖြေဆိုပါ။
-3. မြန်မာပြက္ခဒိန် / ဥပုသ် / ရက်ရာဇာ / ပြဿဒါး မေးလျှင် အထက်ပါ Calendar Context ကို အခြေခံ၍ တိကျစွာ ဖြေပါ။
-4. အတိတ်မှတ်တမ်း / Profile နှင့် ပတ်သက်၍ မေးလျှင် Memory & User Context ထဲမှ အချက်အလက်များကို အခြေခံ၍ တိကျစွာ ဖြေပါ။
-5. 'မောင်' ဟူသော အသုံးအနှုန်းကို ဆေးသောက်ရန် နှင့် မိသားစု/ကလေး Task/Reminder များမှလွဲ၍ အခြားနေရာများတွင် လုံးဝ မသုံးပါနှင့်။
-"""
-        reply = call_ai_with_3tier_fallback(prompt)
-
-    save_chat_message(user_id, "assistant", reply)
-    evolve_user_profile(user_id, user_text, reply)
-    await update.message.reply_text(reply)
-
-
-async def post_init(application):
-    await application.bot.set_my_commands([
-        BotCommand("start", "စတင်ရန်"),
-        BotCommand("menu", "Menu စာရင်းကြည့်ရန်"),
-        BotCommand("tasks", "လက်ရှိ Task စာရင်း"),
-        BotCommand("groups", "Group ရွေးပြီး Report ထုတ်ရန်"),
-        BotCommand("groupsummary", "Group Summary (Today/Yesterday)"),
-        BotCommand("news", "သတင်းအနှစ်ချုပ်"),
-        BotCommand("skills", "Core Rules (ကြည့်/ပြင်/ထည့်)"),
-        BotCommand("patch", "GitHub ဖိုင် patch လုပ်ရန်"),
-        BotCommand("getfile", "GitHub ဖိုင်ဆွဲချရန်"),
-    ])
-    await notify_render_deploy_if_pending(application)
-    application.create_task(reminder_loop(application))
-
-
-async def _on_error(update, context):
-    print(f"Telegram Bot Error: {context.error}")
-
-
-def main():
-    if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing.")
-
-    _start_port_server()
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
-
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("menu", menu_command))
-    app.add_handler(CommandHandler("tasks", tasks_command))
-    app.add_handler(CommandHandler("groups", groups_command))
-    app.add_handler(CommandHandler("groupsummary", groupsummary_command))
-    app.add_handler(CommandHandler("news", news_command))
-    app.add_handler(CommandHandler("skills", skills_command))
-    app.add_handler(CommandHandler("setrule", setrule_command))
-    app.add_handler(CommandHandler("patch", handle_patch_command))
-    app.add_handler(CommandHandler("getfile", getfile_command))
-    app.add_handler(CallbackQueryHandler(handle_getfile_callback, pattern=r"^getfile:"))
-    app.add_handler(CallbackQueryHandler(handle_patch_callback, pattern=r"^patch(ok|no):"))
-    app.add_handler(CallbackQueryHandler(handle_rule_callback, pattern=r"^rule:"))
-    app.add_handler(CallbackQueryHandler(handle_task_callback, pattern=r"^(tskview|tskact|tskquick):"))
-    app.add_handler(CallbackQueryHandler(
-        handle_groupsummary_callback,
-        pattern=r"^(gsummary:|grpsel:|grpday:|grpback)",
-    ))
-
-    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice_message))
-    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, handle_message))
-    app.add_error_handler(_on_error)
-
-    print("သင်ဇာ (Thinzar) Telegram Bot is starting...")
-    app.run_polling(drop_pending_updates=True)
-
-
-if __name__ == "__main__":
-    main()
+    cur_show_done = bool((_TASK_LIST_VIEW_STATE.get(view_id) or {}).get("show_done", False))
+    list_txt, markup = _build_task_list_payload(show_done=cur_show_done)
+    await msg.reply_text(list_txt, reply_markup=markup)
+    return True
