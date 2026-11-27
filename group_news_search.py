@@ -56,74 +56,51 @@ def _set_cached_news(cache_key: str, val: str):
 
 
 def cleanup_old_group_messages():
-    """Group message များကို ရက် ၃၀ (၁ လ) ကျော်လျှင် ဖျက်၍ database size ထိန်းညှိသည်။"""
+    """raw_logs မှ ရက် ၃၀ ကျော်သော record များကို ဖျက်၍ storage ထိန်းညှိသည်။"""
     try:
         cutoff_dt = datetime.now(MM_TZ) - timedelta(days=30)
-        res = supabase.table("group_messages").select("id, created_at").execute()
-        for row in (res.data or []):
-            ts_raw = row.get("created_at")
-            if not ts_raw:
-                continue
-            try:
-                dt_obj = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-                dt_mm = dt_obj.replace(tzinfo=MM_TZ) if dt_obj.tzinfo is None else dt_obj.astimezone(MM_TZ)
-                if dt_mm < cutoff_dt:
-                    supabase.table("group_messages").delete().eq("id", row["id"]).execute()
-            except Exception:
-                pass
+        supabase.table("raw_logs").delete().lt("created_at", cutoff_dt.isoformat()).execute()
     except Exception as e:
-        print(f"Error cleaning up old group messages: {e}")
+        print(f"Error cleaning up old raw_logs: {e}")
 
 
 def save_group_message(chat_id: int, chat_title: str, sender_name: str, message_text: str):
-    """Group မှ message များကို group_messages table ထဲ သိမ်းဆည်းသည်။"""
+    """Group မှ message များကို raw_logs table ထဲ သိမ်းဆည်းသည်။"""
     try:
         clean_title = (chat_title or f"Group {chat_id}").strip()
         clean_sender = (sender_name or "Member").strip()
         clean_text = (message_text or "").strip()
         if not clean_text:
             return
-        try:
-            supabase.table("group_messages").insert({
-                "chat_id": chat_id,
-                "chat_title": clean_title,
-                "sender_name": clean_sender,
-                "message_text": clean_text
-            }).execute()
-        except Exception as e1:
-            print(f"Error saving group message (full): {e1}")
-            supabase.table("group_messages").insert({
-                "chat_id": chat_id,
-                "sender_name": clean_sender,
-                "message_text": f"[{clean_title}] {clean_text}"
-            }).execute()
+        supabase.table("raw_logs").insert({
+            "group_name": clean_title,
+            "sender_name": clean_sender,
+            "content_summary": clean_text,
+            "is_read": False,
+        }).execute()
     except Exception as e:
-        print(f"Error saving group message: {e}")
+        print(f"Error saving raw_logs: {e}")
 
 
-def get_available_group_names(limit: int = 200) -> list:
-    """Group မှတ်တမ်းထဲတွင် ရှိနေသော group name များကို စုစည်းပေးသည်။"""
-    names = []
-    seen = set()
+def get_available_group_names(limit: int = 1500) -> list:
+    """raw_logs ထဲမှ ရက် ၃၀ အတွင်း group_name များကို စုစည်းပေးသည်။"""
     try:
+        cutoff_iso = (datetime.now(MM_TZ) - timedelta(days=30)).isoformat()
         res = (
-            supabase.table("group_messages")
-            .select("chat_title, message_text")
-            .order("id", desc=True)
+            supabase.table("raw_logs")
+            .select("group_name")
+            .gte("created_at", cutoff_iso)
             .limit(limit)
             .execute()
         )
-        for r in (res.data or []):
-            title = (r.get("chat_title") or "").strip()
-            txt = r.get("message_text") or ""
-            if not title and txt.startswith("[") and "]" in txt:
-                title = txt[1:txt.index("]")].strip()
-            if title and title not in seen:
-                seen.add(title)
-                names.append(title)
+        return sorted(list({
+            (r.get("group_name") or "").strip()
+            for r in (res.data or [])
+            if (r.get("group_name") or "").strip()
+        }))
     except Exception as e:
-        print(f"Error fetching group names: {e}")
-    return names
+        print(f"Error fetching group names from raw_logs: {e}")
+        return []
 
 
 def resolve_group_name_from_text(query_text: str, available_groups: list) -> str | None:
@@ -151,35 +128,45 @@ def resolve_group_name_from_text(query_text: str, available_groups: list) -> str
     return best_group if best_score >= 1 else None
 
 
+def _get_date_bounds_mmt(day_mode: str):
+    now_mm = datetime.now(MM_TZ)
+    target_date = (now_mm - timedelta(days=1)).date() if day_mode == "yesterday" else now_mm.date()
+    label = f"{'Yesterday' if day_mode == 'yesterday' else 'Today'} ({target_date})"
+    start_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=MM_TZ)
+    end_dt = start_dt + timedelta(days=1)
+    return start_dt.isoformat(), end_dt.isoformat(), label
+
+
 def fetch_group_messages(
     group_name: str | None = None,
     query_text: str = "",
-    limit: int = 80,
+    limit: int = 120,
     period: str = "recent",
 ) -> list:
-    """Group မှတ်တမ်းများကို group_name / period / query_text ဖြင့် ရှာဖွေသည်။"""
+    """raw_logs မှတ်တမ်းများကို group_name / period / query_text ဖြင့် ရှာဖွေသည်။"""
     try:
-        res = (
-            supabase.table("group_messages")
+        cutoff_iso = (datetime.now(MM_TZ) - timedelta(days=30)).isoformat()
+        q = (
+            supabase.table("raw_logs")
             .select("*")
+            .gte("created_at", cutoff_iso)
             .order("id", desc=True)
-            .limit(350)
-            .execute()
         )
-        rows = res.data or []
+        if period in ("today", "yesterday"):
+            start_iso, end_iso, _ = _get_date_bounds_mmt(period)
+            q = q.gte("created_at", start_iso).lt("created_at", end_iso)
+
+        rows = q.limit(350).execute().data or []
     except Exception as e:
-        print(f"Error reading group_messages: {e}")
+        print(f"Error reading raw_logs: {e}")
         return []
 
     normalized = []
     for r in rows:
-        title = (r.get("chat_title") or "").strip()
-        txt = r.get("message_text") or ""
-        if not title and txt.startswith("[") and "]" in txt:
-            title = txt[1:txt.index("]")].strip()
-            txt = txt[txt.index("]") + 1:].strip()
+        title = (r.get("group_name") or "").strip() or "Group"
+        txt = r.get("content_summary") or r.get("message_text") or ""
         normalized.append({
-            "chat_title": title or "Group",
+            "chat_title": title,
             "sender_name": r.get("sender_name") or "Member",
             "message_text": txt,
             "created_at": r.get("created_at") or "",
@@ -196,30 +183,18 @@ def fetch_group_messages(
         if filtered:
             normalized = filtered
 
-    now_mm = datetime.now(MM_TZ)
-    if period == "today":
-        today_str = now_mm.strftime("%Y-%m-%d")
-        today_rows = [
-            item for item in normalized
-            if _format_mm_timestamp(item["created_at"]).startswith(today_str)
-        ]
-        if today_rows:
-            normalized = today_rows
-    elif period == "yesterday":
-        y_str = (now_mm - timedelta(days=1)).strftime("%Y-%m-%d")
-        y_rows = [
-            item for item in normalized
-            if _format_mm_timestamp(item["created_at"]).startswith(y_str)
-        ]
-        if y_rows:
-            normalized = y_rows
-
     terms = extract_search_terms(query_text)
-    if terms and period not in ("today", "yesterday"):
+    raw_tokens = [
+        tok for tok in re.findall(r"[\w\u1000-\u109F]+", (query_text or "").lower())
+        if len(tok) >= 2 and tok not in {"ဘာလဲ", "ဘာပြော", "ပြောသွား", "ပြောထား", "group", "report", "summary"}
+    ]
+    search_terms = list(dict.fromkeys(list(terms or []) + raw_tokens))
+
+    if search_terms and period not in ("today", "yesterday"):
         scored = []
         for item in normalized:
             hay = f"{item['chat_title']} {item['sender_name']} {item['message_text']}".lower()
-            hits = sum(1 for t in terms if t.lower() in hay)
+            hits = sum(1 for t in search_terms if t.lower() in hay)
             if hits > 0:
                 scored.append((hits, item))
         if scored:
@@ -236,76 +211,113 @@ def fetch_group_messages(
     return normalized[:limit]
 
 
+def get_group_report(user_query: str = "", exact_group_name: str = None, day_mode: str = None) -> str:
+    """Maya version အတိုင်း raw_logs မှ Group Summary Report ထုတ်ပေးသည်။"""
+    cleanup_old_group_messages()
+    start_iso, end_iso, date_label = (None, None, None)
+    if day_mode in ["today", "yesterday"]:
+        start_iso, end_iso, date_label = _get_date_bounds_mmt(day_mode)
+    elif "မနေ့" in user_query.lower() or "yesterday" in user_query.lower():
+        start_iso, end_iso, date_label = _get_date_bounds_mmt("yesterday")
+    elif "ဒီနေ့" in user_query.lower() or "today" in user_query.lower() or "ယနေ့" in user_query.lower():
+        start_iso, end_iso, date_label = _get_date_bounds_mmt("today")
+
+    cutoff_iso = (datetime.now(MM_TZ) - timedelta(days=30)).isoformat()
+    query = supabase.table("raw_logs").select("*").gte("created_at", cutoff_iso).order("id")
+    if start_iso and end_iso:
+        query = query.gte("created_at", start_iso).lt("created_at", end_iso)
+    elif not exact_group_name:
+        query = query.eq("is_read", False)
+
+    logs = query.execute().data or []
+    matched_group = exact_group_name
+    if exact_group_name:
+        logs = [l for l in logs if l.get("group_name") == exact_group_name]
+    elif logs:
+        all_groups = list({l.get("group_name") for l in logs if l.get("group_name")})
+        matched_group = resolve_group_name_from_text(user_query, all_groups)
+        if matched_group:
+            logs = [l for l in logs if l.get("group_name") == matched_group]
+
+    if not logs:
+        scope = f" [{matched_group}]" if matched_group else ""
+        return f"{date_label or 'လတ်တလော'}{scope} အတွက် မှတ်တမ်း မရှိသေးပါဘူးရှင်"
+
+    raw_text = "\n".join([
+        f"[{l.get('group_name', '')} | {l.get('sender_name', 'Member')} | {_format_mm_timestamp(l.get('created_at'))}]: {l.get('content_summary', '')}"
+        for l in logs[-220:]
+    ])
+    header_info = f"Group: {matched_group or 'All Groups'} | Period: {date_label or 'Unread'}"
+
+    prompt = f"""
+အောက်ပါတို့မှာ Telegram Group များမှ ရရှိထားသော မက်ဆေ့ခ်ျများနှင့် ပုံ/ဖိုင် အနှစ်ချုပ်များ ဖြစ်သည်။
+({header_info})
+မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်)။
+- ရိုးရိုးနှုတ်ဆက်စကားများကို ဖယ်ထုတ်ပါ။
+- English စာသား/အချက်အလက်များကို မူရင်း English အတိုင်း ထား၍ report ပြန်ပေးပါ။
+- Group တစ်ခုထက်ပိုလျှင် Group နာမည်တစ်ခုချင်းစီကို ခေါင်းစဉ်ခွဲ၍ စုစည်းရေးပါ။
+- ** (bold asterisks) လုံးဝ မသုံးပါနှင့်။
+1. ပုံမှန်မဟုတ်သော ပြဿနာများ (Issues / Blockers)
+2. ဆုံးဖြတ်ချက် အသစ်များနှင့် ညွှန်ကြားချက်များ
+3. အရေးကြီးသော လုပ်ငန်းတာဝန်များ (Action Items)
+
+ဒေတာများ:
+{raw_text[:14000]}
+"""
+    report_text = call_ai_with_3tier_fallback(prompt, use_google_search=False)
+    try:
+        supabase.table("daily_reports").insert({"report_content": f"[{header_info}]\n{report_text}"}).execute()
+    except Exception:
+        pass
+    if not date_label and not exact_group_name:
+        for l in logs:
+            try:
+                supabase.table("raw_logs").update({"is_read": True}).eq("id", l["id"]).execute()
+            except Exception:
+                pass
+    return f"{header_info}\n\n{report_text}"
+
+
+def generate_all_groups_summary(period: str = "today") -> str:
+    """Today / Yesterday အလိုက် Group မှတ်တမ်းများကို စုစည်း၍ အနှစ်ချုပ် ထုတ်ပေးသည်။"""
+    return get_group_report(f"{period} summary", exact_group_name=None, day_mode=period)
+
+
 def handle_group_query(user_message: str, route: dict) -> str:
-    """Group summary / group factual query ကို DB မှတ်တမ်းဖြင့် ဖြေကြားသည်။"""
+    """Group summary / sender / factual query ကို raw_logs မှ ဖြေကြားသည်။"""
     available_groups = get_available_group_names()
     group_name = route.get("group_name") or resolve_group_name_from_text(user_message, available_groups)
     period = route.get("period") or "recent"
     mode = route.get("group_mode") or "query"
 
-    if any(w in user_message for w in ["summary", "အနှစ်ချုပ်", "ခြုံငုံ", "report", "ဘာတွေဆွေးနွေး", "ဘာတွေပြော"]):
-        mode = "summary"
+    if mode == "summary" or any(w in user_message.lower() for w in ["summary", "အနှစ်ချုပ်", "ခြုံငုံ", "report"]):
+        day_m = period if period in ["today", "yesterday"] else None
+        return get_group_report(user_message, exact_group_name=group_name, day_mode=day_m)
 
-    rows = fetch_group_messages(group_name=group_name, query_text=user_message, limit=90, period=period)
+    rows = fetch_group_messages(group_name=group_name, query_text=user_message, limit=150, period=period)
     if not rows:
-        if group_name:
-            return f"\"{group_name}\" Group အတွက် သိမ်းထားတဲ့ မှတ်တမ်း မတွေ့သေးပါဘူးရှင်"
-        return "Group မှတ်တမ်းထဲမှာ သက်ဆိုင်တဲ့ အချက်အလက် မတွေ့သေးပါဘူးရှင်"
+        return f"\"{group_name or 'သက်ဆိုင်ရာ Group'}\" ထဲမှာ မှတ်တမ်း မရှိသေးပါဘူးရှင်"
 
     lines = [
         f"[{_format_mm_timestamp(r['created_at'])} | Group: {r['chat_title']} | {r['sender_name']}]: {r['message_text']}"
         for r in reversed(rows)
     ]
     logs_block = "\n".join(lines)
+    now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
 
     prompt = f"""
-သင်သည် 'သင်ဇာ (Thinzar)' အမည်ရှိ မြန်မာမိန်းကလေးဟန် ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။
-အောက်ပါ Telegram Group မှတ်တမ်းများကို အခြေခံ၍ အသုံးပြုသူ၏ မေးခွန်း/တောင်းဆိုချက်ကို မြန်မာဘာသာဖြင့် တိကျရှင်းလင်းစွာ ဖြေဆိုပါ။
+လက်ရှိအချိန်: {now_str}
+အောက်ပါတို့မှာ Telegram Group ထဲမှ စကားပြောဆိုမှု မှတ်တမ်းများ ဖြစ်သည်။
+အသုံးပြုသူ မေးထားသည့် အချက် (သို့မဟုတ် သက်ဆိုင်ရာ လူပြောထားသည့် အကြောင်းအရာ) တစ်ခုတည်းကိုသာ Focus ထား၍ ပြန်ပြောပြပေးပါ။
+1. မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်)။
+2. အချက်အလက်တိုင်း၏ အနောက်တွင် [Verified]၊ [Deduced] သို့မဟုတ် [Unverified] တွဲထည့်ပေးပါ။
+3. မေးထားသည့် အချက်/လူနှင့် မသက်ဆိုင်သော အခြားလူများ၏ စကားများကို လုံးဝ ထည့်မပြောပါနှင့်။
 
-စည်းမျဉ်းများ:
-1. Group မှတ်တမ်းထဲတွင် ပါဝင်သော အချက်အလက်များကိုသာ အခြေခံပါ (မပါဝင်သည်ကို မလုပ်ကြံပါနှင့်)။
-2. အချက်အလက်တစ်ခုစီ၏ ရှေ့တွင် သင့်လျော်သော tag ထည့်ပါ — Group log ထဲ တိုက်ရိုက်ပါလျှင် [Verified]၊ log ပါ အချက်များကို ဆက်စပ်သုံးသပ်လျှင် [Deduced]၊ မသေချာ/မပြည့်စုံလျှင် [Unverified] ဟု ဖော်ပြပါ။
-3. Mode က "summary" ဖြစ်လျှင် အဓိက ဆွေးနွေးချက်/သတင်း/လုပ်ဆောင်ချက်များကို ကဏ္ဍအလိုက် သပ်သပ်ရပ်ရပ် အနှစ်ချုပ်ပေးပါ။
-4. 'မောင်' ဟု လုံးဝ မသုံးပါနှင့်။ သဘာဝကျသော သင်ဇာဟန်ဖြင့် ဖြေပါ။
-
-Target Group Filter: {group_name or "All Groups"}
-Mode: {mode}
-User Question: {user_message}
-
-Group Logs:
+လက်ရှိ မေးခွန်း: {user_message}
+Group မှတ်တမ်းများ:
 {logs_block[:14000]}
 """
-    return call_ai_with_3tier_fallback(prompt)
-
-
-def generate_all_groups_summary(period: str = "today") -> str:
-    """Today / Yesterday အလိုက် Group မှတ်တမ်းများကို စုစည်း၍ အနှစ်ချုပ် ထုတ်ပေးသည်။"""
-    norm_period = "yesterday" if (period or "").lower() == "yesterday" else "today"
-    label_mm = "ယနေ့ (Today)" if norm_period == "today" else "မနေ့က (Yesterday)"
-    rows = fetch_group_messages(group_name=None, query_text="", limit=150, period=norm_period)
-    if not rows:
-        return f"📌 {label_mm} အတွက် Group မှတ်တမ်း မတွေ့သေးပါဘူးရှင်။"
-
-    lines = [
-        f"[{_format_mm_timestamp(r['created_at'])} | {r['chat_title']} | {r['sender_name']}]: {r['message_text']}"
-        for r in reversed(rows)
-    ]
-    logs_block = "\n".join(lines)[:14000]
-
-    prompt = f"""
-သင်သည် 'သင်ဇာ (Thinzar)' အမည်ရှိ မြန်မာမိန်းကလေးဟန် ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။
-အောက်ပါ {label_mm} Telegram Group မှတ်တမ်းများကို အခြေခံ၍ Group အလိုက် အဓိက ဆွေးနွေးချက်/သတင်း/လုပ်ဆောင်ချက်များကို မြန်မာဘာသာဖြင့် အနှစ်ချုပ် ရေးပေးပါ။
-
-စည်းမျဉ်းများ:
-1. မှတ်တမ်းထဲ ပါဝင်သော အချက်အလက်များကိုသာ အခြေခံပါ။
-2. Group ခေါင်းစဉ်အလိုက် သပ်သပ်ရပ်ရပ် ခွဲခြားဖော်ပြပါ။
-3. အချက်တစ်ခုစီ၏ ရှေ့တွင် [Verified]၊ [Deduced]၊ [Unverified] သင့်လျော်သော tag ထည့်ပါ။
-4. 'မောင်' ဟု လုံးဝ မသုံးပါနှင့်။
-
-Group Logs ({label_mm}):
-{logs_block}
-"""
-    return call_ai_with_3tier_fallback(prompt)
+    return call_ai_with_3tier_fallback(prompt, use_google_search=False)
 
 
 # --- Trusted News Fetchers (Telegram Channels + RSS + Domain Web Search + Tavily) ---
