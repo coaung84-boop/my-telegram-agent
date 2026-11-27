@@ -386,8 +386,7 @@ async def post_init(application):
         BotCommand("start", "စတင်ရန်"),
         BotCommand("menu", "Menu စာရင်းကြည့်ရန်"),
         BotCommand("tasks", "လက်ရှိ Task စာရင်း"),
-        BotCommand("groups", "Group စာရင်းကြည့်ရန်"),
-        BotCommand("group", "Group စာရင်းကြည့်ရန်"),
+        BotCommand("groups", "Group ရွေးပြီး Report ထုတ်ရန်"),
         BotCommand("groupsummary", "Group Summary (Today/Yesterday)"),
         BotCommand("news", "သတင်းအနှစ်ချုပ်"),
         BotCommand("skills", "Core Rules မှတ်တမ်း"),
@@ -417,7 +416,6 @@ def main():
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("tasks", tasks_command))
     app.add_handler(CommandHandler("groups", groups_command))
-    app.add_handler(CommandHandler("group", groups_command))
     app.add_handler(CommandHandler("groupsummary", groupsummary_command))
     app.add_handler(CommandHandler("news", news_command))
     app.add_handler(CommandHandler("skills", skills_command))
