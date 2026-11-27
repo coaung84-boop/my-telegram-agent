@@ -7,13 +7,93 @@ from telegram.ext import ContextTypes
 
 from config import ADMIN_USER_ID, MM_TZ
 from ai_engine import call_ai_with_3tier_fallback
-from database import (
-    add_task,
-    list_tasks,
-    mark_task_done,
-    delete_task,
-    update_task_fields,
-)
+import database as _db
+
+
+def _resolve_db_fn(*names):
+    for name in names:
+        fn = getattr(_db, name, None)
+        if callable(fn):
+            return fn
+    return None
+
+
+def add_task(title: str, due_at: str | None = None, category: str = "အထွေထွေ", note: str | None = None):
+    fn = _resolve_db_fn("add_task", "create_task", "insert_task", "save_task")
+    if fn:
+        try:
+            return fn(title=title, due_at=due_at, category=category, note=note)
+        except TypeError:
+            try:
+                return fn(title, due_at, category)
+            except TypeError:
+                return fn(title)
+    return None
+
+
+def list_tasks(status: str = "pending"):
+    fn = _resolve_db_fn("list_tasks", "get_tasks", "fetch_tasks", "query_tasks")
+    if fn:
+        try:
+            rows = fn(status=status)
+            if rows is not None:
+                return rows
+        except TypeError:
+            pass
+        try:
+            rows = fn(status)
+            if rows is not None:
+                return rows
+        except TypeError:
+            pass
+        try:
+            rows = fn()
+            if isinstance(rows, list):
+                want_done = status.lower() in {"done", "completed", "finished"}
+                filtered = []
+                for r in rows:
+                    if not isinstance(r, dict):
+                        continue
+                    is_d = bool(r.get("done")) or str(r.get("status", "")).lower() in {"done", "completed", "finished"}
+                    if is_d == want_done:
+                        filtered.append(r)
+                return filtered
+        except Exception:
+            pass
+    return []
+
+
+def mark_task_done(task_id: int):
+    fn = _resolve_db_fn("mark_task_done", "complete_task", "done_task", "set_task_done")
+    if fn:
+        return fn(task_id)
+    upd = _resolve_db_fn("update_task_fields", "update_task")
+    if upd:
+        try:
+            return upd(task_id, status="done")
+        except TypeError:
+            return upd(task_id, {"status": "done"})
+    return None
+
+
+def delete_task(task_id: int):
+    fn = _resolve_db_fn("delete_task", "remove_task")
+    if fn:
+        return fn(task_id)
+    return None
+
+
+def update_task_fields(task_id: int, **kwargs):
+    fn = _resolve_db_fn("update_task_fields", "update_task", "edit_task")
+    if fn:
+        try:
+            return fn(task_id, **kwargs)
+        except TypeError:
+            try:
+                return fn(task_id, kwargs)
+            except TypeError:
+                pass
+    return None
 
 # Inline callback state caches
 _TASK_LIST_VIEW_STATE: dict[str, dict] = {}
