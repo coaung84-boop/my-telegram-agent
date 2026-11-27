@@ -388,6 +388,7 @@ async def post_init(application):
         BotCommand("tasks", "လက်ရှိ Task စာရင်း"),
         BotCommand("groups", "Group စာရင်းကြည့်ရန်"),
         BotCommand("group", "Group စာရင်းကြည့်ရန်"),
+        BotCommand("groupsummary", "Group Summary (Today/Yesterday)"),
         BotCommand("news", "သတင်းအနှစ်ချုပ်"),
         BotCommand("skills", "Core Rules မှတ်တမ်း"),
         BotCommand("setrule", "Core Rule အသစ်ထည့်ရန်"),
@@ -417,12 +418,14 @@ def main():
     app.add_handler(CommandHandler("tasks", tasks_command))
     app.add_handler(CommandHandler("groups", groups_command))
     app.add_handler(CommandHandler("group", groups_command))
+    app.add_handler(CommandHandler("groupsummary", groupsummary_command))
     app.add_handler(CommandHandler("news", news_command))
     app.add_handler(CommandHandler("skills", skills_command))
     app.add_handler(CommandHandler("setrule", setrule_command))
     app.add_handler(CommandHandler("patch", handle_patch_command))
     app.add_handler(CommandHandler("getfile", getfile_command))
     app.add_handler(CallbackQueryHandler(handle_getfile_callback, pattern=r"^getfile:"))
+    app.add_handler(CallbackQueryHandler(handle_groupsummary_callback, pattern=r"^gsummary:"))
 
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice_message))
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, handle_message))
