@@ -79,6 +79,38 @@ def _compute_next_repeat_datetime(current_rem_dt: datetime, repeat_type: str, no
     return next_dt
 
 
+def _unpack_task_meta(task_row: dict) -> tuple[str | None, str, str]:
+    """Task row မှ user reason/note၊ category နှင့် priority တို့ကို ခွဲထုတ်ပေးသည်။"""
+    if not isinstance(task_row, dict):
+        return None, "general", "normal"
+
+    raw_reason = str(task_row.get("reason") or task_row.get("notes") or "").strip()
+    clean_reason = re.sub(r"\[meta:[^\]]*\]", "", raw_reason).strip() or None
+
+    cat = str(task_row.get("category") or "general").strip().lower() or "general"
+    prio = str(task_row.get("priority") or "normal").strip().lower() or "normal"
+
+    m = re.search(r"\[meta:cat=([a-z_]+),prio=([a-z_]+)\]", raw_reason)
+    if m:
+        if not task_row.get("category"):
+            cat = m.group(1)
+        if not task_row.get("priority"):
+            prio = m.group(2)
+
+    return clean_reason, cat, prio
+
+
+def _is_health_or_family_task(text: str, reason: str | None = None) -> bool:
+    """ဆေးသောက်ရန် သို့မဟုတ် မိသားစု/ကလေးများနှင့် ပတ်သက်သော task ဟုတ်မဟုတ် စစ်သည်။"""
+    combined = f"{text or ''} {reason or ''}".lower()
+    keywords = [
+        "ဆေး", "medicine", "pill", "tablet", "ဆေးသောက်",
+        "မိသားစု", "family", "ကလေး", "ကလေးတွေ", "သား", "သမီး",
+        "child", "children", "kid", "kids", "ကျောင်း", "school",
+    ]
+    return any(k in combined for k in keywords)
+
+
 def _normalize_iso_mmt(due_at: str | None) -> str | None:
     if not due_at:
         return None
