@@ -36,8 +36,10 @@ from task_manager import (
     get_myanmar_calendar_context,
     format_myanmar_date_short,
     smart_route_and_parse,
-    get_formatted_tasks,
     handle_task_intent,
+    send_smart_task_list,
+    handle_task_callback,
+    consume_pending_task_input,
 )
 from group_news_search import (
     cleanup_old_group_messages,
@@ -118,7 +120,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         return
-    await update.message.reply_text(get_formatted_tasks())
+    await send_smart_task_list(update, context, show_done=False)
 
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -486,6 +488,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.document and await handle_py_file_upload(update, context):
         return
 
+    if await consume_pending_task_input(update, context):
+        return
+
     user_text = (update.message.text or update.message.caption or "").strip()
     image_bytes = None
     mime_type = None
@@ -549,6 +554,9 @@ User Prompt: {user_text}
     intent = route.get("intent", "GENERAL")
 
     if intent == "TASK":
+        if (route.get("task_action") or "").upper() == "LIST":
+            await send_smart_task_list(update, context, show_done=False)
+            return
         reply = handle_task_intent(user_text, route)
     elif intent == "GROUP":
         reply = handle_group_query(user_text, route)
@@ -625,6 +633,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_getfile_callback, pattern=r"^getfile:"))
     app.add_handler(CallbackQueryHandler(handle_patch_callback, pattern=r"^patch(ok|no):"))
     app.add_handler(CallbackQueryHandler(handle_rule_callback, pattern=r"^rule:"))
+    app.add_handler(CallbackQueryHandler(handle_task_callback, pattern=r"^(tskview|tskact|tskquick):"))
     app.add_handler(CallbackQueryHandler(
         handle_groupsummary_callback,
         pattern=r"^(gsummary:|grpsel:|grpday:|grpback)",
