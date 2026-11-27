@@ -493,8 +493,29 @@ async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
                     if ev.get("type") == "audio" and ev.get("data"):
                         out_buf.write(ev["data"])
 
-        if idx < len(clauses) - 1 and mm_pause > 0:
-            await asyncio.sleep(mm_pause)
+        # Clause ထဲက English pitch ကို မြန်မာ pitch နဲ့ နီးစပ်အောင် ညှိပြီး rate ကို အနည်းငယ်နှေးထားသည်
+        en_pitch = mm_pitch
+        en_rate = "-6%"
+
+        sub_segs = _split_burmese_and_english_segments(clause_txt)
+        for kind, seg_txt in sub_segs:
+            if kind == "en":
+                communicate = edge_tts.Communicate(
+                    text=seg_txt,
+                    voice="my-MM-NilarNeural",
+                    rate=en_rate,
+                    pitch=en_pitch,
+                )
+            else:
+                communicate = edge_tts.Communicate(
+                    text=seg_txt,
+                    voice="my-MM-NilarNeural",
+                    rate=mm_rate,
+                    pitch=mm_pitch,
+                )
+            async for ev in communicate.stream():
+                if ev.get("type") == "audio" and ev.get("data"):
+                    out_buf.write(ev["data"])
 
     audio_data = out_buf.getvalue()
     if not audio_data:
