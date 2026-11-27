@@ -108,21 +108,19 @@ def _build_conversational_speech(reply_text: str) -> str:
 
     raw = reply_text.strip()
 
-    # Task မှတ်တဲ့ confirmation ဆိုရင် စာရှည်ကြီး မရွတ်ဘဲ သဘာဝကျကျ ပြောပြမယ်
     if "မှတ်ထားလိုက်ပါပြီ" in raw:
         m_title = re.search(r'"([^"]+)"\s*မှတ်ထားလိုက်ပါပြီ', raw)
         title_clean = (m_title.group(1) if m_title else "").strip()
-        # အသံဖိုင် transcript မှားဖတ်ထားတဲ့ "er ပေးရန်" လို စာလုံးမျိုးကို သဘာဝကျကျ ညှိပေးမယ်
         if not title_clean or title_clean.lower() in {"er ပေးရန်", "reminder ပေးရန်", "remind ပေးရန်"}:
             return (
-                "ဟုတ်ကဲ့၊ မှတ်ထားလိုက်ပါပြီနော်။ "
-                "အချိန်ရောက်တာနဲ့ သင်ဇာ ပြန်သတိပေးလိုက်မယ်။ "
-                "တခြား ဘာထပ်လုပ်စရာ ရှိသေးလဲ ပြောပါဦး။"
+                "အင်း၊ မှတ်ထားလိုက်ပြီနော်။ "
+                "အချိန်ရောက်တာနဲ့ သင်ဇာ လှမ်းသတိပေးလိုက်မယ်။ "
+                "တခြား ဘာရှိသေးလဲ ပြောပါဦး။"
             )
         return (
-            f"ဟုတ်ကဲ့၊ {title_clean} အတွက် မှတ်ထားလိုက်ပါပြီနော်။ "
-            "အချိန်ရောက်ရင် သေချာ သတိပေးလိုက်မယ်။ "
-            "နောက်ထပ် ဘာကူညီပေးရဦးမလဲရှင်။"
+            f"အင်း၊ {title_clean} ကို မှတ်ထားလိုက်ပြီနော်။ "
+            "အချိန်ရောက်ရင် သေချာ လှမ်းသတိပေးလိုက်မယ်။ "
+            "နောက်ထပ် ဘာလုပ်စရာ ရှိသေးလဲရှင်။"
         )
 
     cleaned = re.sub(r"https?://\S+", "", raw)
@@ -221,31 +219,69 @@ def transcribe_voice_bytes(audio_bytes: bytes, mime_type: str = "audio/ogg", fil
     return ""
 
 
+def _split_into_expressive_clauses(spoken_text: str) -> list[tuple[str, str]]:
+    """စာကြောင်းတွေကို အဖြတ်အတောက်နဲ့ အသံအနိမ့်အမြင့် အတက်အကျ ပါစေရန် clause အပိုင်းလိုက် ခွဲသည်။"""
+    raw_parts = [p.strip() for p in re.split(r"(?<=[။၊,])\s*", spoken_text) if p.strip()]
+    clauses: list[tuple[str, str]] = []
+
+    for part in raw_parts:
+        ends_period = part.endswith("။")
+        ends_comma = part.endswith(("၊", ","))
+        core = re.sub(r"[။၊,]+$", "", part).strip()
+        if not core:
+            continue
+
+        # ရှည်တဲ့ clause ကို စကားလုံး ၅-၇ လုံးဝန်းကျင် ထပ်ခွဲပြီး အတက်အကျ ထည့်မယ်
+        words = core.split()
+        if len(words) >= 8:
+            mid = len(words) // 2
+            left = " ".join(words[:mid]).strip()
+            right = " ".join(words[mid:]).strip()
+            if left:
+                clauses.append((left, "mid_up"))
+            if right:
+                clauses.append((right, "end_down" if ends_period else "comma_lift"))
+        else:
+            if ends_period:
+                clauses.append((core, "end_down"))
+            elif ends_comma:
+                clauses.append((core, "comma_lift"))
+            else:
+                clauses.append((core, "mid_up"))
+
+    return clauses or [(spoken_text, "mid_up")]
+
+
 async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
-    """ဝါကျအပိုင်းလိုက် rate/pitch အနိမ့်အမြင့်နဲ့ pause တွေ ညှိပြီး လူပြောသလို ထုတ်ပေးသည်။"""
-    # ။ နှင့် ၊ နေရာများတွင် အဖြတ်အတောက် ပါစေရန် ခွဲထုတ်သည်
-    chunks = [c.strip() for c in re.split(r"(?<=[။၊,])\s*", spoken_text) if c.strip()]
-    if not chunks:
-        chunks = [spoken_text]
+    """Clause အလိုက် pitch နဲ့ rate အတက်အကျ ညှိပြီး လူသားဆန်ဆန် အသံအနိမ့်အမြင့်နဲ့ ထုတ်ပေးသည်။"""
+    clauses = _split_into_expressive_clauses(spoken_text)
+
+    # စကားစုအလိုက် အသံအတက်အကျ pattern (အစ မြင့် -> အလယ် ပေါ့ပါး -> အဆုံး နည်းနည်းနှိမ့်ပြီး ရပ်နား)
+    pattern_cycle = [
+        ("+10Hz", "+18%", 0.08),
+        ("+4Hz", "+22%", 0.06),
+        ("+12Hz", "+14%", 0.14),
+        ("-3Hz", "+6%", 0.28),
+    ]
 
     out_buf = io.BytesIO()
-    for idx, ch in enumerate(chunks):
-        # ဝါကျအဆုံး (။) မှာ နည်းနည်းပိုနှေးပြီး ရပ်နား၊ ၊ မှာ အသံနည်းနည်းမြှင့်ပြီး ဆက်ပြော
-        if ch.endswith("။"):
-            rate = "+8%"
-            pitch = "+2Hz"
-            pause_sec = 0.22
-        elif ch.endswith(("၊", ",")):
-            rate = "+14%"
-            pitch = "+6Hz"
-            pause_sec = 0.10
+    for idx, (clause_txt, role) in enumerate(clauses):
+        if role == "end_down":
+            pitch = "-4Hz" if idx % 2 == 0 else "-2Hz"
+            rate = "+5%"
+            pause_sec = 0.28
+        elif role == "comma_lift":
+            pitch = "+12Hz"
+            rate = "+15%"
+            pause_sec = 0.14
         else:
-            rate = "+16%"
-            pitch = "+5Hz"
-            pause_sec = 0.05
+            p_base, r_base, _ = pattern_cycle[idx % len(pattern_cycle)]
+            pitch = p_base
+            rate = r_base
+            pause_sec = 0.07
 
         communicate = edge_tts.Communicate(
-            text=ch,
+            text=clause_txt,
             voice="my-MM-NilarNeural",
             rate=rate,
             pitch=pitch,
@@ -254,7 +290,7 @@ async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
             if ev.get("type") == "audio" and ev.get("data"):
                 out_buf.write(ev["data"])
 
-        if idx < len(chunks) - 1 and pause_sec > 0:
+        if idx < len(clauses) - 1 and pause_sec > 0:
             await asyncio.sleep(pause_sec)
 
     audio_data = out_buf.getvalue()
@@ -267,7 +303,7 @@ async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
 
 
 async def send_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, reply_text: str):
-    """ရင်းရင်းနှီးနှီး လူပြောသလို အသံအနိမ့်အမြင့် အဖြတ်အတောက်နဲ့ Telegram voice note ပို့ပေးသည်။"""
+    """ရင်းရင်းနှီးနှီး ပွင့်ပွင့်လင်းလင်းနဲ့ အသံအနိမ့်အမြင့် အတက်အကျပါတဲ့ Telegram voice note ပို့ပေးသည်။"""
     spoken = _build_conversational_speech(reply_text)
     if not spoken:
         return
@@ -282,7 +318,7 @@ async def send_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, r
             try:
                 saved_ok = await asyncio.wait_for(
                     _render_expressive_edge_tts(spoken, tmp_path),
-                    timeout=18.0,
+                    timeout=20.0,
                 )
                 if saved_ok:
                     break
