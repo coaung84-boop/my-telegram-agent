@@ -3,6 +3,7 @@ import re
 import io
 import asyncio
 import tempfile
+from datetime import datetime, timedelta, timezone
 import edge_tts
 from gtts import gTTS
 from google.genai import types
@@ -19,26 +20,135 @@ from task_manager import (
 )
 from group_news_search import get_available_group_names, handle_group_query, perform_hybrid_web_search
 
+MM_TZ = timezone(timedelta(hours=6, minutes=30))
 
-def _clean_text_for_tts(text: str) -> str:
-    """Voice message အဖြစ် ဖတ်ပြရန် emoji၊ markdown symbols နဲ့ link တွေကို ရှင်းလင်းပေးသည်။"""
-    if not text:
+
+def _number_to_mm_words(n: int) -> str:
+    units = {
+        0: "သုည", 1: "တစ်", 2: "နှစ်", 3: "သုံး", 4: "လေး",
+        5: "ငါး", 6: "ခြောက်", 7: "ခုနစ်", 8: "ရှစ်", 9: "ကိုး",
+    }
+    if n < 10:
+        return units[n]
+    if n == 10:
+        return "တစ်ဆယ်"
+    if n < 20:
+        return f"ဆယ့်{units[n % 10]}"
+    tens = {
+        2: "နှစ်ဆယ်", 3: "သုံးဆယ်", 4: "လေးဆယ်", 5: "ငါးဆယ်",
+        6: "ခြောက်ဆယ်", 7: "ခုနစ်ဆယ်", 8: "ရှစ်ဆယ်", 9: "ကိုးဆယ်",
+    }
+    rem = n % 10
+    return f"{tens[n // 10]}{units[rem]}" if rem else tens[n // 10]
+
+
+def _humanize_time_phrase(h: int, m: int) -> str:
+    if 5 <= h < 12:
+        period = "မနက် "
+        disp_h = h
+    elif h == 12:
+        period = "နေ့လယ် "
+        disp_h = 12
+    elif 12 < h < 19:
+        period = "ညနေ "
+        disp_h = h - 12
+    else:
+        period = "ည "
+        disp_h = h - 12 if h > 12 else h
+
+    h_w = _number_to_mm_words(disp_h)
+    if m == 0:
+        return f"{period}{h_w}နာရီ"
+    if m == 30:
+        return f"{period}{h_w}နာရီခွဲ"
+    return f"{period}{h_w}နာရီ {_number_to_mm_words(m)}မိနစ်"
+
+
+def _humanize_dates_and_times_for_speech(text: str) -> str:
+    """ISO date/time နဲ့ မြန်မာပြက္ခဒိန် အရှည်ကြီးတွေကို အရပ်သုံးစကားပြောပုံစံ ပြောင်းသည်။"""
+    now_mm = datetime.now(MM_TZ)
+    today_d = now_mm.date()
+    tmr_d = (now_mm + timedelta(days=1)).date()
+
+    def _repl_dt(match):
+        y_str, m_str, d_str, h_str, min_str = match.groups()
+        h, m = int(h_str), int(min_str)
+        time_sp = _humanize_time_phrase(h, m)
+        if y_str and m_str and d_str:
+            try:
+                d_obj = datetime(int(y_str), int(m_str), int(d_str)).date()
+                if d_obj == today_d:
+                    return f"ဒီနေ့ {time_sp}"
+                if d_obj == tmr_d:
+                    return f"မနက်ဖြန် {time_sp}"
+                return f"{_number_to_mm_words(d_obj.day)}ရက်နေ့ {time_sp}"
+            except Exception:
+                return time_sp
+        return time_sp
+
+    text = re.sub(
+        r"(?:\b(\d{4})-(\d{1,2})-(\d{1,2})\b\s+)?\b(\d{1,2}):(\d{2})\b",
+        _repl_dt,
+        text,
+    )
+    text = re.sub(
+        r"\b(19|20)\d{2}-\d{1,2}-\d{1,2}\b",
+        "",
+        text,
+    )
+    text = re.sub(r"·\s*မြန်မာ\s*\d+\s*ခု.*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\(\s*(?:တနင်္လာနေ့|အင်္ဂါနေ့|ဗုဒ္ဓဟူးနေ့|ကြာသပတေးနေ့|သောကြာနေ့|စနေနေ့|တနင်္ဂနွေနေ့)\s*\)", "", text)
+    return text
+
+
+def _build_conversational_speech(reply_text: str) -> str:
+    """စာသားအတိုင်း ခြောက်ကပ်ကပ် ရွတ်မယ့်အစား ရင်းရင်းနှီးနှီး ပွင့်ပွင့်လင်းလင်း စကားပြောသလို ပြင်သည်။"""
+    if not reply_text:
         return ""
-    cleaned = re.sub(r"https?://\S+", "", text)
+
+    raw = reply_text.strip()
+
+    # Task မှတ်တဲ့ confirmation ဆိုရင် စာရှည်ကြီး မရွတ်ဘဲ သဘာဝကျကျ ပြောပြမယ်
+    if "မှတ်ထားလိုက်ပါပြီ" in raw:
+        m_title = re.search(r'"([^"]+)"\s*မှတ်ထားလိုက်ပါပြီ', raw)
+        title_clean = (m_title.group(1) if m_title else "").strip()
+        # အသံဖိုင် transcript မှားဖတ်ထားတဲ့ "er ပေးရန်" လို စာလုံးမျိုးကို သဘာဝကျကျ ညှိပေးမယ်
+        if not title_clean or title_clean.lower() in {"er ပေးရန်", "reminder ပေးရန်", "remind ပေးရန်"}:
+            return (
+                "ဟုတ်ကဲ့၊ မှတ်ထားလိုက်ပါပြီနော်။ "
+                "အချိန်ရောက်တာနဲ့ သင်ဇာ ပြန်သတိပေးလိုက်မယ်။ "
+                "တခြား ဘာထပ်လုပ်စရာ ရှိသေးလဲ ပြောပါဦး။"
+            )
+        return (
+            f"ဟုတ်ကဲ့၊ {title_clean} အတွက် မှတ်ထားလိုက်ပါပြီနော်။ "
+            "အချိန်ရောက်ရင် သေချာ သတိပေးလိုက်မယ်။ "
+            "နောက်ထပ် ဘာကူညီပေးရဦးမလဲရှင်။"
+        )
+
+    cleaned = re.sub(r"https?://\S+", "", raw)
     cleaned = re.sub(r"\[[^\]]+\]\([^\)]+\)", "", cleaned)
-    cleaned = re.sub(r"[*_`~#>\-]+", " ", cleaned)
     cleaned = re.sub(r"\[(Verified|Deduced|Unverified)\]", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(
         r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF]",
-        "",
+        " ",
         cleaned,
     )
+    cleaned = _humanize_dates_and_times_for_speech(cleaned)
+    cleaned = re.sub(r"[*_`~#>\-]+", " ", cleaned)
+    cleaned = re.sub(r"\n+", "။ ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned[:700]
+
+    if len(cleaned) > 420:
+        cut = cleaned[:420]
+        last_p = max(cut.rfind("။"), cut.rfind("၊"), cut.rfind(" "))
+        if last_p > 80:
+            cut = cut[:last_p + 1]
+        cleaned = f"{cut} ကျန်တဲ့ အသေးစိတ်ကိုတော့ စာနဲ့ ရေးပို့ပေးထားပါတယ်နော်။"
+
+    return cleaned
 
 
 def _resolve_audio_extension_and_mime(voice_obj, is_voice_note: bool) -> tuple[str, str]:
-    """Telegram voice/audio object မှ file extension နှင့် mime_type ကို ခန့်မှန်းပေးသည်။"""
     fname = (getattr(voice_obj, "file_name", None) or "").lower()
     mime = (getattr(voice_obj, "mime_type", None) or "").lower()
 
@@ -67,7 +177,7 @@ def _resolve_audio_extension_and_mime(voice_obj, is_voice_note: bool) -> tuple[s
 
 
 def transcribe_voice_bytes(audio_bytes: bytes, mime_type: str = "audio/ogg", filename: str = "voice.ogg") -> str:
-    """Maya version ကဲ့သို့ Gemini audio understanding ကို ဦးစားပေးသုံးပြီး Groq Whisper fallback ထားသည်။"""
+    """Gemini audio understanding ကို ဦးစားပေးသုံးပြီး Groq Whisper fallback ထားသည်။"""
     if not audio_bytes:
         return ""
 
@@ -111,9 +221,54 @@ def transcribe_voice_bytes(audio_bytes: bytes, mime_type: str = "audio/ogg", fil
     return ""
 
 
+async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
+    """ဝါကျအပိုင်းလိုက် rate/pitch အနိမ့်အမြင့်နဲ့ pause တွေ ညှိပြီး လူပြောသလို ထုတ်ပေးသည်။"""
+    # ။ နှင့် ၊ နေရာများတွင် အဖြတ်အတောက် ပါစေရန် ခွဲထုတ်သည်
+    chunks = [c.strip() for c in re.split(r"(?<=[။၊,])\s*", spoken_text) if c.strip()]
+    if not chunks:
+        chunks = [spoken_text]
+
+    out_buf = io.BytesIO()
+    for idx, ch in enumerate(chunks):
+        # ဝါကျအဆုံး (။) မှာ နည်းနည်းပိုနှေးပြီး ရပ်နား၊ ၊ မှာ အသံနည်းနည်းမြှင့်ပြီး ဆက်ပြော
+        if ch.endswith("။"):
+            rate = "+8%"
+            pitch = "+2Hz"
+            pause_sec = 0.22
+        elif ch.endswith(("၊", ",")):
+            rate = "+14%"
+            pitch = "+6Hz"
+            pause_sec = 0.10
+        else:
+            rate = "+16%"
+            pitch = "+5Hz"
+            pause_sec = 0.05
+
+        communicate = edge_tts.Communicate(
+            text=ch,
+            voice="my-MM-NilarNeural",
+            rate=rate,
+            pitch=pitch,
+        )
+        async for ev in communicate.stream():
+            if ev.get("type") == "audio" and ev.get("data"):
+                out_buf.write(ev["data"])
+
+        if idx < len(chunks) - 1 and pause_sec > 0:
+            await asyncio.sleep(pause_sec)
+
+    audio_data = out_buf.getvalue()
+    if not audio_data:
+        return False
+
+    with open(out_path, "wb") as f:
+        f.write(audio_data)
+    return os.path.exists(out_path) and os.path.getsize(out_path) > 0
+
+
 async def send_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, reply_text: str):
-    """မြန်မာမိန်းကလေးအသံ (my-MM-NilarNeural) ဖြင့် Telegram voice note ပို့ပေးပြီး gTTS fallback ထားသည်။"""
-    spoken = _clean_text_for_tts(reply_text)
+    """ရင်းရင်းနှီးနှီး လူပြောသလို အသံအနိမ့်အမြင့် အဖြတ်အတောက်နဲ့ Telegram voice note ပို့ပေးသည်။"""
+    spoken = _build_conversational_speech(reply_text)
     if not spoken:
         return
 
@@ -125,17 +280,18 @@ async def send_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, r
         saved_ok = False
         for _ in range(2):
             try:
-                communicate = edge_tts.Communicate(text=spoken[:500], voice="my-MM-NilarNeural")
-                await asyncio.wait_for(communicate.save(tmp_path), timeout=15.0)
-                if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
-                    saved_ok = True
+                saved_ok = await asyncio.wait_for(
+                    _render_expressive_edge_tts(spoken, tmp_path),
+                    timeout=18.0,
+                )
+                if saved_ok:
                     break
             except Exception:
                 await asyncio.sleep(0.5)
 
         if not saved_ok:
             def _make_gtts():
-                tts = gTTS(text=spoken[:500], lang="my", slow=False)
+                tts = gTTS(text=spoken.replace("။", " ").replace("၊", " "), lang="my", slow=False)
                 tts.save(tmp_path)
 
             await asyncio.to_thread(_make_gtts)
@@ -210,7 +366,7 @@ Memory & User Context:
 User Voice Transcript: "{transcript_text}"
 
 ညွှန်ကြားချက်များ:
-- သင်ဇာ (Thinzar) အမည်ရှိ မြန်မာမိန်းကလေးဟန် AI Assistant အဖြစ် သဘာဝကျကျ၊ နွေးနွေးထွေးထွေး ဖြေဆိုပါ။
+- သင်ဇာ (Thinzar) အမည်ရှိ မြန်မာမိန်းကလေးဟန် AI Assistant အဖြစ် ရင်းရင်းနှီးနှီး၊ ပွင့်ပွင့်လင်းလင်းနဲ့ လူတစ်ယောက် စကားပြောသလို သဘာဝကျကျ ဖြေဆိုပါ။
 - အကြံဉာဏ်/ရွေးချယ်စရာ မေးလျှင် အကျိုးကျေးဇူး၊ အားနည်းချက်နှင့် လက်တွေ့အသုံးဝင်မည့် အကြံပြုချက်များ ရှင်းပြပါ။
 - 'မောင်' ဟု ဆေးသောက်ရန်နှင့် မိသားစု/ကလေး Task များမှလွဲ၍ မသုံးပါနှင့်။
 """
