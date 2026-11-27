@@ -1,8 +1,9 @@
+import io
 import os
 import re
 import base64
 import requests
-from telegram import Update
+from telegram import Update, InputFile
 from telegram.ext import ContextTypes
 
 from config import (
@@ -204,3 +205,47 @@ async def handle_patch_command(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         print(f"GitHub /patch error: {e}")
         await update.message.reply_text(f"❌ GitHub patch လုပ်ရာမှာ error တက်ပါတယ်ရှင်:\n`{str(e)[:240]}`", parse_mode="Markdown")
+
+
+async def getfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /getfile <filename> ဖြင့် GitHub repo ရှိ ခွင့်ပြုထားသော ဖိုင်ကို Telegram document အဖြစ် ပြန်ပို့ပေးသည်။
+    """
+    if not update.message or not update.effective_user:
+        return
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+
+    raw = (update.message.text or "").strip()
+    parts = raw.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        allowed_str = ", ".join(sorted(ALLOWED_GITHUB_FILES))
+        await update.message.reply_text(
+            f"ဖိုင်နာမည် ထည့်ပေးပါရှင်\nဥပမာ: `/getfile group_news_search.py`\nခွင့်ပြုထားသော ဖိုင်များ: {allowed_str}",
+            parse_mode="Markdown",
+        )
+        return
+
+    target_file = os.path.basename(parts[1].strip())
+    if target_file not in ALLOWED_GITHUB_FILES:
+        allowed_str = ", ".join(sorted(ALLOWED_GITHUB_FILES))
+        await update.message.reply_text(
+            f"'{target_file}' ကို ဖတ်ခွင့်မပြုထားပါဘူးရှင်\nခွင့်ပြုထားသော ဖိုင်များ: {allowed_str}"
+        )
+        return
+
+    try:
+        content, _ = _github_get_file(target_file)
+        bio = io.BytesIO(content.encode("utf-8"))
+        bio.name = target_file
+        await update.message.reply_document(
+            document=InputFile(bio, filename=target_file),
+            caption=f"📄 `{target_file}` (`{GITHUB_REPO}@{GITHUB_BRANCH}`)",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        print(f"GitHub /getfile error: {e}")
+        await update.message.reply_text(f"❌ ဖိုင်ယူရာမှာ error တက်ပါတယ်ရှင်:\n`{str(e)[:240]}`", parse_mode="Markdown")
+```[cite: 4]
+
+ဒီဖိုင်ကို GitHub ပေါ်က `github_ops.py` ထဲ တင်ပြီး deploy ပြီးသွားရင် `/getfile group_news_search.py` နဲ့ ဆွဲချကြည့်လို့ ရပါပြီရှင်[cite: 4, 5]။ `/getfile` ကို စမ်းပြီးတဲ့အခါ ဘယ်ဖိုင်ကို ဆက်ကြည့်ချင်ပါသလဲရှင်?
