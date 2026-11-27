@@ -1,26 +1,37 @@
-import io
 import os
 import re
+import ast
 import json
+import uuid
+import time
 import base64
+import asyncio
 import requests
 from datetime import datetime
-from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from config import (
-    ADMIN_USER_ID,
-    GITHUB_TOKEN,
-    GITHUB_REPO,
-    GITHUB_BRANCH,
-    ALLOWED_GITHUB_FILES,
-    MM_TZ,
-)
-from database import supabase
+from config import ADMIN_USER_ID, MM_TZ
+
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
+GITHUB_REPO = os.getenv("GITHUB_REPO", "").strip()
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip() or "main"
+
+ALLOWED_GITHUB_FILES = {
+    "main.py",
+    "config.py",
+    "database.py",
+    "ai_engine.py",
+    "memory_manager.py",
+    "task_manager.py",
+    "group_news_search.py",
+    "voice_handler.py",
+    "github_ops.py",
+}
 
 _PENDING_PATCHES: dict[str, dict] = {}
-_PENDING_DEPLOY_MEM: dict | None = None
-_PATCH_SEQ = 0
+_PENDING_GETFILES: dict[str, str] = {}
+_PENDING_DEPLOY_FILE = "/tmp/thinzar_pending_deploy.json"
 
 
 def _github_headers() -> dict:
@@ -31,409 +42,428 @@ def _github_headers() -> dict:
     }
 
 
-def _github_get_file(file_path: str) -> tuple[str, str | None]:
-    """GitHub repo ထဲမှ file content (utf-8) နှင့် sha ကို ဖတ်ယူသည်။"""
+def _normalize_target_filename(raw_name: str) -> str:
+    cleaned = (raw_name or "").strip().strip("`").lstrip("/")
+    if not cleaned:
+        return "main.py"
+    if not cleaned.endswith(".py") and f"{cleaned}.py" in ALLOWED_GITHUB_FILES:
+        return f"{cleaned}.py"
+    return cleaned
+
+
+def get_github_file(file_path: str, branch: str | None = None) -> dict:
+    clean_path = _normalize_target_filename(file_path)
     if not GITHUB_TOKEN or not GITHUB_REPO:
-        raise RuntimeError("GITHUB_TOKEN သို့မဟုတ် GITHUB_REPO environment variable မထည့်ရသေးပါ။")
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
-    params = {"ref": GITHUB_BRANCH}
-    resp = requests.get(url, headers=_github_headers(), params=params, timeout=15)
-    if resp.status_code != 200:
-        raise RuntimeError(f"GitHub GET {file_path} failed ({resp.status_code}): {resp.text[:180]}")
-    data = resp.json()
-    sha = data.get("sha")
-    raw_b64 = (data.get("content") or "").replace("\n", "")
-    content = base64.b64decode(raw_b64).decode("utf-8")
-    return content, sha
+        return {"ok": False, "error": "GITHUB_TOKEN သို့မဟုတ် GITHUB_REPO မသတ်မှတ်ရသေးပါရှင်"}
+    if clean_path not in ALLOWED_GITHUB_FILES:
+        return {
+            "ok": False,
+            "error": f"'{clean_path}' ကို ခွင့်ပြုထားသော ဖိုင်စာရင်းထဲ ထည့်မထားပါရှင် ({', '.join(sorted(ALLOWED_GITHUB_FILES))})",
+        }
+
+    ref = branch or GITHUB_BRANCH
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{clean_path}"
+    try:
+        resp = requests.get(url, headers=_github_headers(), params={"ref": ref}, timeout=12)
+        if resp.status_code != 200:
+            return {"ok": False, "error": f"GitHub read failed ({resp.status_code}): {resp.text[:180]}"}
+        data = resp.json()
+        raw_b64 = (data.get("content") or "").replace("\n", "")
+        content_str = base64.b64decode(raw_b64).decode("utf-8") if raw_b64 else ""
+        return {"ok": True, "path": clean_path, "sha": data.get("sha"), "content": content_str}
+    except Exception as e:
+        return {"ok": False, "error": f"GitHub read error: {type(e).__name__}: {str(e)[:150]}"}
 
 
-def _github_put_file(file_path: str, new_content: str, sha: str | None, commit_message: str) -> dict:
-    """GitHub repo ထဲသို့ file content အသစ်ကို commit & push လုပ်သည်။"""
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
-    encoded = base64.b64encode(new_content.encode("utf-8")).decode("utf-8")
+def upsert_github_file(
+    file_path: str,
+    new_content: str,
+    commit_message: str = "Update file via Thinzar",
+    branch: str | None = None,
+) -> dict:
+    clean_path = _normalize_target_filename(file_path)
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return {"ok": False, "error": "GITHUB_TOKEN သို့မဟုတ် GITHUB_REPO မသတ်မှတ်ရသေးပါရှင်"}
+    if clean_path not in ALLOWED_GITHUB_FILES:
+        return {"ok": False, "error": f"'{clean_path}' ကို ခွင့်ပြုထားသော ဖိုင်စာရင်းထဲ ထည့်မထားပါရှင်"}
+
+    if clean_path.endswith(".py"):
+        try:
+            ast.parse(new_content)
+        except SyntaxError as se:
+            return {"ok": False, "error": f"Python syntax error ရှိနေပါတယ်ရှင် — line {se.lineno}: {se.msg}"}
+
+    ref = branch or GITHUB_BRANCH
+    existing = get_github_file(clean_path, branch=ref)
+    sha = existing.get("sha") if existing.get("ok") else None
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{clean_path}"
+    encoded = base64.b64encode(new_content.encode("utf-8")).decode("ascii")
     payload = {
-        "message": commit_message,
+        "message": (commit_message or f"Update {clean_path}")[:120],
         "content": encoded,
-        "branch": GITHUB_BRANCH,
+        "branch": ref,
     }
     if sha:
         payload["sha"] = sha
-    resp = requests.put(url, headers=_github_headers(), json=payload, timeout=20)
-    if resp.status_code not in (200, 201):
-        raise RuntimeError(f"GitHub PUT {file_path} failed ({resp.status_code}): {resp.text[:200]}")
-    return resp.json()
+
+    try:
+        resp = requests.put(url, headers=_github_headers(), json=payload, timeout=15)
+        if resp.status_code not in (200, 201):
+            return {"ok": False, "error": f"GitHub commit failed ({resp.status_code}): {resp.text[:180]}"}
+        res_json = resp.json()
+        commit_sha = ((res_json.get("commit") or {}).get("sha") or "")[:7]
+        return {"ok": True, "path": clean_path, "commit": commit_sha, "branch": ref}
+    except Exception as e:
+        return {"ok": False, "error": f"GitHub commit error: {type(e).__name__}: {str(e)[:150]}"}
 
 
-def _parse_unified_or_search_replace_patch(patch_text: str) -> list[tuple[str, str]]:
-    """
-    Patch format နှစ်မျိုးလုံးကို ပံ့ပိုးပေးသည်:
-    1) SEARCH / REPLACE blocks:
-       <<<<<<< SEARCH
-       old code
-       =======
-       new code
-       >>>>>>> REPLACE
-    2) Unified diff hunks (@@ ... @@ with '-' and '+' lines)
-    """
+def _parse_patch_hunks(raw_body: str) -> list[tuple[str, str]]:
+    """<<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE နှင့် <<<OLD>>> ... <<<NEW>>> နှစ်မျိုးလုံးကို ခွဲထုတ်သည်။"""
+    if not raw_body:
+        return []
+
     hunks: list[tuple[str, str]] = []
 
-    sr_pattern = re.compile(
-        r"<<<<<<< SEARCH\s*\n(.*?)\n=======\s*\n(.*?)\n>>>>>>> REPLACE",
-        re.DOTALL,
-    )
-    for m in sr_pattern.finditer(patch_text):
-        hunks.append((m.group(1), m.group(2)))
-    if hunks:
-        return hunks
+    if "<<<<<<< SEARCH" in raw_body and "=======" in raw_body and ">>>>>>> REPLACE" in raw_body:
+        pattern = re.compile(r"<<<<<<< SEARCH\s*\r?\n(.*?)\r?\n=======\s*\r?\n(.*?)\r?\n>>>>>>> REPLACE", re.DOTALL)
+        for m in pattern.finditer(raw_body):
+            old_b = m.group(1).strip("\r\n")
+            new_b = m.group(2).strip("\r\n")
+            if old_b:
+                hunks.append((old_b, new_b))
+        if hunks:
+            return hunks
 
-    lines = patch_text.splitlines()
-    old_buf: list[str] = []
-    new_buf: list[str] = []
-    in_hunk = False
-
-    for line in lines:
-        if line.startswith("@@"):
-            if old_buf or new_buf:
-                hunks.append(("\n".join(old_buf), "\n".join(new_buf)))
-                old_buf, new_buf = [], []
-            in_hunk = True
-            continue
-        if not in_hunk:
-            continue
-        if line.startswith("---") or line.startswith("+++"):
-            continue
-        if line.startswith("-"):
-            old_buf.append(line[1:])
-        elif line.startswith("+"):
-            new_buf.append(line[1:])
-        elif line.startswith(" "):
-            old_buf.append(line[1:])
-            new_buf.append(line[1:])
-
-    if old_buf or new_buf:
-        hunks.append(("\n".join(old_buf), "\n".join(new_buf)))
+    if "<<<OLD>>>" in raw_body and "<<<NEW>>>" in raw_body:
+        chunks = raw_body.split("<<<OLD>>>")
+        for part in chunks[1:]:
+            if "<<<NEW>>>" not in part:
+                continue
+            old_raw, new_raw = part.split("<<<NEW>>>", 1)
+            old_clean = old_raw.strip("\r\n")
+            new_clean = new_raw.strip("\r\n")
+            if old_clean:
+                hunks.append((old_clean, new_clean))
 
     return hunks
 
 
-def _apply_hunks_to_content(original_content: str, hunks: list[tuple[str, str]]) -> tuple[str, int, list[str]]:
-    updated = original_content
-    applied = 0
-    failed = []
+def _align_new_block_indent(matched_old_block: str, new_block: str) -> str:
+    old_lines = matched_old_block.splitlines()
+    new_lines = new_block.splitlines()
+    if not old_lines or not new_lines:
+        return new_block
 
-    for idx, (old_block, new_block) in enumerate(hunks, start=1):
-        if not old_block and new_block:
-            updated = updated.rstrip() + "\n\n" + new_block.lstrip("\n") + "\n"
-            applied += 1
-            continue
+    first_old = old_lines[0]
+    target_indent_len = len(first_old) - len(first_old.lstrip(" "))
+    target_indent = " " * max(0, target_indent_len)
 
-        if old_block in updated:
-            updated = updated.replace(old_block, new_block, 1)
-            applied += 1
+    non_empty = [ln for ln in new_lines if ln.strip()]
+    if not non_empty:
+        return "\n".join(["" for _ in new_lines])
+
+    min_new_indent = min((len(ln) - len(ln.lstrip(" ")) for ln in non_empty), default=0)
+    aligned = []
+    for ln in new_lines:
+        if not ln.strip():
+            aligned.append("")
         else:
-            norm_old = re.sub(r"[ \t]+", " ", old_block.strip())
-            norm_upd = re.sub(r"[ \t]+", " ", updated)
-            if norm_old and norm_old in norm_upd:
-                failed.append(f"Hunk #{idx}: whitespace/indentation mismatch")
-            else:
-                failed.append(f"Hunk #{idx}: target block not found")
-
-    return updated, applied, failed
+            cur_ind = len(ln) - len(ln.lstrip(" "))
+            rel_extra = max(0, cur_ind - min_new_indent)
+            aligned.append(target_indent + (" " * rel_extra) + ln.lstrip(" "))
+    return "\n".join(aligned)
 
 
-def _save_pending_deploy_info(info: dict):
-    """GitHub push ပြီးနောက် Render deploy ပြီးလျှင် အသိပေးရန် pending deploy info သိမ်းသည်။"""
-    global _PENDING_DEPLOY_MEM
-    _PENDING_DEPLOY_MEM = info
+def _find_matching_block_in_text(source_text: str, old_block: str) -> tuple[str | None, str]:
+    src_norm = source_text.replace("\r\n", "\n")
+    old_norm = old_block.replace("\r\n", "\n")
+
+    if not old_norm.strip():
+        return None, "အစားထိုးမယ့် မူရင်းစာသား (OLD/SEARCH) လိုအပ်ပါတယ်ရှင်"
+
+    exact_cnt = src_norm.count(old_norm)
+    if exact_cnt == 1:
+        return old_norm, ""
+    if exact_cnt > 1:
+        return None, f"တူညီနေတဲ့ စာသား {exact_cnt} နေရာ တွေ့နေပါတယ်၊ ပိုတိကျအောင် ထည့်ပေးပါရှင်"
+
+    old_lines = [ln.strip() for ln in old_norm.splitlines()]
+    while old_lines and old_lines[0] == "":
+        old_lines.pop(0)
+    while old_lines and old_lines[-1] == "":
+        old_lines.pop()
+
+    src_lines = src_norm.splitlines()
+    if not old_lines or len(src_lines) < len(old_lines):
+        return None, "အစားထိုးမယ့် မူရင်းစာသားကို ဖိုင်ထဲမှာ မတွေ့ပါဘူးရှင်"
+
+    candidates: list[str] = []
+    n_old = len(old_lines)
+    for i in range(len(src_lines) - n_old + 1):
+        win = src_lines[i:i + n_old]
+        if [w.strip() for w in win] == old_lines:
+            candidates.append("\n".join(win))
+
+    if len(candidates) == 1:
+        return candidates[0], ""
+    if len(candidates) > 1:
+        return None, f"Line-level မှာ တူညီနေတဲ့ စာသား {len(candidates)} နေရာ တွေ့နေပါတယ်၊ ပိုရှည်ပြီး တိကျတဲ့ line များ ထည့်ပေးပါရှင်"
+
+    return None, "အစားထိုးမယ့် မူရင်းစာသားကို ဖိုင်ထဲမှာ မတွေ့ပါဘူးရှင်"
+
+
+def apply_hunks_to_source(source_text: str, hunks: list[tuple[str, str]]) -> tuple[bool, str, str]:
+    cur_text = source_text.replace("\r\n", "\n")
+    for idx, (old_b, new_b) in enumerate(hunks, start=1):
+        matched_old, err = _find_matching_block_in_text(cur_text, old_b)
+        if not matched_old:
+            return False, cur_text, f"Hunk #{idx}: {err}"
+        aligned_new = _align_new_block_indent(matched_old, new_b)
+        cur_text = cur_text.replace(matched_old, aligned_new, 1)
+    return True, cur_text, ""
+
+
+def _save_pending_deploy_info(file_path: str, commit_sha: str):
     try:
-        payload_str = json.dumps(info, ensure_ascii=False)
-        supabase.table("daily_reports").insert({
-            "report_content": f"[RENDER_DEPLOY_PENDING] {payload_str}"
-        }).execute()
+        payload = {
+            "file_path": file_path,
+            "commit": commit_sha,
+            "pushed_at": datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT"),
+        }
+        with open(_PENDING_DEPLOY_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
     except Exception as e:
-        print(f"Warning: could not persist pending deploy marker to DB: {e}")
+        print(f"Pending deploy save error: {e}")
 
 
-def _pop_pending_deploy_info() -> dict | None:
-    """Startup ချိန်တွင် pending deploy info ရှိလျှင် ယူပြီး ရှင်းလင်းသည်။"""
-    global _PENDING_DEPLOY_MEM
-    found = _PENDING_DEPLOY_MEM
-    _PENDING_DEPLOY_MEM = None
-    try:
-        res = (
-            supabase.table("daily_reports")
-            .select("id, report_content")
-            .like("report_content", "[RENDER_DEPLOY_PENDING]%")
-            .order("id", desc=True)
-            .limit(10)
-            .execute()
-        )
-        rows = res.data or []
-        for r in rows:
-            raw_txt = str(r.get("report_content") or "")
-            json_part = raw_txt.replace("[RENDER_DEPLOY_PENDING]", "", 1).strip()
-            if not found and json_part:
-                try:
-                    found = json.loads(json_part)
-                except Exception:
-                    pass
-            try:
-                supabase.table("daily_reports").delete().eq("id", r["id"]).execute()
-            except Exception:
-                pass
-    except Exception as e:
-        print(f"Warning: could not read/clear pending deploy marker from DB: {e}")
-    return found
-
-
-async def notify_render_deploy_if_pending(app):
-    """Render deploy ပြီး၍ bot startup တက်လာချိန်တွင် pending deploy ရှိပါက Telegram ၌ အသိပေးသည်။"""
-    info = _pop_pending_deploy_info()
-    if not info or not ADMIN_USER_ID:
+async def notify_render_deploy_if_pending(application):
+    if not ADMIN_USER_ID or not os.path.exists(_PENDING_DEPLOY_FILE):
         return
-    file_name = info.get("file", "code")
-    sha = info.get("sha", "")
-    hunks_info = info.get("hunks", "")
-    now_mm = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
-    lines = [
-        "🚀 Render Deploy Success ဖြစ်သွားပါပြီရှင်!",
-        f"• File: `{file_name}`",
-    ]
-    if sha:
-        lines.append(f"• Commit: `{sha}`")
-    if hunks_info:
-        lines.append(f"• Hunks: {hunks_info}")
-    lines.append(f"• Time: {now_mm}")
     try:
-        await app.bot.send_message(chat_id=ADMIN_USER_ID, text="\n".join(lines), parse_mode="Markdown")
+        with open(_PENDING_DEPLOY_FILE, "r", encoding="utf-8") as f:
+            info = json.load(f)
+        try:
+            os.remove(_PENDING_DEPLOY_FILE)
+        except Exception:
+            pass
+
+        f_path = info.get("file_path") or "code"
+        c_sha = info.get("commit") or ""
+        now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
+        commit_part = f" (`{c_sha}`)" if c_sha else ""
+        await application.bot.send_message(
+            chat_id=ADMIN_USER_ID,
+            text=f"🚀 Render Deploy Success ဖြစ်သွားပါပြီရှင်!\n• File: `{f_path}`{commit_part}\n• Time: {now_str}",
+        )
     except Exception as e:
-        print(f"Error sending Render deploy notification: {e}")
-
-
-async def _send_github_file(target_file: str, reply_target):
-    content, _ = _github_get_file(target_file)
-    bio = io.BytesIO(content.encode("utf-8"))
-    bio.name = target_file
-    await reply_target.reply_document(
-        document=InputFile(bio, filename=target_file),
-        caption=f"📄 `{target_file}` (`{GITHUB_REPO}@{GITHUB_BRANCH}`)",
-        parse_mode="Markdown",
-    )
+        print(f"Deploy notify error: {e}")
 
 
 async def handle_patch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /patch <filename> ဖြင့် patch ကို dry-run စစ်ပြီး Confirm / Cancel button ဖြင့် အတည်ပြုခိုင်းသည်။
-    """
-    global _PATCH_SEQ
-    user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID:
+    if not update.message or update.effective_user.id != ADMIN_USER_ID:
         return
 
     raw_msg = update.message.text or ""
-    lines = raw_msg.splitlines()
-    first_line_parts = lines[0].strip().split(maxsplit=1) if lines else []
-    target_file = first_line_parts[1].strip() if len(first_line_parts) > 1 else "main.py"
-    target_file = os.path.basename(target_file)
-
-    if target_file not in ALLOWED_GITHUB_FILES:
-        allowed_str = ", ".join(sorted(ALLOWED_GITHUB_FILES))
+    body = raw_msg.split(None, 1)[1] if len(raw_msg.split(None, 1)) > 1 else ""
+    if not body.strip():
         await update.message.reply_text(
-            f"'{target_file}' ကို patch ခွင့်မပြုထားပါဘူးရှင်\nခွင့်ပြုထားသော ဖိုင်များ: {allowed_str}"
+            "Patch အသုံးပြုပုံ:\n"
+            "/patch voice_handler.py | commit message\n"
+            "<<<<<<< SEARCH\nမူရင်း code\n=======\nအသစ်ပြင်မယ့် code\n>>>>>>> REPLACE"
         )
         return
 
-    patch_body = "\n".join(lines[1:]).strip()
-    if not patch_body and update.message.reply_to_message and update.message.reply_to_message.text:
-        patch_body = update.message.reply_to_message.text.strip()
+    first_line = body.splitlines()[0].strip()
+    header_parts = [x.strip() for x in first_line.split("|", 1)]
+    target_file = _normalize_target_filename(header_parts[0])
+    commit_msg = header_parts[1] if len(header_parts) > 1 and header_parts[1] else f"Patch {target_file}"
+    patch_body = body.split("\n", 1)[1] if "\n" in body else ""
 
-    if not patch_body:
-        await update.message.reply_text(
-            "Patch အချက်အလက် ထည့်ပေးပါရှင်\n"
-            "ဥပမာ:\n"
-            "/patch main.py\n"
-            "<<<<<<< SEARCH\nold code\n=======\nnew code\n>>>>>>> REPLACE"
-        )
-        return
-
-    hunks = _parse_unified_or_search_replace_patch(patch_body)
+    hunks = _parse_patch_hunks(patch_body)
     if not hunks:
-        await update.message.reply_text("SEARCH/REPLACE block သို့မဟုတ် diff hunk ကို ဖတ်မရပါဘူးရှင်၊ format ပြန်စစ်ပေးပါ")
+        await update.message.reply_text("❌ SEARCH / REPLACE (သို့မဟုတ် OLD / NEW) block ကို မှန်ကန်စွာ ထည့်ပေးပါရှင်")
         return
 
-    try:
-        await update.message.reply_text(
-            f"🔍 `{target_file}` ({GITHUB_REPO}@{GITHUB_BRANCH}) အတွက် patch preview စစ်နေပါတယ်ရှင်...",
-            parse_mode="Markdown",
-        )
-        current_content, sha = _github_get_file(target_file)
-        new_content, applied_count, failed_list = _apply_hunks_to_content(current_content, hunks)
+    cur_file = await asyncio.to_thread(get_github_file, target_file, GITHUB_BRANCH)
+    if not cur_file.get("ok"):
+        await update.message.reply_text(f"❌ {cur_file.get('error')}")
+        return
 
-        if applied_count == 0:
-            fail_detail = "\n".join(failed_list) if failed_list else "No matching hunks"
-            await update.message.reply_text(f"❌ Patch မအောင်မြင်ပါရှင်:\n{fail_detail}")
+    ok_apply, preview_full, apply_err = apply_hunks_to_source(cur_file.get("content") or "", hunks)
+    if not ok_apply:
+        await update.message.reply_text(f"❌ {apply_err}")
+        return
+
+    if target_file.endswith(".py"):
+        try:
+            ast.parse(preview_full)
+        except SyntaxError as se:
+            await update.message.reply_text(f"❌ Syntax error ဖြစ်နိုင်ပါတယ်ရှင် — line {se.lineno}: {se.msg}")
             return
 
-        _PATCH_SEQ += 1
-        patch_id = f"p{_PATCH_SEQ}"
-        _PENDING_PATCHES[patch_id] = {
-            "target_file": target_file,
-            "new_content": new_content,
-            "sha": sha,
-            "applied_count": applied_count,
-            "total_hunks": len(hunks),
-            "failed_list": failed_list,
-        }
+    req_id = uuid.uuid4().hex[:10]
+    _PENDING_PATCHES[req_id] = {
+        "file_path": target_file,
+        "updated_content": preview_full,
+        "commit_message": commit_msg,
+        "branch": GITHUB_BRANCH,
+        "created_ts": time.time(),
+    }
 
-        preview_lines = [
-            f"🧩 Patch Confirm လိုအပ်ပါတယ်ရှင် — `{target_file}`",
-            f"• Branch: `{GITHUB_BRANCH}`",
-            f"• Matched hunks: {applied_count}/{len(hunks)}",
+    old_chars = sum(len(o) for o, _ in hunks)
+    new_chars = sum(len(n) for _, n in hunks)
+    preview_msg = (
+        f"⚠️ GitHub Patch အတည်ပြုချက် လိုအပ်ပါတယ်ရှင်\n"
+        f"• File: `{target_file}` (`{GITHUB_BRANCH}`)\n"
+        f"• Commit: `{commit_msg}`\n"
+        f"• Hunks: {len(hunks)} ခု | OLD: {old_chars} chars → NEW: {new_chars} chars"
+    )
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Confirm & Push", callback_data=f"patchok:{req_id}"),
+            InlineKeyboardButton("❌ Cancel", callback_data=f"patchno:{req_id}"),
         ]
-        if failed_list:
-            preview_lines.append("⚠️ မကိုက်ညီသည့် hunk များ: " + ", ".join(failed_list))
-        preview_lines.append("\nGitHub သို့ တင်ပြီး Render deploy ဆက်လုပ်မလားရှင်?")
-
-        kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Confirm & Push", callback_data=f"patchok:{patch_id}"),
-                InlineKeyboardButton("❌ Cancel", callback_data=f"patchno:{patch_id}"),
-            ]
-        ])
-        await update.message.reply_text("\n".join(preview_lines), reply_markup=kb, parse_mode="Markdown")
-    except Exception as e:
-        print(f"GitHub /patch preview error: {e}")
-        await update.message.reply_text(f"❌ Patch စစ်ဆေးရာမှာ error တက်ပါတယ်ရှင်:\n`{str(e)[:240]}`", parse_mode="Markdown")
+    ])
+    await update.message.reply_text(preview_msg, reply_markup=kb)
 
 
 async def handle_patch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Patch Confirm / Cancel inline button များကို ကိုင်တွယ်သည်။"""
     query = update.callback_query
     if not query or not query.from_user:
         return
     if query.from_user.id != ADMIN_USER_ID:
-        await query.answer()
+        await query.answer("Unauthorized.", show_alert=True)
         return
 
-    data = query.data or ""
     await query.answer()
-
-    if data.startswith("patchno:"):
-        patch_id = data.split(":", 1)[1].strip()
-        _PENDING_PATCHES.pop(patch_id, None)
-        await query.message.edit_text("🛑 Patch တင်ခြင်းကို Cancel လုပ်လိုက်ပါပြီရှင်။")
+    data = query.data or ""
+    if ":" not in data:
         return
 
-    if data.startswith("patchok:"):
-        patch_id = data.split(":", 1)[1].strip()
-        item = _PENDING_PATCHES.pop(patch_id, None)
-        if not item:
-            await query.message.edit_text("⚠️ ဒီ patch က သက်တမ်းကုန်သွားပါပြီ (သို့မဟုတ်) ပြီးသွားပါပြီရှင်။")
-            return
+    action_key, req_id = data.split(":", 1)
+    pending = _PENDING_PATCHES.pop(req_id, None)
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
-        target_file = item["target_file"]
-        new_content = item["new_content"]
-        sha = item["sha"]
-        applied_count = item["applied_count"]
-        total_hunks = item["total_hunks"]
-        failed_list = item["failed_list"]
+    if not pending:
+        await query.message.reply_text("ဒီ Patch request က သက်တမ်းကုန်သွားပါပြီ (သို့မဟုတ်) ပြီးသွားပါပြီရှင်")
+        return
 
-        try:
-            await query.message.edit_text(f"⏳ `{target_file}` ကို GitHub (`{GITHUB_BRANCH}`) သို့ push လုပ်နေပါတယ်ရှင်...", parse_mode="Markdown")
-            commit_msg = f"bot(/patch): update {target_file} ({applied_count} hunk(s) via သင်ဇာ)"
-            res_json = _github_put_file(target_file, new_content, sha, commit_msg)
-            commit_sha = ((res_json.get("commit") or {}).get("sha") or "")[:7]
+    if (time.time() - float(pending.get("created_ts") or 0)) > 900:
+        await query.message.reply_text("⏰ ၁၅ မိနစ်ကျော်သွားလို့ ဒီ Patch request ကို ပယ်ဖျက်လိုက်ပါပြီရှင်")
+        return
 
-            _save_pending_deploy_info({
-                "file": target_file,
-                "sha": commit_sha,
-                "hunks": f"{applied_count}/{total_hunks}",
-            })
+    if action_key == "patchno":
+        await query.message.reply_text(f"❌ `{pending.get('file_path')}` patch ကို ပယ်ဖျက်လိုက်ပါပြီရှင်")
+        return
 
-            status_msg = (
-                f"✅ `{target_file}` ကို GitHub (`{GITHUB_BRANCH}`) မှာ update တင်ပြီးပါပြီရှင်\n"
-                f"• Applied hunks: {applied_count}/{total_hunks}\n"
-                f"• Commit: `{commit_sha}`\n"
-                f"• Render auto-deploy ပြီးသွားရင် ထပ်အသိပေးပါ့မယ်ရှင်"
-            )
-            if failed_list:
-                status_msg += "\n⚠️ မကိုက်ညီသည့် hunk များ:\n" + "\n".join(failed_list)
-
-            await query.message.edit_text(status_msg, parse_mode="Markdown")
-        except Exception as e:
-            print(f"GitHub patch push error: {e}")
-            await query.message.edit_text(f"❌ GitHub push လုပ်ရာမှာ error တက်ပါတယ်ရှင်:\n`{str(e)[:240]}`", parse_mode="Markdown")
+    await context.bot.send_chat_action(chat_id=query.message.chat_id, action="typing")
+    res = await asyncio.to_thread(
+        upsert_github_file,
+        pending["file_path"],
+        pending["updated_content"],
+        pending["commit_message"],
+        pending["branch"],
+    )
+    if res.get("ok"):
+        _save_pending_deploy_info(res["path"], res.get("commit") or "")
+        await query.message.reply_text(
+            f"✅ `{res['path']}` ကို `{res['branch']}` ပေါ် push တင်ပြီးပါပြီရှင် (`{res['commit']}`)\n"
+            "Render ပြန်တက်လာရင် Deploy Success message ပြန်ပို့ပေးပါမယ်ရှင်"
+        )
+    else:
+        await query.message.reply_text(f"❌ Push မအောင်မြင်ပါရှင်:\n{res.get('error')}")
 
 
 async def getfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /getfile (သို့မဟုတ် /getfile <filename>) ဖြင့် ဖိုင်ရွေးရန် button ပြခြင်း သို့မဟုတ် ဖိုင်ကို document အဖြစ် ပို့ပေးခြင်း။
-    """
-    if not update.message or not update.effective_user:
-        return
-    if update.effective_user.id != ADMIN_USER_ID:
+    if not update.message or update.effective_user.id != ADMIN_USER_ID:
         return
 
-    raw = (update.message.text or "").strip()
-    parts = raw.split(maxsplit=1)
-    files_sorted = sorted(ALLOWED_GITHUB_FILES)
-
-    if len(parts) < 2 or not parts[1].strip():
-        if not files_sorted:
-            await update.message.reply_text("ခွင့်ပြုထားသော ဖိုင်စာရင်း မရှိသေးပါဘူးရှင်။")
+    raw_msg = update.message.text or ""
+    arg = raw_msg.split(None, 1)[1].strip() if len(raw_msg.split(None, 1)) > 1 else ""
+    if arg:
+        target_file = _normalize_target_filename(arg)
+        res = await asyncio.to_thread(get_github_file, target_file, GITHUB_BRANCH)
+        if not res.get("ok"):
+            await update.message.reply_text(f"❌ {res.get('error')}")
             return
-        rows = []
-        for i in range(0, len(files_sorted), 2):
-            pair = files_sorted[i:i + 2]
-            rows.append([
-                InlineKeyboardButton(f"📄 {fname}", callback_data=f"getfile:{fname}")
-                for fname in pair
-            ])
-        await update.message.reply_text(
-            "ယူလိုသည့် ဖိုင်ကို ရွေးနှိပ်ပါရှင်:",
-            reply_markup=InlineKeyboardMarkup(rows),
-        )
+        bio = requests.utils.io.BytesIO((res.get("content") or "").encode("utf-8"))
+        bio.name = target_file
+        await update.message.reply_document(document=bio, filename=target_file, caption=f"📄 {target_file} ({GITHUB_BRANCH})")
         return
 
-    target_file = os.path.basename(parts[1].strip())
-    if target_file not in ALLOWED_GITHUB_FILES:
-        allowed_str = ", ".join(files_sorted)
-        await update.message.reply_text(
-            f"'{target_file}' ကို ဖတ်ခွင့်မပြုထားပါဘူးရှင်\nခွင့်ပြုထားသော ဖိုင်များ: {allowed_str}"
-        )
-        return
-
-    try:
-        await _send_github_file(target_file, update.message)
-    except Exception as e:
-        print(f"GitHub /getfile error: {e}")
-        await update.message.reply_text(f"❌ ဖိုင်ယူရာမှာ error တက်ပါတယ်ရှင်:\n`{str(e)[:240]}`", parse_mode="Markdown")
+    req_id = uuid.uuid4().hex[:8]
+    _PENDING_GETFILES[req_id] = GITHUB_BRANCH
+    sorted_files = sorted(ALLOWED_GITHUB_FILES)
+    rows = [
+        [InlineKeyboardButton(f"📄 {fn}", callback_data=f"getfile:{req_id}:{fn}")]
+        for fn in sorted_files
+    ]
+    await update.message.reply_text("ဆွဲချလိုသည့် ဖိုင်ကို ရွေးပါရှင်:", reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def handle_getfile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /getfile button နှိပ်သည့်အခါ သက်ဆိုင်ရာ ဖိုင်ကို ပြန်ပို့ပေးသည်။
-    """
     query = update.callback_query
     if not query or not query.from_user:
         return
     if query.from_user.id != ADMIN_USER_ID:
-        await query.answer()
+        await query.answer("Unauthorized.", show_alert=True)
         return
 
-    data = query.data or ""
-    if not data.startswith("getfile:"):
+    await query.answer()
+    parts = (query.data or "").split(":", 2)
+    if len(parts) != 3:
+        return
+    _, req_id, fn = parts
+    branch = _PENDING_GETFILES.get(req_id, GITHUB_BRANCH)
+    res = await asyncio.to_thread(get_github_file, fn, branch)
+    if not res.get("ok"):
+        await query.message.reply_text(f"❌ {res.get('error')}")
         return
 
-    target_file = os.path.basename(data.split(":", 1)[1].strip())
-    await query.answer("ဖိုင်ယူနေပါတယ်...")
+    bio = requests.utils.io.BytesIO((res.get("content") or "").encode("utf-8"))
+    bio.name = fn
+    await query.message.reply_document(document=bio, filename=fn, caption=f"📄 {fn} ({branch})")
 
-    if target_file not in ALLOWED_GITHUB_FILES:
-        await query.message.reply_text(f"'{target_file}' ကို ဖတ်ခွင့်မပြုထားပါဘူးရှင်။")
-        return
 
+async def handle_py_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """ဖိုင်အလိုက် (.py) document ပို့တင်လျှင် GitHub သို့ တိုက်ရိုက် commit တင်ပေးသည်။"""
+    msg = update.message
+    if not msg or not msg.document:
+        return False
+    if update.effective_user.id != ADMIN_USER_ID:
+        return False
+
+    file_name = (msg.document.file_name or "").strip()
+    if not file_name.endswith(".py"):
+        return False
+
+    if file_name not in ALLOWED_GITHUB_FILES:
+        await msg.reply_text(
+            f"❌ '{file_name}' ကို ခွင့်ပြုထားသော ဖိုင်စာရင်းထဲ ထည့်မထားပါရှင် ({', '.join(sorted(ALLOWED_GITHUB_FILES))})"
+        )
+        return True
+
+    await context.bot.send_chat_action(chat_id=msg.chat_id, action="typing")
     try:
-        await _send_github_file(target_file, query.message)
+        tg_file = await msg.document.get_file()
+        raw_bytes = bytes(await tg_file.download_as_bytearray())
+        code_text = raw_bytes.decode("utf-8")
     except Exception as e:
-        print(f"GitHub getfile callback error: {e}")
-        await query.message.reply_text(f"❌ ဖိုင်ယူရာမှာ error တက်ပါတယ်ရှင်:\n`{str(e)[:240]}`", parse_mode="Markdown")
+        await msg.reply_text(f"❌ ဖိုင်ဖတ်ရာမှာ အဆင်မပြေ ဖြစ်သွားပါတယ်ရှင်: {type(e).__name__}")
+        return True
+
+    commit_msg = (msg.caption or "").strip()[:120] or f"Upload {file_name} via Thinzar"
+    res = await asyncio.to_thread(upsert_github_file, file_name, code_text, commit_msg, GITHUB_BRANCH)
+    if res.get("ok"):
+        _save_pending_deploy_info(res["path"], res.get("commit") or "")
+        await msg.reply_text(
+            f"✅ `{res['path']}` ကို `{res['branch']}` ပေါ် တင်ပြီးပါပြီရှင် (`{res['commit']}`)\n"
+            "Render ပြန်တက်လာရင် Deploy Success message ပြန်ပို့ပေးပါမယ်ရှင်"
+        )
+    else:
+        await msg.reply_text(f"❌ GitHub တင်ရာမှာ မအောင်မြင်ပါရှင်:\n{res.get('error')}")
+    return True
