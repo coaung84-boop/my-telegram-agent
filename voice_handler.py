@@ -91,18 +91,61 @@ def _humanize_dates_and_times_for_speech(text: str) -> str:
         _repl_dt,
         text,
     )
+    text = re.sub(r"\b(19|20)\d{2}-\d{1,2}-\d{1,2}\b", "", text)
+    text = re.sub(r"·\s*မြန်မာ\s*\d+\s*ခု.*$", "", text, flags=re.MULTILINE)
     text = re.sub(
-        r"\b(19|20)\d{2}-\d{1,2}-\d{1,2}\b",
+        r"\(\s*(?:တနင်္လာနေ့|အင်္ဂါနေ့|ဗုဒ္ဓဟူးနေ့|ကြာသပတေးနေ့|သောကြာနေ့|စနေနေ့|တနင်္ဂနွေနေ့)\s*\)",
         "",
         text,
     )
-    text = re.sub(r"·\s*မြန်မာ\s*\d+\s*ခု.*$", "", text, flags=re.MULTILINE)
-    text = re.sub(r"\(\s*(?:တနင်္လာနေ့|အင်္ဂါနေ့|ဗုဒ္ဓဟူးနေ့|ကြာသပတေးနေ့|သောကြာနေ့|စနေနေ့|တနင်္ဂနွေနေ့)\s*\)", "", text)
     return text
 
 
+def _to_spoken_chat_prose(raw_text: str) -> str:
+    """စာဖတ်ပြသလို မဖြစ်ဘဲ လူတစ်ယောက် ပွင့်ပွင့်လင်းလင်း ရင်းရင်းနှီးနှီး ပြောသလို ပြောင်းသည်။"""
+    text = re.sub(r"https?://\S+", "", raw_text)
+    text = re.sub(r"\[[^\]]+\]\([^\)]+\)", "", text)
+    text = re.sub(r"\[(Verified|Deduced|Unverified)\]", "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF]",
+        " ",
+        text,
+    )
+    text = _humanize_dates_and_times_for_speech(text)
+
+    # Structured labels/bullets တွေကို စကားပြောဟန်အဖြစ် ပြောင်းမယ်
+    text = re.sub(r"(?im)^\s*[-•*]+\s*key\s*point\s*:\s*", "အဓိက ကတော့ ", text)
+    text = re.sub(r"(?im)^\s*အကြံပြုချက်\s*:\s*", "သင်ဇာ့အနေနဲ့ ပြောရရင်တော့ ", text)
+    text = re.sub(r"(?im)^\s*\d+[\.\)]\s*", "", text)
+    text = re.sub(r"(?m)^\s*[-•*]+\s*", "", text)
+    text = re.sub(r"[*_`~#>\-]+", " ", text)
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    spoken_lines: list[str] = []
+    for ln in lines:
+        ln = re.sub(r"\s*:\s*", " ဆိုတာကတော့ ", ln)
+        ln = re.sub(r"\s+", " ", ln).strip()
+        if not ln:
+            continue
+        if not ln.endswith(("။", "၊", "!", "?")):
+            ln = f"{ln}။"
+        spoken_lines.append(ln)
+
+    combined = " ".join(spoken_lines)
+    combined = re.sub(r"\s+", " ", combined).strip()
+
+    if len(combined) > 380:
+        cut = combined[:380]
+        last_p = max(cut.rfind("။"), cut.rfind("၊"), cut.rfind(" "))
+        if last_p > 70:
+            cut = cut[: last_p + 1]
+        combined = f"{cut} ကျန်တဲ့ အသေးစိတ်ကိုတော့ စာထဲမှာ အပြည့်အစုံ ရေးပေးထားတယ်နော်။"
+
+    return combined
+
+
 def _build_conversational_speech(reply_text: str) -> str:
-    """စာသားအတိုင်း ခြောက်ကပ်ကပ် ရွတ်မယ့်အစား ရင်းရင်းနှီးနှီး ပွင့်ပွင့်လင်းလင်း စကားပြောသလို ပြင်သည်။"""
+    """Reply အားလုံးအတွက် ရင်းရင်းနှီးနှီး ပွင့်ပွင့်လင်းလင်း စကားပြောစာသား ထုတ်ပေးသည်။"""
     if not reply_text:
         return ""
 
@@ -120,30 +163,10 @@ def _build_conversational_speech(reply_text: str) -> str:
         return (
             f"အင်း၊ {title_clean} ကို မှတ်ထားလိုက်ပြီနော်။ "
             "အချိန်ရောက်ရင် သေချာ လှမ်းသတိပေးလိုက်မယ်။ "
-            "နောက်ထပ် ဘာလုပ်စရာ ရှိသေးလဲရှင်။"
+            "နောက်ထပ် ဘာလုပ်စရာ ရှိသေးလဲ ပြောပါဦး။"
         )
 
-    cleaned = re.sub(r"https?://\S+", "", raw)
-    cleaned = re.sub(r"\[[^\]]+\]\([^\)]+\)", "", cleaned)
-    cleaned = re.sub(r"\[(Verified|Deduced|Unverified)\]", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(
-        r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF]",
-        " ",
-        cleaned,
-    )
-    cleaned = _humanize_dates_and_times_for_speech(cleaned)
-    cleaned = re.sub(r"[*_`~#>\-]+", " ", cleaned)
-    cleaned = re.sub(r"\n+", "။ ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-
-    if len(cleaned) > 420:
-        cut = cleaned[:420]
-        last_p = max(cut.rfind("။"), cut.rfind("၊"), cut.rfind(" "))
-        if last_p > 80:
-            cut = cut[:last_p + 1]
-        cleaned = f"{cut} ကျန်တဲ့ အသေးစိတ်ကိုတော့ စာနဲ့ ရေးပို့ပေးထားပါတယ်နော်။"
-
-    return cleaned
+    return _to_spoken_chat_prose(raw)
 
 
 def _resolve_audio_extension_and_mime(voice_obj, is_voice_note: bool) -> tuple[str, str]:
@@ -220,65 +243,55 @@ def transcribe_voice_bytes(audio_bytes: bytes, mime_type: str = "audio/ogg", fil
 
 
 def _split_into_expressive_clauses(spoken_text: str) -> list[tuple[str, str]]:
-    """စာကြောင်းတွေကို အဖြတ်အတောက်နဲ့ အသံအနိမ့်အမြင့် အတက်အကျ ပါစေရန် clause အပိုင်းလိုက် ခွဲသည်။"""
-    raw_parts = [p.strip() for p in re.split(r"(?<=[။၊,])\s*", spoken_text) if p.strip()]
+    """စကားပြောကို ပေါ့ပါးတဲ့ clause အတိုလေးတွေခွဲပြီး အသံအနိမ့်အမြင့် အတက်အကျ ထည့်ပေးသည်။"""
+    raw_parts = [p.strip() for p in re.split(r"(?<=[။၊,!?])\s*", spoken_text) if p.strip()]
     clauses: list[tuple[str, str]] = []
 
     for part in raw_parts:
-        ends_period = part.endswith("။")
+        ends_period = part.endswith(("။", "!", "?"))
         ends_comma = part.endswith(("၊", ","))
-        core = re.sub(r"[။၊,]+$", "", part).strip()
+        core = re.sub(r"[။၊,!?]+$", "", part).strip()
         if not core:
             continue
 
-        # ရှည်တဲ့ clause ကို စကားလုံး ၅-၇ လုံးဝန်းကျင် ထပ်ခွဲပြီး အတက်အကျ ထည့်မယ်
         words = core.split()
-        if len(words) >= 8:
+        if len(words) >= 7:
             mid = len(words) // 2
             left = " ".join(words[:mid]).strip()
             right = " ".join(words[mid:]).strip()
             if left:
-                clauses.append((left, "mid_up"))
+                clauses.append((left, "lift"))
             if right:
-                clauses.append((right, "end_down" if ends_period else "comma_lift"))
+                clauses.append((right, "settle" if ends_period else "lift"))
         else:
-            if ends_period:
-                clauses.append((core, "end_down"))
-            elif ends_comma:
-                clauses.append((core, "comma_lift"))
-            else:
-                clauses.append((core, "mid_up"))
+            clauses.append((core, "settle" if ends_period else ("lift" if ends_comma else "mid")))
 
-    return clauses or [(spoken_text, "mid_up")]
+    return clauses or [(spoken_text, "mid")]
 
 
 async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
-    """Clause အလိုက် pitch နဲ့ rate အတက်အကျ ညှိပြီး လူသားဆန်ဆန် အသံအနိမ့်အမြင့်နဲ့ ထုတ်ပေးသည်။"""
+    """အသံပိုငယ်ပြီး နွေးထွေးတဲ့ voice tone တစ်မျိုးတည်းဖြင့် clause အလိုက် အတက်အကျနှင့် pause ထုတ်သည်။"""
     clauses = _split_into_expressive_clauses(spoken_text)
 
-    # စကားစုအလိုက် အသံအတက်အကျ pattern (အစ မြင့် -> အလယ် ပေါ့ပါး -> အဆုံး နည်းနည်းနှိမ့်ပြီး ရပ်နား)
-    pattern_cycle = [
-        ("+10Hz", "+18%", 0.08),
-        ("+4Hz", "+22%", 0.06),
-        ("+12Hz", "+14%", 0.14),
-        ("-3Hz", "+6%", 0.28),
+    # အသံငယ်တဲ့ pitch (+10Hz to +14Hz) ထဲမှာပဲ အတက်အကျ အနည်းငယ် ထည့်မယ်
+    lift_cycle = [
+        ("+12Hz", "+16%", 0.08),
+        ("+14Hz", "+19%", 0.07),
+        ("+11Hz", "+15%", 0.11),
     ]
 
     out_buf = io.BytesIO()
     for idx, (clause_txt, role) in enumerate(clauses):
-        if role == "end_down":
-            pitch = "-4Hz" if idx % 2 == 0 else "-2Hz"
-            rate = "+5%"
-            pause_sec = 0.28
-        elif role == "comma_lift":
-            pitch = "+12Hz"
-            rate = "+15%"
-            pause_sec = 0.14
+        if role == "settle":
+            pitch = "+9Hz"
+            rate = "+11%"
+            pause_sec = 0.24
+        elif role == "lift":
+            pitch = "+14Hz"
+            rate = "+17%"
+            pause_sec = 0.12
         else:
-            p_base, r_base, _ = pattern_cycle[idx % len(pattern_cycle)]
-            pitch = p_base
-            rate = r_base
-            pause_sec = 0.07
+            pitch, rate, pause_sec = lift_cycle[idx % len(lift_cycle)]
 
         communicate = edge_tts.Communicate(
             text=clause_txt,
@@ -303,7 +316,7 @@ async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
 
 
 async def send_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, reply_text: str):
-    """ရင်းရင်းနှီးနှီး ပွင့်ပွင့်လင်းလင်းနဲ့ အသံအနိမ့်အမြင့် အတက်အကျပါတဲ့ Telegram voice note ပို့ပေးသည်။"""
+    """Reply အားလုံးအတွက် ရင်းရင်းနှီးနှီး ပွင့်ပွင့်လင်းလင်းနဲ့ အသံငယ်တဲ့ voice note ပို့ပေးသည်။"""
     spoken = _build_conversational_speech(reply_text)
     if not spoken:
         return
