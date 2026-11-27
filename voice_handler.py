@@ -463,32 +463,6 @@ async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
         else:
             mm_pitch, mm_rate, mm_pause = lift_cycle[idx % len(lift_cycle)]
 
-        sub_segs = _split_burmese_and_english_segments(clause_txt)
-        for s_idx, (kind, seg_txt) in enumerate(sub_segs):
-            if kind == "en":
-                if s_idx > 0:
-                    await asyncio.sleep(0.03)
-                communicate = edge_tts.Communicate(
-                    text=seg_txt,
-                    voice="my-MM-NilarNeural",
-                    rate="-2%",
-                    pitch="+11Hz",
-                )
-                async for ev in communicate.stream():
-                    if ev.get("type") == "audio" and ev.get("data"):
-                        out_buf.write(ev["data"])
-                await asyncio.sleep(0.03)
-            else:
-                communicate = edge_tts.Communicate(
-                    text=seg_txt,
-                    voice="my-MM-NilarNeural",
-                    rate=mm_rate,
-                    pitch=mm_pitch,
-                )
-                async for ev in communicate.stream():
-                    if ev.get("type") == "audio" and ev.get("data"):
-                        out_buf.write(ev["data"])
-
         # မြန်မာနဲ့ English ကြား အရှိန်နဲ့ pitch သိပ်မကွာဘဲ ပိုကပ်စေရန် ညှိထားသည်
         en_pitch = mm_pitch
         en_rate = "+4%"
