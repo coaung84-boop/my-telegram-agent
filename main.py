@@ -18,6 +18,9 @@ from ai_engine import call_ai_with_3tier_fallback
 from memory_manager import (
     save_chat_message,
     update_core_rule_version,
+    edit_core_rule_line,
+    delete_core_rule_line,
+    get_core_rule_lines,
     get_skill_versions_summary,
     evolve_user_profile,
     recall_relevant_history,
@@ -54,6 +57,8 @@ from github_ops import (
     notify_render_deploy_if_pending,
 )
 
+_PENDING_RULE_INPUT: dict[int, dict] = {}
+
 
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -79,6 +84,16 @@ def _build_groups_keyboard(groups: list[str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def _build_skills_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📌 လက်ရှိ Rule", callback_data="rule:view")],
+        [
+            InlineKeyboardButton("✏️ ပြင်ရန်", callback_data="rule:edit_list"),
+            InlineKeyboardButton("➕ အသစ်ထည့်ရန်", callback_data="rule:add_prompt"),
+        ],
+    ])
+
+
 # --- Command Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
@@ -92,8 +107,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /groups — Group ရွေးပြီး Report ထုတ်ရန်\n"
         "• /groupsummary — Group Summary (Today/Yesterday)\n"
         "• /news [local|intl] [topic] — ပြည်တွင်း/နိုင်ငံတကာ သတင်းအနှစ်ချုပ်\n"
-        "• /skills — Locked Core Rules & Version မှတ်တမ်း\n"
-        "• /setrule <rule> — Core Rule အသစ်ထည့်ပြီး version တိုးရန်\n"
+        "• /skills — Core Rules (ကြည့်ရန် / ပြင်ရန် / အသစ်ထည့်ရန်)\n"
         "• /patch <file> — GitHub ဖိုင် patch လုပ်ရန်\n"
         "• /getfile — GitHub ဖိုင်ဆွဲချရန်"
     )
@@ -116,7 +130,10 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def skills_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         return
-    await update.message.reply_text(get_skill_versions_summary(update.effective_user.id))
+    await update.message.reply_text(
+        "⚙️ Core Rules စီမံရန် ရွေးချယ်ပါရှင်:",
+        reply_markup=_build_skills_menu_keyboard(),
+    )
 
 
 async def setrule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -127,12 +144,108 @@ async def setrule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rule_text = parts[1].strip() if len(parts) > 1 else ""
     if not rule_text:
         await update.message.reply_text(
-            "ထည့်လိုသည့် Rule စာသားလေး ရေးပေးပါရှင်\nဥပမာ: `/setrule အဖြေများကို တိုတိုနှင့် လိုရင်းတိုရှင်း ရေးပါ`",
-            parse_mode="Markdown",
+            "⚙️ Core Rules စီမံရန် ရွေးချယ်ပါရှင်:",
+            reply_markup=_build_skills_menu_keyboard(),
         )
         return
     msg = update_core_rule_version(update.effective_user.id, rule_text, note=f"/setrule: {rule_text[:60]}")
     await update.message.reply_text(msg)
+
+
+async def handle_rule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    user_id = query.from_user.id
+    if user_id != ADMIN_USER_ID:
+        await query.answer()
+        return
+
+    data = query.data or ""
+    await query.answer()
+
+    if data == "rule:menu":
+        _PENDING_RULE_INPUT.pop(user_id, None)
+        await query.message.edit_text(
+            "⚙️ Core Rules စီမံရန် ရွေးချယ်ပါရှင်:",
+            reply_markup=_build_skills_menu_keyboard(),
+        )
+        return
+
+    if data == "rule:view":
+        summary = get_skill_versions_summary(user_id)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="rule:menu")]])
+        await query.message.edit_text(summary, reply_markup=kb)
+        return
+
+    if data == "rule:add_prompt":
+        _PENDING_RULE_INPUT[user_id] = {"mode": "add"}
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="rule:menu")]])
+        await query.message.edit_text(
+            "➕ ထည့်လိုသည့် Core Rule အသစ်ကို စာရိုက်ပို့ပေးပါရှင်:",
+            reply_markup=kb,
+        )
+        return
+
+    if data == "rule:edit_list":
+        rule_lines = get_core_rule_lines(user_id)
+        rows = []
+        for idx, r_txt in enumerate(rule_lines):
+            short_txt = r_txt[:34] + ("..." if len(r_txt) > 34 else "")
+            rows.append([InlineKeyboardButton(f"{idx + 1}. {short_txt}", callback_data=f"rule:pick:{idx}")])
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data="rule:menu")])
+        await query.message.edit_text(
+            "✏️ ပြင်ဆင်/ဖျက်လိုသည့် Rule ကို ရွေးပါရှင်:",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+
+    if data.startswith("rule:pick:"):
+        try:
+            idx = int(data.split(":", 2)[2])
+        except ValueError:
+            return
+        rule_lines = get_core_rule_lines(user_id)
+        if not (0 <= idx < len(rule_lines)):
+            return
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✏️ ပြင်မယ်", callback_data=f"rule:do_edit:{idx}"),
+                InlineKeyboardButton("🗑 ဖျက်မယ်", callback_data=f"rule:do_del:{idx}"),
+            ],
+            [InlineKeyboardButton("⬅️ Back", callback_data="rule:edit_list")],
+        ])
+        await query.message.edit_text(
+            f"📌 Rule #{idx + 1}:\n{rule_lines[idx]}\n\nဘာလုပ်ချင်လဲ ရွေးပါရှင်:",
+            reply_markup=kb,
+        )
+        return
+
+    if data.startswith("rule:do_edit:"):
+        try:
+            idx = int(data.split(":", 2)[2])
+        except ValueError:
+            return
+        rule_lines = get_core_rule_lines(user_id)
+        if not (0 <= idx < len(rule_lines)):
+            return
+        _PENDING_RULE_INPUT[user_id] = {"mode": "edit", "index": idx}
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"rule:pick:{idx}")]])
+        await query.message.edit_text(
+            f"✏️ Rule #{idx + 1} လက်ရှိစာသား:\n{rule_lines[idx]}\n\nအသစ်ပြင်လိုသည့် Rule စာသားကို ရိုက်ပို့ပေးပါရှင်:",
+            reply_markup=kb,
+        )
+        return
+
+    if data.startswith("rule:do_del:"):
+        try:
+            idx = int(data.split(":", 2)[2])
+        except ValueError:
+            return
+        res_msg = delete_core_rule_line(user_id, idx)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Rule Menu", callback_data="rule:menu")]])
+        await query.message.edit_text(res_msg, reply_markup=kb)
+        return
 
 
 async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -233,8 +346,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /groups — Group ရွေးပြီး Report ထုတ်ရန်\n"
         "• /groupsummary — Group Summary (Today/Yesterday)\n"
         "• /news — သတင်းအနှစ်ချုပ်\n"
-        "• /skills — Core Rules\n"
-        "• /setrule — Rule ထည့်ရန်\n"
+        "• /skills — Core Rules (ကြည့်ရန် / ပြင်ရန် / အသစ်ထည့်ရန်)\n"
         "• /patch — GitHub ဖိုင် patch လုပ်ရန်\n"
         "• /getfile — GitHub ဖိုင်ဆွဲချရန်"
     )
@@ -384,6 +496,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_text and not image_bytes:
         return
 
+    if user_id in _PENDING_RULE_INPUT and user_text and not image_bytes:
+        pending_rule = _PENDING_RULE_INPUT.pop(user_id)
+        mode = pending_rule.get("mode")
+        if mode == "add":
+            res_msg = update_core_rule_version(user_id, user_text, note=f"Add rule: {user_text[:60]}")
+        elif mode == "edit":
+            res_msg = edit_core_rule_line(user_id, int(pending_rule.get("index", -1)), user_text)
+        else:
+            res_msg = "လုပ်ဆောင်ချက် မသေချာပါဘူးရှင်"
+        await update.message.reply_text(res_msg, reply_markup=_build_skills_menu_keyboard())
+        return
+
     await context.bot.send_chat_action(chat_id=chat.id, action="typing")
     save_chat_message(user_id, "user", user_text)
 
@@ -460,8 +584,7 @@ async def post_init(application):
         BotCommand("groups", "Group ရွေးပြီး Report ထုတ်ရန်"),
         BotCommand("groupsummary", "Group Summary (Today/Yesterday)"),
         BotCommand("news", "သတင်းအနှစ်ချုပ်"),
-        BotCommand("skills", "Core Rules မှတ်တမ်း"),
-        BotCommand("setrule", "Core Rule အသစ်ထည့်ရန်"),
+        BotCommand("skills", "Core Rules (ကြည့်/ပြင်/ထည့်)"),
         BotCommand("patch", "GitHub ဖိုင် patch လုပ်ရန်"),
         BotCommand("getfile", "GitHub ဖိုင်ဆွဲချရန်"),
     ])
@@ -496,6 +619,7 @@ def main():
     app.add_handler(CommandHandler("getfile", getfile_command))
     app.add_handler(CallbackQueryHandler(handle_getfile_callback, pattern=r"^getfile:"))
     app.add_handler(CallbackQueryHandler(handle_patch_callback, pattern=r"^patch(ok|no):"))
+    app.add_handler(CallbackQueryHandler(handle_rule_callback, pattern=r"^rule:"))
     app.add_handler(CallbackQueryHandler(
         handle_groupsummary_callback,
         pattern=r"^(gsummary:|grpsel:|grpday:|grpback)",
