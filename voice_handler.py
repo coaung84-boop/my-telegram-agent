@@ -1,6 +1,7 @@
 import os
 import re
 import io
+import json
 import asyncio
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,10 @@ from task_manager import (
 from group_news_search import get_available_group_names, handle_group_query, perform_hybrid_web_search
 
 MM_TZ = timezone(timedelta(hours=6, minutes=30))
+
+# Per-user voice tone/intent profile & pending voice clarification state
+_VOICE_PROFILES: dict[int, list[dict]] = {}
+_PENDING_VOICE_CLARIFICATION: dict[int, dict] = {}
 
 
 def _number_to_mm_words(n: int) -> str:
@@ -65,7 +70,6 @@ def _humanize_time_phrase(h: int, m: int) -> str:
 
 
 def _humanize_dates_and_times_for_speech(text: str) -> str:
-    """ISO date/time နဲ့ မြန်မာပြက္ခဒိန် အရှည်ကြီးတွေကို အရပ်သုံးစကားပြောပုံစံ ပြောင်းသည်။"""
     now_mm = datetime.now(MM_TZ)
     today_d = now_mm.date()
     tmr_d = (now_mm + timedelta(days=1)).date()
@@ -102,7 +106,6 @@ def _humanize_dates_and_times_for_speech(text: str) -> str:
 
 
 def _to_spoken_chat_prose(raw_text: str) -> str:
-    """စာဖတ်ပြသလို မဖြစ်ဘဲ လူတစ်ယောက် ပွင့်ပွင့်လင်းလင်း ရင်းရင်းနှီးနှီး ပြောသလို ပြောင်းသည်။"""
     text = re.sub(r"https?://\S+", "", raw_text)
     text = re.sub(r"\[[^\]]+\]\([^\)]+\)", "", text)
     text = re.sub(r"\[(Verified|Deduced|Unverified)\]", "", text, flags=re.IGNORECASE)
@@ -113,7 +116,6 @@ def _to_spoken_chat_prose(raw_text: str) -> str:
     )
     text = _humanize_dates_and_times_for_speech(text)
 
-    # Structured labels/bullets တွေကို စကားပြောဟန်အဖြစ် ပြောင်းမယ်
     text = re.sub(r"(?im)^\s*[-•*]+\s*key\s*point\s*:\s*", "အဓိက ကတော့ ", text)
     text = re.sub(r"(?im)^\s*အကြံပြုချက်\s*:\s*", "သင်ဇာ့အနေနဲ့ ပြောရရင်တော့ ", text)
     text = re.sub(r"(?im)^\s*\d+[\.\)]\s*", "", text)
@@ -145,7 +147,6 @@ def _to_spoken_chat_prose(raw_text: str) -> str:
 
 
 def _build_conversational_speech(reply_text: str) -> str:
-    """Reply အားလုံးအတွက် ရင်းရင်းနှီးနှီး ပွင့်ပွင့်လင်းလင်း စကားပြောစာသား ထုတ်ပေးသည်။"""
     if not reply_text:
         return ""
 
@@ -197,53 +198,132 @@ def _resolve_audio_extension_and_mime(voice_obj, is_voice_note: bool) -> tuple[s
     return (".ogg", "audio/ogg") if is_voice_note else (".mp3", "audio/mpeg")
 
 
-def transcribe_voice_bytes(audio_bytes: bytes, mime_type: str = "audio/ogg", filename: str = "voice.ogg") -> str:
-    """Gemini audio understanding ကို ဦးစားပေးသုံးပြီး Groq Whisper fallback ထားသည်။"""
-    if not audio_bytes:
+def transcribe_and_analyze_voice(
+    audio_bytes: bytes,
+    mime_type: str = "audio/ogg",
+    filename: str = "voice.ogg",
+    voice_profile_ctx: str = "",
+) -> dict:
+    transcript = ""
+    tone_label = "သဘာဝကျကျ/ပုံမှန်"
+    intent_hint = "GENERAL"
+    ambiguous = False
+    clarification_q = ""
+    interpreted_meaning = ""
+
+    if audio_bytes:
+        audio_part = types.Part.from_bytes(data=bytes(audio_bytes), mime_type=mime_type or "audio/ogg")
+        prompt = f"""
+နားထောင်ပြီး ဒီအသံဖိုင်ကို ခွဲခြမ်းစိတ်ဖြာပေးပါ။
+အရင် Voice Tone & Meaning Profile:
+{voice_profile_ctx or "မှတ်တမ်းမရှိသေးပါ"}
+
+Return ONLY valid JSON:
+{{
+  "transcript": "ပြောထားတဲ့စကားကို မြန်မာ (Unicode) / English မှန်ကန်အောင် စာပြန်ရေးထားချက်",
+  "tone": "အသံနေအသံထား (ဥပမာ — အလောတကြီး/စိတ်စောနေတာ၊ အေးအေးဆေးဆေး/စဉ်းစားနေတာ၊ သေချာမေးမြန်းတာ၊ တိုတိုတုတ်တုတ် ခိုင်းတာ)",
+  "intent_hint": "TASK | GROUP | WEB_SEARCH | GENERAL",
+  "interpreted_meaning": "ဒီလေသံနဲ့ ဒီစကားရဲ့ အဓိက ဆိုလိုရင်းကို တိုတိုရှင်းရှင်း ဖော်ပြချက်",
+  "ambiguous": true or false,
+  "clarification_question": "ambiguous ဖြစ်ရင် 'ဒါကို ဆိုလိုတာလားရှင်' လို့ သဘာဝကျကျ မေးတဲ့ မေးခွန်းတို"
+}}
+
+Rules:
+- transcript မှာ ကြားသည့်အတိုင်း တိတိကျကျ ရေးပါ။
+- အသံပြတ်တောက်တာ၊ စကားမပြည့်စုံတာ၊ ဒါမှမဟုတ် အဓိပ္ပာယ် နှစ်မျိုးဖြစ်နိုင်ရင် ambiguous=true ထားပြီး clarification_question မှာ 'ဒါကို ဆိုလိုတာလားရှင်' ဆိုတဲ့ ဟန်နဲ့ တိုတိုရှင်းရှင်း မေးပါ။
+- အရင်က အလားတူ လေသံ/အခြေအနေမျိုးမှာ ဘာကို ဆိုလိုလေ့ရှိလဲ ဆိုတာကိုလည်း ထည့်စဉ်းစားပါ။
+"""
+        for model_name in ("gemini-3.5-flash-lite", "gemini-3.8-flash"):
+            try:
+                resp = gemini_client.models.generate_content(
+                    model=model_name,
+                    contents=[audio_part, prompt],
+                    config=types.GenerateContentConfig(temperature=0.1),
+                )
+                raw = (resp.text or "").strip() if resp else ""
+                m = re.search(r"\{.*\}", raw, re.DOTALL)
+                if m:
+                    parsed = json.loads(m.group(0))
+                    if isinstance(parsed, dict) and parsed.get("transcript"):
+                        return {
+                            "transcript": str(parsed["transcript"]).strip(),
+                            "tone": str(parsed.get("tone") or tone_label).strip(),
+                            "intent_hint": str(parsed.get("intent_hint") or intent_hint).strip().upper(),
+                            "interpreted_meaning": str(parsed.get("interpreted_meaning") or "").strip(),
+                            "ambiguous": bool(parsed.get("ambiguous", False)),
+                            "clarification_question": str(parsed.get("clarification_question") or "").strip(),
+                        }
+                if raw and not raw.startswith("{"):
+                    transcript = raw
+                    break
+            except Exception as e:
+                print(f"[Voice Analysis {model_name} Error]: {e}")
+
+    if not transcript and audio_bytes:
+        for model_name in ("whisper-large-v3-turbo", "whisper-large-v3"):
+            try:
+                bio = io.BytesIO(bytes(audio_bytes))
+                bio.name = filename
+                transcription = groq_client.with_options(timeout=25.0).audio.transcriptions.create(
+                    file=(filename, bio, mime_type or "audio/ogg"),
+                    model=model_name,
+                    response_format="json",
+                )
+                txt = (
+                    transcription
+                    if isinstance(transcription, str)
+                    else getattr(transcription, "text", "") or ""
+                ).strip()
+                if txt:
+                    transcript = txt
+                    break
+            except Exception as e:
+                print(f"[Voice Whisper {model_name} Error]: {e}")
+
+    return {
+        "transcript": transcript,
+        "tone": tone_label,
+        "intent_hint": intent_hint,
+        "interpreted_meaning": interpreted_meaning or transcript,
+        "ambiguous": ambiguous,
+        "clarification_question": clarification_q,
+    }
+
+
+def _record_voice_profile(user_id: int, transcript: str, tone: str, meaning: str):
+    now_str = datetime.now(MM_TZ).strftime("%m-%d %H:%M")
+    entry = {
+        "time": now_str,
+        "tone": tone,
+        "meaning": meaning or transcript[:80],
+        "sample": transcript[:80],
+    }
+    hist = _VOICE_PROFILES.setdefault(user_id, [])
+    hist.append(entry)
+    if len(hist) > 12:
+        del hist[:-12]
+
+    try:
+        evolve_user_profile(
+            user_id,
+            f"[Voice Tone: {tone}] {transcript}",
+            f"[Voice Meaning Profile]: လေသံ '{tone}' ဖြင့် ပြောခဲ့သော ဆိုလိုရင်းမှာ '{meaning or transcript[:80]}' ဖြစ်သည်။",
+        )
+    except Exception:
+        pass
+
+
+def _get_voice_profile_summary(user_id: int) -> str:
+    hist = _VOICE_PROFILES.get(user_id) or []
+    if not hist:
         return ""
-
-    audio_part = types.Part.from_bytes(data=bytes(audio_bytes), mime_type=mime_type or "audio/ogg")
-    prompt = (
-        "ဒီအသံဖိုင်ထဲမှာ ပြောထားတဲ့ စကားကို ကြားသည့်အတိုင်း တိတိကျကျ စာသား (Transcript) ပြန်ရေးပေးပါ။ "
-        "မြန်မာစကားဆိုရင် မြန်မာစာ (Unicode) နဲ့ ရေးပြီး၊ အင်္ဂလိပ်စကားလုံး/ကိန်းဂဏန်း ပါရင်လည်း မှန်ကန်အောင် ထည့်ရေးပါ။ "
-        "အပိုရှင်းလင်းချက် မထည့်ဘဲ ပြောတဲ့စကားကိုသာ တိုက်ရိုက် ထုတ်ပေးပါ။"
-    )
-    for model_name in ("gemini-3.5-flash-lite", "gemini-3.8-flash"):
-        try:
-            resp = gemini_client.models.generate_content(
-                model=model_name,
-                contents=[audio_part, prompt],
-                config=types.GenerateContentConfig(temperature=0.0),
-            )
-            if resp and resp.text and resp.text.strip():
-                return resp.text.strip()
-        except Exception as e:
-            print(f"[Voice STT {model_name} Error]: {e}")
-
-    for model_name in ("whisper-large-v3-turbo", "whisper-large-v3"):
-        try:
-            bio = io.BytesIO(bytes(audio_bytes))
-            bio.name = filename
-            transcription = groq_client.with_options(timeout=25.0).audio.transcriptions.create(
-                file=(filename, bio, mime_type or "audio/ogg"),
-                model=model_name,
-                response_format="json",
-            )
-            txt = (
-                transcription
-                if isinstance(transcription, str)
-                else getattr(transcription, "text", "") or ""
-            ).strip()
-            if txt:
-                return txt
-        except Exception as e:
-            print(f"[Voice Whisper {model_name} Error]: {e}")
-
-    return ""
-
-
+    lines = [
+        f"- [{item['time']}] လေသံ: {item['tone']} | ဆိုလိုရင်း: {item['meaning']} (စကား: \"{item['sample']}\")"
+        for item in hist[-6:]
+    ]
+    return "\n".join(lines)
+  
 def _split_into_expressive_clauses(spoken_text: str) -> list[tuple[str, str]]:
-    """စကားပြောကို ပေါ့ပါးတဲ့ clause အတိုလေးတွေခွဲပြီး အသံအနိမ့်အမြင့် အတက်အကျ ထည့်ပေးသည်။"""
     raw_parts = [p.strip() for p in re.split(r"(?<=[။၊,!?])\s*", spoken_text) if p.strip()]
     clauses: list[tuple[str, str]] = []
 
@@ -270,7 +350,6 @@ def _split_into_expressive_clauses(spoken_text: str) -> list[tuple[str, str]]:
 
 
 def _split_burmese_and_english_segments(text: str) -> list[tuple[str, str]]:
-    """Clause တစ်ခုကို မြန်မာအပိုင်း ('mm') နဲ့ English/Latin အပိုင်း ('en') ခွဲထုတ်သည်။"""
     parts = re.findall(r"[A-Za-z0-9][A-Za-z0-9\s\.\-\/]*[A-Za-z0-9]|[A-Za-z]+|[^A-Za-z]+", text)
     segments: list[tuple[str, str]] = []
     for p in parts:
@@ -285,7 +364,6 @@ def _split_burmese_and_english_segments(text: str) -> list[tuple[str, str]]:
 
 
 async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
-    """မြန်မာစာကို သွက်သွက်ပြောပြီး English အပိုင်းများတွင် ခြားပြီး ပိုနှေးနှေး ဖတ်ပြသည်။"""
     clauses = _split_into_expressive_clauses(spoken_text)
 
     lift_cycle = [
@@ -340,8 +418,8 @@ async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
         f.write(audio_data)
     return os.path.exists(out_path) and os.path.getsize(out_path) > 0
 
+
 async def send_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, reply_text: str):
-    """Reply အားလုံးအတွက် ရင်းရင်းနှီးနှီး ပွင့်ပွင့်လင်းလင်းနဲ့ အသံငယ်တဲ့ voice note ပို့ပေးသည်။"""
     spoken = _build_conversational_speech(reply_text)
     if not spoken:
         return
@@ -384,8 +462,32 @@ async def send_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, r
                 pass
 
 
+def _resolve_pending_clarification(user_id: int, transcript_text: str) -> str | None:
+    pending = _PENDING_VOICE_CLARIFICATION.get(user_id)
+    if not pending:
+        return None
+
+    low = transcript_text.strip().lower()
+    yes_tokens = ["ဟုတ်", "ဟုတ်တယ်", "ဟုတ်ကဲ့", "အင်း", "အဲဒါပဲ", "မှန်တယ်", "yes", "yeah", "yep", "ok", "okay"]
+    no_tokens = ["မဟုတ်", "မဟုတ်ဘူး", "မှားတယ်", "no", "nope", "wrong"]
+
+    if any(tok in low for tok in yes_tokens):
+        _PENDING_VOICE_CLARIFICATION.pop(user_id, None)
+        orig_text = pending.get("original_transcript") or pending.get("suggested_meaning") or ""
+        orig_route = pending.get("suggested_route") or {}
+        if orig_route.get("intent") == "TASK":
+            return handle_task_intent(orig_text, orig_route)
+        return orig_text or None
+
+    if any(tok in low for tok in no_tokens):
+        _PENDING_VOICE_CLARIFICATION.pop(user_id, None)
+        return "ဟုတ်ကဲ့ရှင်၊ ဒါဆို ဘယ်လို ဆိုလိုတာလဲ အသေးစိတ် ပြန်ပြောပြပေးပါဦးနော်။"
+
+    _PENDING_VOICE_CLARIFICATION.pop(user_id, None)
+    return None
+
+
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User ပို့လိုက်သော voice/audio message ကို စာသားပြောင်းပြီး စာရော အသံပါ ပြန်ဖြေသည်။"""
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID:
         return
@@ -400,14 +502,47 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         tg_file = await context.bot.get_file(voice.file_id)
         audio_bytes = bytes(await tg_file.download_as_bytearray())
 
-        transcript_text = await asyncio.to_thread(
-            transcribe_voice_bytes, audio_bytes, mime_type, f"voice{ext}"
+        voice_profile_ctx = _get_voice_profile_summary(user_id)
+        analysis = await asyncio.to_thread(
+            transcribe_and_analyze_voice,
+            audio_bytes,
+            mime_type,
+            f"voice{ext}",
+            voice_profile_ctx,
         )
+
+        transcript_text = (analysis.get("transcript") or "").strip()
         if not transcript_text:
-            await update.message.reply_text("အသံကို နားထောင်ရာမှာ ခဏပြတ်တောက်သွားပါတယ်ရှင်၊ ထပ်ပြောကြည့်ပေးပါ")
+            _PENDING_VOICE_CLARIFICATION[user_id] = {
+                "original_transcript": "",
+                "suggested_meaning": "အသံပြတ်တောက်သွားသော voice message",
+                "suggested_route": {},
+            }
+            clarify_msg = "အသံကို နည်းနည်း မရှင်းလိုက်ဘူးရှင်၊ ဒါကို ဆိုလိုတာလားလို့ သေချာမဖမ်းမိလိုက်လို့ တစ်ခေါက်လောက် ပြန်ပြောပေးပါလားရှင်။"
+            await update.message.reply_text(clarify_msg)
+            await send_voice_reply(update, context, clarify_msg)
             return
 
-        save_chat_message(user_id, "user", f"[Voice]: {transcript_text}")
+        tone_label = analysis.get("tone") or "သဘာဝကျကျ"
+        meaning_hint = analysis.get("interpreted_meaning") or transcript_text
+        _record_voice_profile(user_id, transcript_text, tone_label, meaning_hint)
+        save_chat_message(user_id, "user", f"[Voice | {tone_label}]: {transcript_text}")
+
+        resolved_from_pending = _resolve_pending_clarification(user_id, transcript_text)
+        if resolved_from_pending is not None:
+            if resolved_from_pending.startswith("ဟုတ်ကဲ့ရှင်၊ ဒါဆို"):
+                save_chat_message(user_id, "assistant", resolved_from_pending)
+                await update.message.reply_text(f"🎙️ \"{transcript_text}\"\n\n{resolved_from_pending}")
+                await send_voice_reply(update, context, resolved_from_pending)
+                return
+            if resolved_from_pending and "မှတ်ထားလိုက်ပါပြီ" in resolved_from_pending:
+                save_chat_message(user_id, "assistant", resolved_from_pending)
+                evolve_user_profile(user_id, transcript_text, resolved_from_pending)
+                await update.message.reply_text(f"🎙️ \"{transcript_text}\"\n\n{resolved_from_pending}")
+                await send_voice_reply(update, context, resolved_from_pending)
+                return
+            if resolved_from_pending:
+                transcript_text = resolved_from_pending
 
         history_ctx = recall_relevant_history(user_id, transcript_text, recent_limit=8, search_limit=8)
         available_groups = get_available_group_names()
@@ -418,6 +553,29 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             user_pref_ctx=history_ctx[:900],
         )
         intent = route.get("intent", "GENERAL")
+
+        is_ambiguous = bool(analysis.get("ambiguous"))
+        if not is_ambiguous and intent == "TASK" and (route.get("task_action") or "").upper() == "ADD":
+            clean_t = (route.get("title") or "").strip().lower()
+            if clean_t in {"", "task အသစ်", "reminder သတိပေးရန်", "er ပေးရန်"}:
+                is_ambiguous = True
+
+        if is_ambiguous:
+            q_txt = (analysis.get("clarification_question") or "").strip()
+            if not q_txt:
+                q_txt = f"“{meaning_hint}” ကို ဆိုလိုတာလားရှင်၊ သေချာအောင် ထပ်ပြောပြပေးပါလားရှင်။"
+            elif "ဆိုလိုတာလား" not in q_txt:
+                q_txt = f"{q_txt} — ဒါကို ဆိုလိုတာလားရှင်။"
+
+            _PENDING_VOICE_CLARIFICATION[user_id] = {
+                "original_transcript": transcript_text,
+                "suggested_meaning": meaning_hint,
+                "suggested_route": route,
+            }
+            save_chat_message(user_id, "assistant", q_txt)
+            await update.message.reply_text(f"🎙️ \"{transcript_text}\"\n\n{q_txt}")
+            await send_voice_reply(update, context, q_txt)
+            return
 
         if intent == "TASK":
             reply = handle_task_intent(transcript_text, route)
@@ -434,6 +592,11 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 Current Myanmar Calendar & Time:
 {cal_ctx}
 
+Voice Tone & Meaning Profile:
+{voice_profile_ctx or "လက်ရှိ အသံလေသံ: " + tone_label}
+လက်ရှိ Voice လေသံ: {tone_label}
+ခန့်မှန်း ဆိုလိုရင်း: {meaning_hint}
+
 Memory & User Context:
 {history_ctx}
 
@@ -441,6 +604,7 @@ User Voice Transcript: "{transcript_text}"
 
 ညွှန်ကြားချက်များ:
 - သင်ဇာ (Thinzar) အမည်ရှိ မြန်မာမိန်းကလေးဟန် AI Assistant အဖြစ် ရင်းရင်းနှီးနှီး၊ ပွင့်ပွင့်လင်းလင်းနဲ့ လူတစ်ယောက် စကားပြောသလို သဘာဝကျကျ ဖြေဆိုပါ။
+- အသံနေအသံထားနဲ့ အရင်ပြောခဲ့ဖူးတဲ့ ဆိုလိုရင်း profile ကို ဆက်စပ်မှတ်မိပြီး အလိုက်သိသိ ဖြေပါ။
 - အကြံဉာဏ်/ရွေးချယ်စရာ မေးလျှင် အကျိုးကျေးဇူး၊ အားနည်းချက်နှင့် လက်တွေ့အသုံးဝင်မည့် အကြံပြုချက်များ ရှင်းပြပါ။
 - 'မောင်' ဟု ဆေးသောက်ရန်နှင့် မိသားစု/ကလေး Task များမှလွဲ၍ မသုံးပါနှင့်။
 """
@@ -455,3 +619,4 @@ User Voice Transcript: "{transcript_text}"
     except Exception as e:
         print(f"Error handling voice message: {e}")
         await update.message.reply_text("အသံနဲ့ ပြန်ဖြေရာမှာ ခဏအခက်အခဲ ရှိနေပါတယ်ရှင်၊ နောက်မှ ထပ်စမ်းကြည့်ပါ")
+
