@@ -27,55 +27,6 @@ MM_TZ = timezone(timedelta(hours=6, minutes=30))
 _VOICE_PROFILES: dict[int, list[dict]] = {}
 _PENDING_VOICE_CLARIFICATION: dict[int, dict] = {}
 
-_EN_TO_MM_SPOKEN: dict[str, str] = {
-    "group": "ဂရု",
-    "groups": "ဂရုတွေ",
-    "chat": "ချက်",
-    "chats": "ချက်တွေ",
-    "message": "မက်ဆေ့ချ်",
-    "messages": "မက်ဆေ့ချ်တွေ",
-    "voice": "ဗွိုက်စ်",
-    "audio": "အော်ဒီယို",
-    "bot": "ဘော့တ်",
-    "admin": "အက်ဒမင်",
-    "user": "ယူဆာ",
-    "task": "တာ့စ်",
-    "tasks": "တာ့စ်တွေ",
-    "reminder": "ရီမိုင်းဒါး",
-    "remind": "သတိပေး",
-    "update": "အပ်ဒိတ်",
-    "patch": "ပက်ချ်",
-    "deploy": "ဒီပလွိုင်း",
-    "server": "ဆာဗာ",
-    "link": "လင့်ခ်",
-    "links": "လင့်ခ်တွေ",
-    "file": "ဖိုင်",
-    "files": "ဖိုင်တွေ",
-    "news": "သတင်း",
-    "search": "ရှာဖွေ",
-    "api": "အေပီအိုင်",
-    "ai": "အေအိုင်",
-    "ok": "အိုကေ",
-    "okay": "အိုကေ",
-    "yes": "ဟုတ်ကဲ့",
-    "no": "မဟုတ်ဘူး",
-    "error": "အဲရား",
-    "test": "စမ်းသပ်",
-    "check": "စစ်ဆေး",
-    "confirm": "အတည်ပြု",
-    "cancel": "ပယ်ဖျက်",
-    "pending": "ကျန်ရှိ",
-    "done": "ပြီးပြီ",
-    "forward": "ဖော်ဝဒ်",
-    "reply": "ပြန်ဖြေ",
-    "mention": "မန်းရှင်း",
-    "channel": "ချန်နယ်",
-    "member": "မန်ဘာ",
-    "members": "မန်ဘာတွေ",
-    "online": "အွန်လိုင်း",
-    "offline": "အော့ဖ်လိုင်း",
-}
-
 
 def _number_to_mm_words(n: int) -> str:
     units = {
@@ -159,21 +110,9 @@ def _normalize_heard_transcript(text: str) -> str:
     if not text:
         return ""
     s = text.strip()
+    # "တင်ဇာ" / "တင်စာ" / "သင်စာ" -> "သင်ဇာ"
     s = re.sub(r"(?:တင်ဇာ|တင်စာ|သင်စာ)", "သင်ဇာ", s)
     return s
-
-
-def _apply_spoken_en_pronunciation(spoken_text: str) -> str:
-    """TTS အတွက်သာ _EN_TO_MM_SPOKEN ထဲက စကားလုံးတွေကို မြန်မာအသံထွက်ဖြင့် အစားထိုးပြီး ကျန်တာကို မူရင်းအတိုင်း ထားသည်။"""
-    if not spoken_text:
-        return ""
-
-    def _repl(match: re.Match) -> str:
-        word = match.group(0)
-        mapped = _EN_TO_MM_SPOKEN.get(word.lower())
-        return mapped if mapped else word
-
-    return re.sub(r"\b[A-Za-z]+\b", _repl, spoken_text)
 
 
 def _to_spoken_chat_prose(raw_text: str) -> str:
@@ -249,12 +188,10 @@ def _build_conversational_speech(reply_text: str) -> str:
         m_title = re.search(r'"([^"]+)"\s*မှတ်ထားလိုက်ပါပြီ', raw)
         title_clean = (m_title.group(1) if m_title else "").strip()
         if not title_clean or title_clean.lower() in {"er ပေးရန်", "reminder ပေးရန်", "remind ပေးရန်"}:
-            spoken = "အင်း၊ မှတ်ထားလိုက်ပြီနော်။ အချိန်ရောက်တာနဲ့ သင်ဇာ သတိပေးမယ်။"
-        else:
-            spoken = f"အင်း၊ {title_clean} ကို မှတ်ထားလိုက်ပြီနော်။ အချိန်ရောက်ရင် သင်ဇာ သတိပေးမယ်။"
-        return _apply_spoken_en_pronunciation(spoken)
+            return "အင်း၊ မှတ်ထားလိုက်ပြီနော်။ အချိန်ရောက်တာနဲ့ သင်ဇာ သတိပေးမယ်။"
+        return f"အင်း၊ {title_clean} ကို မှတ်ထားလိုက်ပြီနော်။ အချိန်ရောက်ရင် သင်ဇာ သတိပေးမယ်။"
 
-    return _apply_spoken_en_pronunciation(_to_spoken_chat_prose(raw))
+    return _to_spoken_chat_prose(raw)
 
 
 def _resolve_audio_extension_and_mime(voice_obj, is_voice_note: bool) -> tuple[str, str]:
@@ -416,6 +353,7 @@ def _add_burmese_intonation_cues(clause_txt: str, role: str) -> str:
     s = clause_txt.strip()
     if not s:
         return s
+    # စကားလုံးဆုံးအဆွဲ ("နော်", "ရှင်", "ပဲ", "ပါ", "လား", "လဲ") တွေမှာ သဘာဝကျတဲ့ အငင်လေးထည့်မယ်
     if role == "lift" and not s.endswith(("၊", "။", "?", "!")):
         if re.search(r"(?:နော်|ရှင်|ပဲ|ပါ|လား|လဲ|တော့)$", s):
             return f"{s}၊"
@@ -435,6 +373,7 @@ def _split_into_expressive_clauses(spoken_text: str) -> list[tuple[str, str]]:
             continue
 
         words = core.split()
+        # ရှည်လွန်းတဲ့ စာကြောင်းကိုသာ နှစ်ပိုင်းခွဲမယ်၊ တော်ရုံအရှည်ဆို တစ်ဆက်တည်း ထားမယ်
         if len(words) >= 11:
             mid = len(words) // 2
             left = " ".join(words[:mid]).strip()
@@ -466,7 +405,7 @@ def _split_burmese_and_english_segments(text: str) -> list[tuple[str, str]]:
 
 
 async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
-    """မြန်မာအဆွဲအငင် သဘာဝကျကျနဲ့ clause တစ်ခုလုံးကို တစ်ဆက်တည်း ချောချောမွေ့မွေ့ ထွက်စေသည်။"""
+    """မြန်မာအဆွဲအငင် သဘာဝကျကျနဲ့ စကားစုကြား/English ကြား လိုတာထက် ပိုမခြားဘဲ ချောချောမွေ့မွေ့ ထွက်စေသည်။"""
     clauses = _split_into_expressive_clauses(spoken_text)
 
     lift_cycle = [
