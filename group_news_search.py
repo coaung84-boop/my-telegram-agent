@@ -30,6 +30,11 @@ _NEWS_CACHE: dict[str, tuple[float, str]] = {}
 _GROUP_MEDIA_AI_TIMESTAMPS: list[float] = []
 
 
+def _now_mmt() -> datetime:
+    """မြန်မာစံတော်ချိန် (MMT / +06:30) လက်ရှိအချိန်ကို အမြဲပြန်ပေးသည်။"""
+    return datetime.now(MM_TZ)
+
+
 def _allow_group_media_ai() -> bool:
     now_ts = time.time()
     global _GROUP_MEDIA_AI_TIMESTAMPS
@@ -58,7 +63,7 @@ def _set_cached_news(cache_key: str, val: str):
 def cleanup_old_group_messages():
     """raw_logs မှ ရက် ၃၀ ကျော်သော record များကို ဖျက်၍ storage ထိန်းညှိသည်။"""
     try:
-        cutoff_dt = datetime.now(MM_TZ) - timedelta(days=30)
+        cutoff_dt = _now_mmt() - timedelta(days=30)
         supabase.table("raw_logs").delete().lt("created_at", cutoff_dt.isoformat()).execute()
     except Exception as e:
         print(f"Error cleaning up old raw_logs: {e}")
@@ -85,7 +90,7 @@ def save_group_message(chat_id: int, chat_title: str, sender_name: str, message_
 def get_available_group_names(limit: int = 1500) -> list:
     """raw_logs ထဲမှ ရက် ၃၀ အတွင်း group_name များကို စုစည်းပေးသည်။"""
     try:
-        cutoff_iso = (datetime.now(MM_TZ) - timedelta(days=30)).isoformat()
+        cutoff_iso = (_now_mmt() - timedelta(days=30)).isoformat()
         res = (
             supabase.table("raw_logs")
             .select("group_name")
@@ -129,12 +134,31 @@ def resolve_group_name_from_text(query_text: str, available_groups: list) -> str
 
 
 def _get_date_bounds_mmt(day_mode: str):
-    now_mm = datetime.now(MM_TZ)
+    now_mm = _now_mmt()
     target_date = (now_mm - timedelta(days=1)).date() if day_mode == "yesterday" else now_mm.date()
     label = f"{'Yesterday' if day_mode == 'yesterday' else 'Today'} ({target_date})"
     start_dt = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, tzinfo=MM_TZ)
     end_dt = start_dt + timedelta(days=1)
     return start_dt.isoformat(), end_dt.isoformat(), label
+
+
+def _filter_logs_by_mmt_range(logs: list, start_iso: str, end_iso: str) -> list:
+    """Timestamp များကို MMT (+06:30) သို့ ပြောင်းပြီး ရက်စွဲအတိအကျ စစ်ထုတ်သည်။"""
+    s_dt = datetime.fromisoformat(start_iso)
+    e_dt = datetime.fromisoformat(end_iso)
+    out = []
+    for l in logs:
+        raw_ts = l.get("created_at")
+        if not raw_ts:
+            continue
+        try:
+            dt_obj = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
+            dt_mm = dt_obj.replace(tzinfo=MM_TZ) if dt_obj.tzinfo is None else dt_obj.astimezone(MM_TZ)
+            if s_dt <= dt_mm < e_dt:
+                out.append(l)
+        except Exception:
+            pass
+    return out
 
 
 def fetch_group_messages(
@@ -143,20 +167,21 @@ def fetch_group_messages(
     limit: int = 120,
     period: str = "recent",
 ) -> list:
-    """raw_logs မှတ်တမ်းများကို group_name / period / query_text ဖြင့် ရှာဖွေသည်။"""
+    """raw_logs မှတ်တမ်းများကို group_name / period (MMT) / query_text ဖြင့် ရှာဖွေသည်။"""
     try:
-        cutoff_iso = (datetime.now(MM_TZ) - timedelta(days=30)).isoformat()
-        q = (
+        cutoff_iso = (_now_mmt() - timedelta(days=30)).isoformat()
+        rows = list(reversed(
             supabase.table("raw_logs")
             .select("*")
             .gte("created_at", cutoff_iso)
             .order("id", desc=True)
-        )
+            .limit(500)
+            .execute()
+            .data or []
+        ))
         if period in ("today", "yesterday"):
             start_iso, end_iso, _ = _get_date_bounds_mmt(period)
-            q = q.gte("created_at", start_iso).lt("created_at", end_iso)
-
-        rows = q.limit(350).execute().data or []
+            rows = _filter_logs_by_mmt_range(rows, start_iso, end_iso)
     except Exception as e:
         print(f"Error reading raw_logs: {e}")
         return []
@@ -212,7 +237,7 @@ def fetch_group_messages(
 
 
 def get_group_report(user_query: str = "", exact_group_name: str = None, day_mode: str = None) -> str:
-    """Maya version အတိုင်း raw_logs မှ Group Summary Report ထုတ်ပေးသည်။"""
+    """Maya version အတိုင်း raw_logs မှ MMT ရက်စွဲအလိုက် Group Summary Report ထုတ်ပေးသည်။"""
     cleanup_old_group_messages()
     start_iso, end_iso, date_label = (None, None, None)
     if day_mode in ["today", "yesterday"]:
@@ -222,14 +247,15 @@ def get_group_report(user_query: str = "", exact_group_name: str = None, day_mod
     elif "ဒီနေ့" in user_query.lower() or "today" in user_query.lower() or "ယနေ့" in user_query.lower():
         start_iso, end_iso, date_label = _get_date_bounds_mmt("today")
 
-    cutoff_iso = (datetime.now(MM_TZ) - timedelta(days=30)).isoformat()
-    query = supabase.table("raw_logs").select("*").gte("created_at", cutoff_iso).order("id")
-    if start_iso and end_iso:
-        query = query.gte("created_at", start_iso).lt("created_at", end_iso)
-    elif not exact_group_name:
+    cutoff_iso = (_now_mmt() - timedelta(days=30)).isoformat()
+    query = supabase.table("raw_logs").select("*").gte("created_at", cutoff_iso).order("id", desc=True)
+    if not start_iso and not end_iso and not exact_group_name:
         query = query.eq("is_read", False)
 
-    logs = query.execute().data or []
+    logs = list(reversed(query.limit(500).execute().data or []))
+    if start_iso and end_iso:
+        logs = _filter_logs_by_mmt_range(logs, start_iso, end_iso)
+
     matched_group = exact_group_name
     if exact_group_name:
         logs = [l for l in logs if l.get("group_name") == exact_group_name]
@@ -303,7 +329,8 @@ def handle_group_query(user_message: str, route: dict) -> str:
         for r in reversed(rows)
     ]
     logs_block = "\n".join(lines)
-    now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
+    now_mm = _now_mmt()
+    now_str = now_mm.strftime(f"%Y-%m-%d ({MYANMAR_WEEKDAYS[now_mm.weekday()]}) %H:%M MMT (+06:30)")
 
     prompt = f"""
 လက်ရှိအချိန်: {now_str}
@@ -435,7 +462,7 @@ def _collect_trusted_news_bundle(scope: str = "all", topic: str | None = None) -
 
 
 def handle_news_command(user_text: str) -> str:
-    """/news command ကို ယုံကြည်စိတ်ချရသော သတင်းရင်းမြစ်များမှ စုစည်း၍ မြန်မာလို အနှစ်ချုပ်ပေးသည်။"""
+    """/news command ကို ယုံကြည်စိတ်ချရသော သတင်းရင်းမြစ်များမှ စုစည်း၍ MMT အချိန်ဖြင့် အနှစ်ချုပ်ပေးသည်။"""
     lower = (user_text or "").lower()
     if any(k in lower for k in ["local", "ပြည်တွင်း", "မြန်မာ"]):
         scope = "local"
@@ -458,7 +485,8 @@ def handle_news_command(user_text: str) -> str:
     if not bundle:
         return "လောလောဆယ် သတင်းရင်းမြစ်များမှ သတင်းများ ရယူ၍ မရသေးပါဘူးရှင်၊ ခဏနေ ထပ်စမ်းကြည့်ပေးပါ"
 
-    now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
+    now_mm = _now_mmt()
+    now_str = now_mm.strftime(f"%Y-%m-%d ({MYANMAR_WEEKDAYS[now_mm.weekday()]}) %H:%M MMT (+06:30)")
     prompt = f"""
 သင်သည် 'သင်ဇာ (Thinzar)' အမည်ရှိ မြန်မာမိန်းကလေးဟန် ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။
 အချိန်: {now_str}
@@ -483,10 +511,11 @@ News Raw Bundle:
 # --- Hybrid Search (Tavily + Google Search Grounding) ---
 def _is_live_or_time_sensitive_query(query: str) -> bool:
     q = (query or "").lower()
+    cur_year = str(_now_mmt().year)
     keywords = [
         "news", "သတင်း", "score", "match", "schedule", "fixture", "result", "ပွဲ", "ရလဒ်", "အချိန်ဇယား",
         "price", "rate", "exchange", "gold", "weather", "stock", "crypto", "ဈေး", "ငွေလဲ", "ရာသီဥတု",
-        "today", "tonight", "tomorrow", "latest", "current", "live", "2026", "ယနေ့", "ဒီနေ့", "မနက်ဖြန်",
+        "today", "tonight", "tomorrow", "latest", "current", "live", cur_year, "ယနေ့", "ဒီနေ့", "မနက်ဖြန်",
         "လက်ရှိ", "နောက်ဆုံး", "ဘယ်တော့", "ဘယ်နေ့", "ဘယ်အချိန်"
     ]
     return any(k in q for k in keywords)
@@ -514,9 +543,9 @@ def _tavily_search_summary(query: str, max_results: int = 5) -> str:
 
 
 def perform_hybrid_web_search(user_query: str, english_query: str | None = None, history_ctx: str = "") -> str:
-    """Tavily Web Search + Google Search Grounding ကို ပေါင်းစပ်၍ အဖြေထုတ်သည်။"""
-    now_mm = datetime.now(MM_TZ)
-    now_str = now_mm.strftime(f"%Y-%m-%d ({MYANMAR_WEEKDAYS[now_mm.weekday()]}) %H:%M MMT")
+    """Tavily Web Search + Google Search Grounding ကို MMT (Asia/Yangon) Date/Time ဖြင့် ပေါင်းစပ်၍ အဖြေထုတ်သည်။"""
+    now_mm = _now_mmt()
+    now_str = now_mm.strftime(f"%Y-%m-%d ({MYANMAR_WEEKDAYS[now_mm.weekday()]}) %H:%M MMT (+06:30)")
 
     tavily_blocks = []
     q1 = _tavily_search_summary(user_query, max_results=5)
