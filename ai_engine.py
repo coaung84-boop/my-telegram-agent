@@ -29,12 +29,27 @@ def _clean_thinzar_voice(text: str) -> str:
 
 
 # --- Resilient Multi-Tier AI Fallback Helper (Gemini -> OpenRouter + Qwen 3.8 27B -> Groq + Qwen 3.8 27B) ---
-def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, use_google_search=False):
+def call_ai_with_3tier_fallback(
+    prompt_text,
+    image_bytes=None,
+    mime_type=None,
+    use_google_search=False,
+    audio_bytes=None,
+):
     errors = []
-    contents = (
-        [types.Part.from_bytes(data=bytes(image_bytes), mime_type=mime_type or 'image/jpeg'), prompt_text]
-        if image_bytes else prompt_text
-    )
+    if audio_bytes:
+        contents = [
+            types.Part.from_bytes(data=bytes(audio_bytes), mime_type=mime_type or "audio/ogg"),
+            prompt_text,
+        ]
+    elif image_bytes:
+        contents = [
+            types.Part.from_bytes(data=bytes(image_bytes), mime_type=mime_type or "image/jpeg"),
+            prompt_text,
+        ]
+    else:
+        contents = prompt_text
+
     tools = [types.Tool(google_search=types.GoogleSearch())] if use_google_search else None
     config = types.GenerateContentConfig(
         system_instruction=STRICT_MYANMAR_SYSTEM,
@@ -47,7 +62,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
             response = gemini_client.models.generate_content(
                 model="gemini-3.5-flash-lite",
                 contents=contents,
-                config=config
+                config=config,
             )
             if response and response.text and response.text.strip():
                 return _clean_thinzar_voice(response.text.strip())
@@ -65,7 +80,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
         response = gemini_client.models.generate_content(
             model="gemini-3.8-flash",
             contents=contents,
-            config=config
+            config=config,
         )
         if response and response.text and response.text.strip():
             return _clean_thinzar_voice(response.text.strip())
@@ -73,6 +88,10 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
         err_msg = f"T2: {type(e).__name__} - {str(e)[:90]}"
         print(err_msg)
         errors.append(err_msg)
+
+    if audio_bytes:
+        debug_tail = "\n".join(errors[-3:])
+        return f"လောလောဆယ် AI ဆာဗာ ခဏအလုပ်များနေပါတယ်ရှင်၊ ခဏနေပြီး ထပ်စမ်းကြည့်ပေးပါ:\n{debug_tail}"
 
     # Tier 3A: OpenRouter (Qwen 3.8 27B + Free Fallbacks)
     if OPENROUTER_API_KEY:
@@ -91,7 +110,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
                     "model": or_model,
                     "messages": [
                         {"role": "system", "content": STRICT_MYANMAR_SYSTEM},
-                        {"role": "user", "content": prompt_text}
+                        {"role": "user", "content": prompt_text},
                     ],
                     "temperature": 0.4,
                 }
@@ -121,7 +140,7 @@ def call_ai_with_3tier_fallback(prompt_text, image_bytes=None, mime_type=None, u
                 model=g_model,
                 messages=[
                     {"role": "system", "content": STRICT_MYANMAR_SYSTEM},
-                    {"role": "user", "content": prompt_text}
+                    {"role": "user", "content": prompt_text},
                 ],
                 temperature=0.4,
             )
