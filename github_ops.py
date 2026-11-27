@@ -32,6 +32,7 @@ ALLOWED_GITHUB_FILES = {
 _PENDING_PATCHES: dict[str, dict] = {}
 _PENDING_GETFILES: dict[str, str] = {}
 _PENDING_DEPLOY_FILE = "/tmp/thinzar_pending_deploy.json"
+_DEPLOY_WATCHDOG_TASK: asyncio.Task | None = None
 
 
 def _github_headers() -> dict:
@@ -119,7 +120,6 @@ def upsert_github_file(
 
 
 def _parse_patch_hunks(raw_body: str) -> list[tuple[str, str]]:
-    """<<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE နှင့် <<<OLD>>> ... <<<NEW>>> နှစ်မျိုးလုံးကို ခွဲထုတ်သည်။"""
     if not raw_body:
         return []
 
@@ -224,12 +224,33 @@ def apply_hunks_to_source(source_text: str, hunks: list[tuple[str, str]]) -> tup
     return True, cur_text, ""
 
 
+def _read_pending_deploy_info() -> dict | None:
+    if not os.path.exists(_PENDING_DEPLOY_FILE):
+        return None
+    try:
+        with open(_PENDING_DEPLOY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _clear_pending_deploy_info():
+    try:
+        if os.path.exists(_PENDING_DEPLOY_FILE):
+            os.remove(_PENDING_DEPLOY_FILE)
+    except Exception:
+        pass
+
+
 def _save_pending_deploy_info(file_path: str, commit_sha: str):
     try:
         payload = {
             "file_path": file_path,
             "commit": commit_sha,
+            "pushed_ts": time.time(),
             "pushed_at": datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT"),
+            "fail_notified": False,
         }
         with open(_PENDING_DEPLOY_FILE, "w", encoding="utf-8") as f:
             json.dump(payload, f)
@@ -237,29 +258,80 @@ def _save_pending_deploy_info(file_path: str, commit_sha: str):
         print(f"Pending deploy save error: {e}")
 
 
-async def notify_render_deploy_if_pending(application):
-    if not ADMIN_USER_ID or not os.path.exists(_PENDING_DEPLOY_FILE):
-        return
-    try:
-        with open(_PENDING_DEPLOY_FILE, "r", encoding="utf-8") as f:
-            info = json.load(f)
+async def _deploy_watchdog_loop(application):
+    while True:
         try:
-            os.remove(_PENDING_DEPLOY_FILE)
-        except Exception:
-            pass
+            info = _read_pending_deploy_info()
+            if ADMIN_USER_ID and info and not info.get("fail_notified"):
+                pushed_ts = float(info.get("pushed_ts") or 0)
+                if pushed_ts > 0 and (time.time() - pushed_ts) >= 210:
+                    info["fail_notified"] = True
+                    try:
+                        with open(_PENDING_DEPLOY_FILE, "w", encoding="utf-8") as f:
+                            json.dump(info, f)
+                    except Exception:
+                        pass
 
-        f_path = info.get("file_path") or "code"
-        c_sha = info.get("commit") or ""
-        now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
-        commit_part = f" (`{c_sha}`)" if c_sha else ""
-        await application.bot.send_message(
-            chat_id=ADMIN_USER_ID,
-            text=f"🚀 Render Deploy Success ဖြစ်သွားပါပြီရှင်!\n• File: `{f_path}`{commit_part}\n• Time: {now_str}",
-        )
+                    f_path = info.get("file_path") or "code"
+                    c_sha = info.get("commit") or ""
+                    commit_part = f" (`{c_sha}`)" if c_sha else ""
+                    now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
+                    await application.bot.send_message(
+                        chat_id=ADMIN_USER_ID,
+                        text=(
+                            "⚠️ Render Deploy Fail / မတက်သေးပါရှင်!\n"
+                            f"• File: `{f_path}`{commit_part}\n"
+                            f"• Pushed: {info.get('pushed_at') or '-'}\n"
+                            f"• Checked: {now_str}\n"
+                            "Build/Start error သို့မဟုတ် Render deploy ကြန့်ကြာနေနိုင်လို့ Render Logs ကို စစ်ကြည့်ပေးပါဦးနော်။"
+                        ),
+                    )
+        except Exception as e:
+            print(f"Deploy watchdog error: {e}")
+
+        await asyncio.sleep(25)
+
+
+async def notify_render_deploy_if_pending(application):
+    global _DEPLOY_WATCHDOG_TASK
+    if not _DEPLOY_WATCHDOG_TASK or _DEPLOY_WATCHDOG_TASK.done():
+        _DEPLOY_WATCHDOG_TASK = asyncio.create_task(_deploy_watchdog_loop(application))
+
+    if not ADMIN_USER_ID:
+        return
+
+    info = _read_pending_deploy_info()
+    if not info:
+        return
+
+    _clear_pending_deploy_info()
+    f_path = info.get("file_path") or "code"
+    c_sha = info.get("commit") or ""
+    now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
+    commit_part = f" (`{c_sha}`)" if c_sha else ""
+
+    try:
+        if info.get("fail_notified"):
+            await application.bot.send_message(
+                chat_id=ADMIN_USER_ID,
+                text=(
+                    "🔄 Render Deploy နောက်ကျမှ ပြန်တက်လာပါပြီရှင်!\n"
+                    f"• File: `{f_path}`{commit_part}\n"
+                    f"• Pushed: {info.get('pushed_at') or '-'}\n"
+                    f"• Live Time: {now_str}"
+                ),
+            )
+        else:
+            await application.bot.send_message(
+                chat_id=ADMIN_USER_ID,
+                text=(
+                    "🚀 Render Deploy Success ဖြစ်သွားပါပြီရှင်!\n"
+                    f"• File: `{f_path}`{commit_part}\n"
+                    f"• Time: {now_str}"
+                ),
+            )
     except Exception as e:
         print(f"Deploy notify error: {e}")
-
-
 async def handle_patch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.effective_user.id != ADMIN_USER_ID:
         return
@@ -372,7 +444,7 @@ async def handle_patch_callback(update: Update, context: ContextTypes.DEFAULT_TY
         _save_pending_deploy_info(res["path"], res.get("commit") or "")
         await query.message.reply_text(
             f"✅ `{res['path']}` ကို `{res['branch']}` ပေါ် push တင်ပြီးပါပြီရှင် (`{res['commit']}`)\n"
-            "Render ပြန်တက်လာရင် Deploy Success message ပြန်ပို့ပေးပါမယ်ရှင်"
+            "Render deploy ပြီးရင် Success / Fail အသိပေးချက် ပြန်ပို့ပေးပါမယ်ရှင်"
         )
     else:
         await query.message.reply_text(f"❌ Push မအောင်မြင်ပါရှင်:\n{res.get('error')}")
@@ -462,7 +534,7 @@ async def handle_py_file_upload(update: Update, context: ContextTypes.DEFAULT_TY
         _save_pending_deploy_info(res["path"], res.get("commit") or "")
         await msg.reply_text(
             f"✅ `{res['path']}` ကို `{res['branch']}` ပေါ် တင်ပြီးပါပြီရှင် (`{res['commit']}`)\n"
-            "Render ပြန်တက်လာရင် Deploy Success message ပြန်ပို့ပေးပါမယ်ရှင်"
+            "Render deploy ပြီးရင် Success / Fail အသိပေးချက် ပြန်ပို့ပေးပါမယ်ရှင်"
         )
     else:
         await msg.reply_text(f"❌ GitHub တင်ရာမှာ မအောင်မြင်ပါရှင်:\n{res.get('error')}")
