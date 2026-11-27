@@ -163,52 +163,15 @@ def _normalize_heard_transcript(text: str) -> str:
     return s
 
 
-def _phonetic_en_to_mm(word: str) -> str:
-    """Dictionary ထဲ မရှိသေးတဲ့ English စကားလုံးတွေကို TTS အတွက် မြန်မာလို အနီးစပ်ဆုံး ဖတ်နိုင်အောင် ညှိသည်။"""
-    w = word.lower()
-    if len(w) <= 4 and w.isalpha():
-        letters = {
-            "a": "အေ", "b": "ဘီ", "c": "စီ", "d": "ဒီ", "e": "အီး",
-            "f": "အက်ဖ်", "g": "ဂျီ", "h": "အိတ်ချ်", "i": "အိုင်",
-            "j": "ဂျေ", "k": "ကေ", "l": "အယ်လ်", "m": "အမ်",
-            "n": "အန်", "o": "အို", "p": "ပီ", "q": "ကျူ",
-            "r": "အာ", "s": "အက်စ်", "t": "တီ", "u": "ယူ",
-            "v": "ဗီ", "w": "ဒဗလျူ", "x": "အိတ်စ်", "y": "ဝိုင်", "z": "ဇက်",
-        }
-        return "".join(letters.get(ch, ch) for ch in w)
-
-    s = w
-    s = re.sub(r"tion\b", "ရှင်း", s)
-    s = re.sub(r"sion\b", "ရှင်း", s)
-    s = re.sub(r"ight\b", "ိုက်", s)
-    s = re.sub(r"ck", "က်", s)
-    s = re.sub(r"sh", "ရှ", s)
-    s = re.sub(r"ch", "ချ", s)
-    s = re.sub(r"th", "သ", s)
-    s = re.sub(r"ph", "ဖ", s)
-    s = re.sub(r"qu", "ကွ", s)
-
-    char_map = {
-        "a": "အ", "b": "ဘ", "c": "က", "d": "ဒ", "e": "အေ",
-        "f": "ဖ", "g": "ဂ", "h": "ဟ", "i": "အိုင်", "j": "ဂျ",
-        "k": "က", "l": "လ", "m": "မ", "n": "န", "o": "အို",
-        "p": "ပ", "q": "က", "r": "ရ", "s": "စ", "t": "တ",
-        "u": "အူ", "v": "ဗ", "w": "ဝ", "x": "က်စ်", "y": "ယ", "z": "ဇ",
-    }
-    return "".join(char_map.get(ch, ch) for ch in s)
-
-
 def _apply_spoken_en_pronunciation(spoken_text: str) -> str:
-    """TTS အတွက်သာ English စကားလုံးတွေကို မြန်မာအသံထွက်ဖြင့် အစားထိုးသည်။"""
+    """TTS အတွက်သာ _EN_TO_MM_SPOKEN ထဲက စကားလုံးတွေကို မြန်မာအသံထွက်ဖြင့် အစားထိုးပြီး ကျန်တာကို မူရင်းအတိုင်း ထားသည်။"""
     if not spoken_text:
         return ""
 
     def _repl(match: re.Match) -> str:
         word = match.group(0)
         mapped = _EN_TO_MM_SPOKEN.get(word.lower())
-        if mapped:
-            return mapped
-        return _phonetic_en_to_mm(word)
+        return mapped if mapped else word
 
     return re.sub(r"\b[A-Za-z]+\b", _repl, spoken_text)
 
