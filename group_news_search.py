@@ -237,7 +237,7 @@ def fetch_group_messages(
 
 
 def get_group_report(user_query: str = "", exact_group_name: str = None, day_mode: str = None) -> str:
-    """Maya version အတိုင်း raw_logs မှ MMT ရက်စွဲအလိုက် Group Summary Report ထုတ်ပေးသည်။"""
+    """raw_logs မှ မဖြစ်မနေ လိုအပ်သည့် အချက်အလက်များကို bullet points ဖြင့် summary ထုတ်ပေးသည်။"""
     cleanup_old_group_messages()
     start_iso, end_iso, date_label = (None, None, None)
     if day_mode in ["today", "yesterday"]:
@@ -279,13 +279,12 @@ def get_group_report(user_query: str = "", exact_group_name: str = None, day_mod
 အောက်ပါတို့မှာ Telegram Group များမှ ရရှိထားသော မက်ဆေ့ခ်ျများနှင့် ပုံ/ဖိုင် အနှစ်ချုပ်များ ဖြစ်သည်။
 ({header_info})
 မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်)။
-- ရိုးရိုးနှုတ်ဆက်စကားများကို ဖယ်ထုတ်ပါ။
-- English စာသား/အချက်အလက်များကို မူရင်း English အတိုင်း ထား၍ report ပြန်ပေးပါ။
-- Group တစ်ခုထက်ပိုလျှင် Group နာမည်တစ်ခုချင်းစီကို ခေါင်းစဉ်ခွဲ၍ စုစည်းရေးပါ။
+- ကဏ္ဍခေါင်းစဉ်ကြီးများ (ဥပမာ ပုံမှန်မဟုတ်သော ပြဿနာများ၊ ဆုံးဖြတ်ချက် အသစ်များ၊ လုပ်ငန်းတာဝန်များ စသည်) လုံးဝ မထည့်ပါနှင့်။
+- [Verified]၊ [Deduced]၊ [Unverified] စသည့် tag များ လုံးဝ မထည့်ပါနှင့်။
+- ရိုးရိုးနှုတ်ဆက်စကားများကို ဖယ်ထုတ်ပြီး မဖြစ်မနေ လိုအပ်သော အချက်အလက်များကိုသာ summary လုပ်၍ "• " bullet points များဖြင့် ရေးပါ။
+- Group တစ်ခုထက်ပိုလျှင် Group နာမည်အလိုက် ခေါင်းစဉ်ခွဲပြီး အောက်တွင် "• " bullet points များဖြင့် စုစည်းရေးပါ။
+- English စာသား/အချက်အလက်များကို မူရင်း English အတိုင်း ထားပါ။
 - ** (bold asterisks) လုံးဝ မသုံးပါနှင့်။
-1. ပုံမှန်မဟုတ်သော ပြဿနာများ (Issues / Blockers)
-2. ဆုံးဖြတ်ချက် အသစ်များနှင့် ညွှန်ကြားချက်များ
-3. အရေးကြီးသော လုပ်ငန်းတာဝန်များ (Action Items)
 
 ဒေတာများ:
 {raw_text[:14000]}
@@ -305,12 +304,12 @@ def get_group_report(user_query: str = "", exact_group_name: str = None, day_mod
 
 
 def generate_all_groups_summary(period: str = "today") -> str:
-    """Today / Yesterday အလိုက် Group မှတ်တမ်းများကို စုစည်း၍ အနှစ်ချုပ် ထုတ်ပေးသည်။"""
+    """Today / Yesterday အလိုက် Group မှတ်တမ်းများကို စုစည်း၍ bullet point summary ထုတ်ပေးသည်။"""
     return get_group_report(f"{period} summary", exact_group_name=None, day_mode=period)
 
 
 def handle_group_query(user_message: str, route: dict) -> str:
-    """Group summary / sender / factual query ကို raw_logs မှ ဖြေကြားသည်။"""
+    """Group ထဲက လူတစ်ယောက်ယောက် ပြောထားတာ သို့မဟုတ် အကြောင်းအရာကို အဓိက information နဲ့ လိုရင်း သုံးသပ်၍ ပြန်ပြောပေးသည်။"""
     available_groups = get_available_group_names()
     group_name = route.get("group_name") or resolve_group_name_from_text(user_message, available_groups)
     period = route.get("period") or "recent"
@@ -335,10 +334,11 @@ def handle_group_query(user_message: str, route: dict) -> str:
     prompt = f"""
 လက်ရှိအချိန်: {now_str}
 အောက်ပါတို့မှာ Telegram Group ထဲမှ စကားပြောဆိုမှု မှတ်တမ်းများ ဖြစ်သည်။
-အသုံးပြုသူ မေးထားသည့် အချက် (သို့မဟုတ် သက်ဆိုင်ရာ လူပြောထားသည့် အကြောင်းအရာ) တစ်ခုတည်းကိုသာ Focus ထား၍ ပြန်ပြောပြပေးပါ။
+အသုံးပြုသူ မေးထားသည့် လူ/အကြောင်းအရာနှင့် ပတ်သက်၍ အဓိက information နှင့် လိုရင်းကို သုံးသပ်ပြီး ပြန်ပြောပြပေးပါ။
 1. မြန်မာမိန်းကလေးတစ်ယောက်လို သဘာဝကျကျ ရင်းနှီးဖော်ရွေစွာ ပြောပါ ('မောင်' ဟု မသုံးပါနှင့်)။
-2. အချက်အလက်တိုင်း၏ အနောက်တွင် [Verified]၊ [Deduced] သို့မဟုတ် [Unverified] တွဲထည့်ပေးပါ။
-3. မေးထားသည့် အချက်/လူနှင့် မသက်ဆိုင်သော အခြားလူများ၏ စကားများကို လုံးဝ ထည့်မပြောပါနှင့်။
+2. [Verified]၊ [Deduced]၊ [Unverified] စသည့် tag များ လုံးဝ မထည့်ပါနှင့်။
+3. မေးထားသည့် အချက်/လူနှင့် မသက်ဆိုင်သော အခြားလူများ၏ စကားများကို မထည့်ပါနှင့်။
+4. ** (bold asterisks) လုံးဝ မသုံးပါနှင့်။
 
 လက်ရှိ မေးခွန်း: {user_message}
 Group မှတ်တမ်းများ:
