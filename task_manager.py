@@ -6,6 +6,23 @@ from database import supabase
 from memory_manager import _call_json_intelligence
 
 
+def _now_mmt() -> datetime:
+    """မြန်မာစံတော်ချိန် (MMT / +06:30) လက်ရှိအချိန်ကို အမြဲပြန်ပေးသည်။"""
+    return datetime.now(MM_TZ)
+
+
+def _to_mmt(dt_val) -> datetime | None:
+    if not dt_val:
+        return None
+    if isinstance(dt_val, datetime):
+        return dt_val.replace(tzinfo=MM_TZ) if dt_val.tzinfo is None else dt_val.astimezone(MM_TZ)
+    try:
+        dt_obj = datetime.fromisoformat(str(dt_val).replace("Z", "+00:00"))
+        return dt_obj.replace(tzinfo=MM_TZ) if dt_obj.tzinfo is None else dt_obj.astimezone(MM_TZ)
+    except Exception:
+        return None
+
+
 def _detect_task_category_and_priority(text: str, reason: str | None = None) -> tuple[str, str]:
     """Task စာသားပေါ်မူတည်၍ category (health/family/work/general) နှင့် priority (urgent/normal) ခွဲခြားသည်။"""
     combined = f"{text or ''} {reason or ''}".lower()
@@ -87,20 +104,13 @@ def _is_health_or_family_task(text: str, reason: str | None = None) -> bool:
 def cleanup_old_done_tasks():
     """ပြီးသွားသော (status='done') task များကို ရက် ၃၀ (၁ လ) ကျော်လျှင် storage သက်သာစေရန် ဖျက်သည်။"""
     try:
-        cutoff_dt = datetime.now(MM_TZ) - timedelta(days=RETENTION_DAYS)
-        res = supabase.table("tasks").select("id, status, updated_at, created_at, remind_at").eq("status",
-                                                                                                 "done").execute()
+        cutoff_dt = _now_mmt() - timedelta(days=RETENTION_DAYS)
+        res = supabase.table("tasks").select("id, status, updated_at, created_at, remind_at").eq("status", "done").execute()
         for t in (res.data or []):
             ts_raw = t.get("updated_at") or t.get("remind_at") or t.get("created_at")
-            if not ts_raw:
-                continue
-            try:
-                dt_obj = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-                dt_mm = dt_obj.replace(tzinfo=MM_TZ) if dt_obj.tzinfo is None else dt_obj.astimezone(MM_TZ)
-                if dt_mm < cutoff_dt:
-                    supabase.table("tasks").delete().eq("id", t["id"]).execute()
-            except Exception:
-                pass
+            dt_mm = _to_mmt(ts_raw)
+            if dt_mm and dt_mm < cutoff_dt:
+                supabase.table("tasks").delete().eq("id", t["id"]).execute()
     except Exception as e:
         print(f"Error cleaning up old done tasks: {e}")
 
@@ -114,8 +124,9 @@ def _julian_day_from_gregorian(year: int, month: int, day: int) -> int:
 
 
 def _calculate_myanmar_date(dt_mm: datetime) -> dict:
-    """Pure Python Myanmar Calendar calculation (Julian Day based)."""
-    jdn = _julian_day_from_gregorian(dt_mm.year, dt_mm.month, dt_mm.day)
+    """Pure Python Myanmar Calendar calculation (Julian Day based in MMT)."""
+    dt_norm = _to_mmt(dt_mm) or _now_mmt()
+    jdn = _julian_day_from_gregorian(dt_norm.year, dt_norm.month, dt_norm.day)
     anchor_jdn = _julian_day_from_gregorian(2026, 11, 10)  # 1388 ME Tazaundaing Full Moon (15 waxing)
     delta_days = jdn - anchor_jdn
 
@@ -167,16 +178,16 @@ def _calculate_myanmar_date(dt_mm: datetime) -> dict:
     is_new_moon = (m_day_int == m_len)
     is_sabbath = (fortnight_day in [8, 15]) or is_full_moon or is_new_moon
 
-    wd = dt_mm.weekday()
+    wd = dt_norm.weekday()
     is_yatyaza = (
-            (cur_m_idx in [0, 3, 6, 9] and wd in [1, 5]) or
-            (cur_m_idx in [1, 4, 7, 10] and wd in [3, 6]) or
-            (cur_m_idx in [2, 5, 8, 11] and wd in [2, 4])
+        (cur_m_idx in [0, 3, 6, 9] and wd in [1, 5]) or
+        (cur_m_idx in [1, 4, 7, 10] and wd in [3, 6]) or
+        (cur_m_idx in [2, 5, 8, 11] and wd in [2, 4])
     )
     is_pyathada = (
-            (cur_m_idx in [0, 3, 6, 9] and wd == 5) or
-            (cur_m_idx in [1, 4, 7, 10] and wd in [1, 2]) or
-            (cur_m_idx in [2, 5, 8, 11] and wd in [0, 3])
+        (cur_m_idx in [0, 3, 6, 9] and wd == 5) or
+        (cur_m_idx in [1, 4, 7, 10] and wd in [1, 2]) or
+        (cur_m_idx in [2, 5, 8, 11] and wd in [0, 3])
     )
 
     return {
@@ -192,11 +203,43 @@ def _calculate_myanmar_date(dt_mm: datetime) -> dict:
     }
 
 
+def format_myanmar_date_short(dt_mm: datetime) -> str:
+    """Task များတွင် တွဲဖော်ပြရန် မြန်မာပြက္ခဒိန် ရက်စွဲအတို။"""
+    info = _calculate_myanmar_date(dt_mm)
+    if info["is_full_moon"]:
+        lunar_str = f"{info['month_name']} လပြည့်နေ့"
+    elif info["is_new_moon"]:
+        lunar_str = f"{info['month_name']} လကွယ်နေ့"
+    else:
+        lunar_str = f"{info['month_name']} {info['moon_phase']} {info['fortnight_day']} ရက်"
+    extra = " · ဥပုသ်" if info["is_sabbath"] else ""
+    return f"မြန်မာ {info['myanmar_year']} ခု၊ {lunar_str}{extra}"
+
+
+def _next_myanmar_special_date(now_mm: datetime, mode: str) -> datetime:
+    """နောက်လာမည့် လပြည့် / လကွယ် / ဥပုသ် ရက်ကို ရှာပေးသည်။"""
+    for offset in range(0, 45):
+        cand_dt = now_mm + timedelta(days=offset)
+        info = _calculate_myanmar_date(cand_dt)
+        matched = False
+        if mode == "full_moon" and info["is_full_moon"]:
+            matched = True
+        elif mode == "new_moon" and info["is_new_moon"]:
+            matched = True
+        elif mode == "sabbath" and info["is_sabbath"]:
+            matched = True
+        if matched:
+            if offset == 0 and cand_dt <= now_mm:
+                continue
+            return cand_dt
+    return now_mm + timedelta(days=1)
+
+
 def get_myanmar_calendar_context(dt_mm: datetime = None) -> str:
     """လက်ရှိ မြန်မာစံတော်ချိန်အတွက် ပြက္ခဒိန်အချက်အလက်ကို စုစည်းပေးသည်။"""
-    now_mm = dt_mm or datetime.now(MM_TZ)
+    now_mm = _to_mmt(dt_mm) or _now_mmt()
     weekday_mm = MYANMAR_WEEKDAYS[now_mm.weekday()]
-    gregorian_str = now_mm.strftime(f"%Y-%m-%d ({weekday_mm}) %H:%M MMT")
+    gregorian_str = now_mm.strftime(f"%Y-%m-%d ({weekday_mm}) %H:%M MMT (+06:30)")
 
     info = _calculate_myanmar_date(now_mm)
     if info["is_full_moon"]:
@@ -276,7 +319,7 @@ def _last_day_of_month(year: int, month: int) -> int:
 
 
 def parse_reminder_datetime_mmt(text: str) -> datetime | None:
-    now_mm = datetime.now(MM_TZ)
+    now_mm = _now_mmt()
     mm_digits = str.maketrans("၀၁၂၃၄၅၆၇၈၉", "0123456789")
     norm_text = text.translate(mm_digits)
     lower = text.lower()
@@ -292,12 +335,24 @@ def parse_reminder_datetime_mmt(text: str) -> datetime | None:
     rel_days_match = re.search(r"နောက်\s*(\d{1,2})\s*ရက်(?:\s*(?:နေရင်|အကြာ|မှာ))?", norm_text)
     parts = _parse_time_parts_mmt(text)
 
+    mm_special_mode = None
+    if "လပြည့်" in text:
+        mm_special_mode = "full_moon"
+    elif "လကွယ်" in text:
+        mm_special_mode = "new_moon"
+    elif "ဥပုသ်" in text:
+        mm_special_mode = "sabbath"
+
     if rel_days_match and not parts:
         days_add = int(rel_days_match.group(1))
         if 1 <= days_add <= 365:
             target_d = (now_mm + timedelta(days=days_add)).date()
             default_h = 9 if now_mm.hour >= 9 else max(9, now_mm.hour)
             return datetime(target_d.year, target_d.month, target_d.day, default_h, 0, 0, tzinfo=MM_TZ)
+
+    if mm_special_mode and not parts:
+        cand = _next_myanmar_special_date(now_mm, mm_special_mode)
+        return datetime(cand.year, cand.month, cand.day, 9, 0, 0, tzinfo=MM_TZ)
 
     if not parts:
         return None
@@ -310,6 +365,8 @@ def parse_reminder_datetime_mmt(text: str) -> datetime | None:
         days_add = int(rel_days_match.group(1))
         if 1 <= days_add <= 365:
             target_date = (now_mm + timedelta(days=days_add)).date()
+    elif mm_special_mode:
+        target_date = _next_myanmar_special_date(now_mm, mm_special_mode).date()
     elif "လကုန်" in text:
         end_d = _last_day_of_month(now_mm.year, now_mm.month)
         target_date = datetime(now_mm.year, now_mm.month, end_d, tzinfo=MM_TZ).date()
@@ -330,12 +387,13 @@ def parse_reminder_datetime_mmt(text: str) -> datetime | None:
 
     candidate = datetime(target_date.year, target_date.month, target_date.day, hour, minute, 0, tzinfo=MM_TZ)
     if (
-            target_wd is None
-            and not rel_days_match
-            and "လကုန်" not in text
-            and candidate < (now_mm - timedelta(minutes=1))
-            and "မနက်ဖြန်" not in text
-            and "tomorrow" not in lower
+        target_wd is None
+        and not rel_days_match
+        and not mm_special_mode
+        and "လကုန်" not in text
+        and candidate < (now_mm - timedelta(minutes=1))
+        and "မနက်ဖြန်" not in text
+        and "tomorrow" not in lower
     ):
         candidate += timedelta(days=1)
     return candidate
@@ -347,18 +405,20 @@ def _compute_next_repeat_datetime(current_rem_dt: datetime, repeat_type: str, no
     if r_type not in {"daily", "weekly", "school_days"}:
         return None
 
-    next_dt = current_rem_dt
+    next_dt = _to_mmt(current_rem_dt) or now_mm
+    now_ref = _to_mmt(now_mm) or _now_mmt()
+
     if r_type == "daily":
-        next_dt = current_rem_dt + timedelta(days=1)
-        while next_dt <= now_mm:
+        next_dt = next_dt + timedelta(days=1)
+        while next_dt <= now_ref:
             next_dt += timedelta(days=1)
     elif r_type == "weekly":
-        next_dt = current_rem_dt + timedelta(days=7)
-        while next_dt <= now_mm:
+        next_dt = next_dt + timedelta(days=7)
+        while next_dt <= now_ref:
             next_dt += timedelta(days=7)
     elif r_type == "school_days":
-        next_dt = current_rem_dt + timedelta(days=1)
-        while next_dt.weekday() >= 5 or next_dt <= now_mm:
+        next_dt = next_dt + timedelta(days=1)
+        while next_dt.weekday() >= 5 or next_dt <= now_ref:
             next_dt += timedelta(days=1)
 
     return next_dt
@@ -367,7 +427,7 @@ def _compute_next_repeat_datetime(current_rem_dt: datetime, repeat_type: str, no
 def _clean_task_title_fallback(raw_text: str) -> str:
     t = raw_text.strip()
     t = re.sub(r"^(?:မဟုတ်ဘူးလေ|မဟုတ်ဘူး|Task\s*[-–—:]?)", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"(?:အပတ်စဉ်|နေ့စဉ်|ကျောင်းဖွင့်ရက်|လကုန်ရက်|လကုန်|မြန်မာ\s*calendar|တိုင်း)", "", t,
+    t = re.sub(r"(?:အပတ်စဉ်|နေ့စဉ်|ကျောင်းဖွင့်ရက်|လကုန်ရက်|လကုန်|လပြည့်နေ့|လကွယ်နေ့|ဥပုသ်နေ့|မြန်မာ\s*calendar|တိုင်း)", "", t,
                flags=re.IGNORECASE)
     t = re.sub(
         r"(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday|တနင်္လာ|အင်္ဂါ|ဗုဒ္ဓဟူး|ကြာသပတေး|သောကြာ|စနေ|တနင်္ဂနွေ)",
@@ -385,12 +445,12 @@ def _clean_task_title_fallback(raw_text: str) -> str:
 
 
 def smart_route_and_parse(
-        user_message: str,
-        available_groups: list,
-        recent_ctx: str = "",
-        user_pref_ctx: str = "",
+    user_message: str,
+    available_groups: list,
+    recent_ctx: str = "",
+    user_pref_ctx: str = "",
 ) -> dict:
-    now_mm = datetime.now(MM_TZ)
+    now_mm = _now_mmt()
     cal_info = get_myanmar_calendar_context(now_mm)
     groups_str = ", ".join(available_groups[:25]) if available_groups else "None"
 
@@ -418,11 +478,11 @@ Classify into ONE primary intent:
 
 If intent is "WEB_SEARCH", also output:
 - "search_query": A self-contained search query combining Recent Conversation context if the user says a follow-up like "Yes, ရှာပေးပါ" or "အသေးစိတ် ရှာပေးပါ".
-- "english_search_query": A concise, high-accuracy English search query for live facts/sports/news/prices/schedules (e.g. "Chelsea next match schedule November 2026"), or null if already in English.
+- "english_search_query": A concise, high-accuracy English search query for live facts/sports/news/prices/schedules, or null if already in English.
 
 If intent is "TASK", also extract:
 - "task_action": "add" | "edit" | "delete" | "done" | "list" | "cancel_last"
-- "target_task_query": If editing/rescheduling/deleting/completing a specific existing task by name/topic, put the existing task keyword here (e.g. "ဆေးသောက်", "ဖုန်းဆက်"), else null.
+- "target_task_query": If editing/rescheduling/deleting/completing a specific existing task by name/topic, put the existing task keyword here, else null.
 - "tasks": list of task objects if adding one or more tasks: [{{"clean_title": "...", "reason": null, "repeat_type": "once|daily|weekly|school_days", "remind_iso": "YYYY-MM-DDTHH:MM:SS+06:30 or null"}}]
 - "clean_title": pure action in Burmese without time/schedule/reason/filler words (or new title if editing)
 - "reason": short reason if stated, else null
@@ -476,14 +536,8 @@ Return ONLY valid JSON:
     if repeat_type not in {"once", "daily", "weekly", "school_days"}:
         repeat_type = "once"
 
-    rem_dt = None
-    if parsed.get("remind_iso"):
-        try:
-            dt_obj = datetime.fromisoformat(str(parsed["remind_iso"]))
-            rem_dt = dt_obj.replace(tzinfo=MM_TZ) if dt_obj.tzinfo is None else dt_obj.astimezone(MM_TZ)
-        except Exception:
-            rem_dt = parse_reminder_datetime_mmt(user_message)
-    elif intent == "TASK":
+    rem_dt = _to_mmt(parsed.get("remind_iso"))
+    if rem_dt is None and intent == "TASK":
         rem_dt = parse_reminder_datetime_mmt(user_message)
 
     if rem_dt:
@@ -508,14 +562,8 @@ Return ONLY valid JSON:
             item_rep = str(item.get("repeat_type") or repeat_type or "once").strip()
             if item_rep not in {"once", "daily", "weekly", "school_days"}:
                 item_rep = "once"
-            item_rem_dt = None
-            if item.get("remind_iso"):
-                try:
-                    d_o = datetime.fromisoformat(str(item["remind_iso"]))
-                    item_rem_dt = d_o.replace(tzinfo=MM_TZ) if d_o.tzinfo is None else d_o.astimezone(MM_TZ)
-                except Exception:
-                    item_rem_dt = parse_reminder_datetime_mmt(item_title)
-            else:
+            item_rem_dt = _to_mmt(item.get("remind_iso"))
+            if item_rem_dt is None:
                 item_rem_dt = parse_reminder_datetime_mmt(item_title) or rem_dt
             item_reason = str(item.get("reason")).strip() if item.get("reason") else None
             normalized_tasks.append({
@@ -558,13 +606,14 @@ Return ONLY valid JSON:
 
 
 def add_task(
-        title: str,
-        remind_dt: datetime | None = None,
-        reason: str | None = None,
-        repeat_type: str = "once",
+    title: str,
+    remind_dt: datetime | None = None,
+    reason: str | None = None,
+    repeat_type: str = "once",
 ) -> dict:
     category, priority = _detect_task_category_and_priority(title, reason)
     clean_reason = re.sub(r"\[meta:[^\]]*\]", "", str(reason or "")).strip() or None
+    rem_mm = _to_mmt(remind_dt)
 
     payload = {
         "title": title,
@@ -574,8 +623,8 @@ def add_task(
         "priority": priority,
         "reason": clean_reason,
     }
-    if remind_dt:
-        payload["remind_at"] = remind_dt.isoformat()
+    if rem_mm:
+        payload["remind_at"] = rem_mm.isoformat()
         payload["reminded"] = False
     try:
         supabase.table("tasks").insert(payload).execute()
@@ -586,15 +635,15 @@ def add_task(
             "repeat_type": repeat_type or "once",
             "reason": _pack_task_reason(clean_reason, category, priority),
         }
-        if remind_dt:
-            fallback_payload["remind_at"] = remind_dt.isoformat()
+        if rem_mm:
+            fallback_payload["remind_at"] = rem_mm.isoformat()
             fallback_payload["reminded"] = False
         try:
             supabase.table("tasks").insert(fallback_payload).execute()
         except Exception:
             minimal_payload = {"title": title, "status": "pending"}
-            if remind_dt:
-                minimal_payload["remind_at"] = remind_dt.isoformat()
+            if rem_mm:
+                minimal_payload["remind_at"] = rem_mm.isoformat()
                 minimal_payload["reminded"] = False
             supabase.table("tasks").insert(minimal_payload).execute()
     return {"status": "success", "message": f"Task added: {title}"}
@@ -623,12 +672,9 @@ def get_formatted_tasks() -> str:
             done_rows.append(f"✓ {title} ({cat_lbl})")
         else:
             r_str = ""
-            if t.get("remind_at"):
-                try:
-                    r_dt = datetime.fromisoformat(str(t["remind_at"]).replace("Z", "+00:00")).astimezone(MM_TZ)
-                    r_str = f" (⏰ {r_dt.strftime('%m-%d %H:%M')})"
-                except Exception:
-                    pass
+            r_dt = _to_mmt(t.get("remind_at"))
+            if r_dt:
+                r_str = f" (⏰ {r_dt.strftime('%m-%d %H:%M')} · {format_myanmar_date_short(r_dt)})"
             rep = t.get("repeat_type") or "once"
             rep_badge = ""
             if rep == "daily":
@@ -696,8 +742,13 @@ def _find_matching_pending_task(pending_tasks: list, query_text: str) -> dict | 
     return None
 
 
-def _format_single_task_added(title: str, remind_dt: datetime | None, reason: str | None, repeat_mode: str,
-                              raw_ctx: str) -> str:
+def _format_single_task_added(
+    title: str,
+    remind_dt: datetime | None,
+    reason: str | None,
+    repeat_mode: str,
+    raw_ctx: str,
+) -> str:
     clean_reason, cat, prio = _unpack_task_meta({"title": title, "reason": reason})
     if not reason:
         cat, prio = _detect_task_category_and_priority(f"{title} {raw_ctx}", None)
@@ -711,8 +762,10 @@ def _format_single_task_added(title: str, remind_dt: datetime | None, reason: st
     meta_line = f"{cat_lbl}" + (f" · {prio_badge}" if prio_badge else "")
 
     line = f"{prefix}\"{title}\" မှတ်ထားလိုက်ပါပြီ{ending}\n{meta_line}"
-    if remind_dt:
-        line += f"\n⏰ {remind_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[remind_dt.weekday()]})"
+    rem_mm = _to_mmt(remind_dt)
+    if rem_mm:
+        mm_cal_short = format_myanmar_date_short(rem_mm)
+        line += f"\n⏰ {rem_mm.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[rem_mm.weekday()]}) · {mm_cal_short}"
     if repeat_mode == "school_days":
         line += " · ကျောင်းဖွင့်ရက်"
     elif repeat_mode == "weekly":
@@ -781,7 +834,7 @@ def handle_task_intent(user_message: str, route: dict) -> str:
             )
             pending_tasks = pending_res.data or []
             matched = _find_matching_pending_task(pending_tasks, target_query or task_title or user_message)
-            new_rem_dt = route.get("remind_dt") or parse_reminder_datetime_mmt(user_message)
+            new_rem_dt = _to_mmt(route.get("remind_dt")) or parse_reminder_datetime_mmt(user_message)
             new_rep = route.get("repeat_type") or "once"
 
             if matched:
@@ -809,7 +862,8 @@ def handle_task_intent(user_message: str, route: dict) -> str:
                 e = "နော်" if is_hf else "ရှင်"
                 msg = f"{p}\"{final_title}\" ကို ပြင်ဆင်မှတ်သားပေးလိုက်ပါပြီ{e}"
                 if new_rem_dt:
-                    msg += f"\n⏰ {new_rem_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[new_rem_dt.weekday()]})"
+                    mm_cal_short = format_myanmar_date_short(new_rem_dt)
+                    msg += f"\n⏰ {new_rem_dt.strftime('%Y-%m-%d %H:%M')} ({MYANMAR_WEEKDAYS[new_rem_dt.weekday()]}) · {mm_cal_short}"
                 return msg
             return f"{prefix}ပြင်ဆင်ရမယ့် Pending Task ကို မတွေ့သေးပါဘူး{ending}"
         except Exception as e:
@@ -829,18 +883,18 @@ def handle_task_intent(user_message: str, route: dict) -> str:
             )
             pending_tasks = pending_res.data or []
             matched = _find_matching_pending_task(pending_tasks, search_key) or (
-                pending_tasks[0] if pending_tasks else None)
+                pending_tasks[0] if pending_tasks else None
+            )
             if matched:
                 m_title = matched["title"]
                 is_hf = _is_health_or_family_task(m_title, matched.get("reason"))
                 p = "မောင်ရေ — " if is_hf else ""
                 e = "နော်" if is_hf else "ရှင်"
-                done_payload = {"status": "done", "reminded": True, "updated_at": datetime.now(MM_TZ).isoformat()}
+                done_payload = {"status": "done", "reminded": True, "updated_at": _now_mmt().isoformat()}
                 try:
                     supabase.table("tasks").update(done_payload).eq("id", matched["id"]).execute()
                 except Exception:
-                    supabase.table("tasks").update({"status": "done", "reminded": True}).eq("id",
-                                                                                            matched["id"]).execute()
+                    supabase.table("tasks").update({"status": "done", "reminded": True}).eq("id", matched["id"]).execute()
                 return f"{p}\"{m_title}\" ပြီးသွားပြီမို့ Done မှတ်လိုက်ပါပြီ (နောက်ထပ် remind မလုပ်တော့ပါ){e}"
 
             return f"{prefix}ပြီးစီးကြောင်း မှတ်ရမယ့် Pending Task မတွေ့သေးပါဘူး{ending}"
@@ -853,7 +907,7 @@ def handle_task_intent(user_message: str, route: dict) -> str:
         added_lines = []
         for idx, mt in enumerate(multi_tasks, start=1):
             t_title = mt["clean_title"]
-            t_rem = mt.get("remind_dt")
+            t_rem = _to_mmt(mt.get("remind_dt"))
             t_reason = mt.get("reason")
             t_rep = mt.get("repeat_type", "once")
             add_task(t_title, t_rem, reason=t_reason, repeat_type=t_rep)
@@ -861,8 +915,9 @@ def handle_task_intent(user_message: str, route: dict) -> str:
         return "\n\n".join(added_lines)
 
     clean_title = (multi_tasks[0]["clean_title"] if multi_tasks else task_title) or _clean_task_title_fallback(
-        user_message)
-    remind_dt = (multi_tasks[0].get("remind_dt") if multi_tasks else route.get("remind_dt"))
+        user_message
+    )
+    remind_dt = _to_mmt(multi_tasks[0].get("remind_dt") if multi_tasks else route.get("remind_dt"))
     repeat_mode = (multi_tasks[0].get("repeat_type") if multi_tasks else route.get("repeat_type", "once"))
     reason = (multi_tasks[0].get("reason") if multi_tasks else reason)
 
