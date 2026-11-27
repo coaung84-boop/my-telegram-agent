@@ -55,28 +55,27 @@ def get_myanmar_calendar_context(target_dt: datetime | None = None) -> str:
     )
 
 
-def _compute_next_repeat_datetime(current_rem_dt: datetime, repeat_type: str, now_mm: datetime | None = None) -> datetime | None:
-    """Repeat task (daily / weekly / school_days) ပြီးသွားလျှင် နောက်တစ်ကြိမ် remind_at ကို တွက်ပေးသည်။"""
-    now_ref = now_mm or datetime.now(MM_TZ)
-    r_type = (repeat_type or "once").strip().lower()
-    if r_type not in {"daily", "weekly", "school_days"}:
-        return None
+def _category_label_mm(category: str | None) -> str:
+    cat = (category or "general").strip().lower()
+    mapping = {
+        "health": "🩺 ကျန်းမာရေး",
+        "family": "👨‍👩‍👧 မိသားစု",
+        "မိသားစု": "👨‍👩‍👧 မိသားစု",
+        "ကလေး": "👨‍👩‍👧 မိသားစု",
+        "work": "💼 လုပ်ငန်း",
+        "အလုပ်": "💼 လုပ်ငန်း",
+        "ရုံး": "💼 လုပ်ငန်း",
+        "general": "📌 အထွေထွေ",
+        "အထွေထွေ": "📌 အထွေထွေ",
+    }
+    if cat in mapping:
+        return mapping[cat]
+    return f"💼 {category}" if category else "📌 အထွေထွေ"
 
-    next_dt = current_rem_dt
-    if r_type == "daily":
-        next_dt = current_rem_dt + timedelta(days=1)
-        while next_dt <= now_ref:
-            next_dt += timedelta(days=1)
-    elif r_type == "weekly":
-        next_dt = current_rem_dt + timedelta(days=7)
-        while next_dt <= now_ref:
-            next_dt += timedelta(days=7)
-    elif r_type == "school_days":
-        next_dt = current_rem_dt + timedelta(days=1)
-        while not _get_mm_date_info(next_dt)["is_school_day"] or next_dt <= now_ref:
-            next_dt += timedelta(days=1)
 
-    return next_dt
+def _priority_badge_mm(priority: str | None) -> str:
+    p = (priority or "normal").strip().lower()
+    return "🔥 အရေးကြီး" if p in {"urgent", "high"} else ""
 
 
 def _unpack_task_meta(task_row: dict) -> tuple[str | None, str, str]:
@@ -109,6 +108,34 @@ def _is_health_or_family_task(text: str, reason: str | None = None) -> bool:
         "child", "children", "kid", "kids", "ကျောင်း", "school",
     ]
     return any(k in combined for k in keywords)
+
+
+def _compute_next_repeat_datetime(
+    current_rem_dt: datetime,
+    repeat_type: str,
+    now_mm: datetime | None = None,
+) -> datetime | None:
+    """Repeat task (daily / weekly / school_days) ပြီးသွားလျှင် နောက်တစ်ကြိမ် remind_at ကို တွက်ပေးသည်။"""
+    now_ref = now_mm or datetime.now(MM_TZ)
+    r_type = (repeat_type or "once").strip().lower()
+    if r_type not in {"daily", "weekly", "school_days"}:
+        return None
+
+    next_dt = current_rem_dt
+    if r_type == "daily":
+        next_dt = current_rem_dt + timedelta(days=1)
+        while next_dt <= now_ref:
+            next_dt += timedelta(days=1)
+    elif r_type == "weekly":
+        next_dt = current_rem_dt + timedelta(days=7)
+        while next_dt <= now_ref:
+            next_dt += timedelta(days=7)
+    elif r_type == "school_days":
+        next_dt = current_rem_dt + timedelta(days=1)
+        while not _get_mm_date_info(next_dt)["is_school_day"] or next_dt <= now_ref:
+            next_dt += timedelta(days=1)
+
+    return next_dt
 
 
 def _normalize_iso_mmt(due_at: str | None) -> str | None:
@@ -226,15 +253,6 @@ def _format_short_due(due_at: str | None) -> str:
     return s[:16]
 
 
-def _format_category_badge(category: str | None) -> str:
-    cat = (category or "general").strip().lower()
-    if cat in {"မိသားစု", "ကလေး", "family"}:
-        return "👨‍👩‍👧 မိသားစု"
-    if cat in {"အလုပ်", "ရုံး", "work", "beexprss", "t&n"}:
-        return f"💼 {category}"
-    return "📌 အထွေထွေ"
-
-
 def _clean_task_title(raw_title: str) -> str:
     t = (raw_title or "").strip().strip('"').strip("'")
     t = re.sub(r"^(?:နောက်\s*\d+\s*မိနစ်(?:အတွင်း|နေရင်)?|မနက်ဖြန်|ဒီနေ့)\s*", "", t).strip()
@@ -322,9 +340,14 @@ def _build_task_list_payload(show_done: bool = False) -> tuple[str, InlineKeyboa
                 tid = t.get("id")
                 title = _clean_task_title(t.get("title") or "")
                 due_txt = _format_short_due(t.get("due_at"))
-                cat_badge = _format_category_badge(t.get("category"))
+                clean_reason, cat, prio = _unpack_task_meta(t)
+                cat_badge = _category_label_mm(cat)
+                prio_badge = _priority_badge_mm(prio)
                 due_part = f" · ⏰ `{due_txt}`" if due_txt else ""
-                lines.append(f"**{idx}.** {title}{due_part} — [{cat_badge}] *(ID #{tid})*")
+                prio_part = f" · {prio_badge}" if prio_badge else ""
+                lines.append(f"**{idx}.** {title}{due_part}{prio_part} — [{cat_badge}] *(ID #{tid})*")
+                if clean_reason:
+                    lines.append(f"   📝 {clean_reason}")
             if len(pending_rows) > 12:
                 lines.append(f"… နောက်ထပ် **{len(pending_rows) - 12}** ခု ကျန်ပါသေးတယ်။")
 
@@ -335,9 +358,10 @@ def _build_task_list_payload(show_done: bool = False) -> tuple[str, InlineKeyboa
         if not done_rows:
             lines.append("ပြီးစီးထားတဲ့ task မရှိသေးပါဘူးရှင်။")
         else:
-            for idx, t in enumerate(done_rows[:15], start=1):
+            for t in done_rows[:15]:
                 title = _clean_task_title(t.get("title") or "")
-                cat_badge = _format_category_badge(t.get("category"))
+                _, cat, _ = _unpack_task_meta(t)
+                cat_badge = _category_label_mm(cat)
                 lines.append(f"• ✓ {title} — [{cat_badge}]")
             if len(done_rows) > 15:
                 lines.append(f"… နောက်ထပ် **{len(done_rows) - 15}** ခု ကျန်ပါသေးတယ်။")
@@ -421,7 +445,7 @@ def handle_task_intent(user_text: str, route: dict) -> str:
 
     add_task(title=title, due_at=due_at, category=category, note=note)
     due_short = _format_short_due(due_at)
-    cat_badge = _format_category_badge(category)
+    cat_badge = _category_label_mm(category)
     due_line = f"\n⏰ `{due_short}`" if due_short else ""
     return f"“{title}” မှတ်ထားလိုက်ပါပြီရှင်\n[{cat_badge}]{due_line}"
 
@@ -499,7 +523,6 @@ async def handle_task_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
         if act == "sched" and tid > 0:
             _PENDING_TASK_EDITS[query.from_user.id] = {"mode": "SCHED", "task_id": tid, "view_id": view_id}
-            now = datetime.now(MM_TZ)
             kb = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton("+15 Min", callback_data=f"tskquick:{tid}:15m:{view_id}"),
