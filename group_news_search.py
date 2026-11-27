@@ -278,6 +278,36 @@ Group Logs:
     return call_ai_with_3tier_fallback(prompt)
 
 
+def generate_all_groups_summary(period: str = "today") -> str:
+    """Today / Yesterday အလိုက် Group မှတ်တမ်းများကို စုစည်း၍ အနှစ်ချုပ် ထုတ်ပေးသည်။"""
+    norm_period = "yesterday" if (period or "").lower() == "yesterday" else "today"
+    label_mm = "ယနေ့ (Today)" if norm_period == "today" else "မနေ့က (Yesterday)"
+    rows = fetch_group_messages(group_name=None, query_text="", limit=150, period=norm_period)
+    if not rows:
+        return f"📌 {label_mm} အတွက် Group မှတ်တမ်း မတွေ့သေးပါဘူးရှင်။"
+
+    lines = [
+        f"[{_format_mm_timestamp(r['created_at'])} | {r['chat_title']} | {r['sender_name']}]: {r['message_text']}"
+        for r in reversed(rows)
+    ]
+    logs_block = "\n".join(lines)[:14000]
+
+    prompt = f"""
+သင်သည် 'သင်ဇာ (Thinzar)' အမည်ရှိ မြန်မာမိန်းကလေးဟန် ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။
+အောက်ပါ {label_mm} Telegram Group မှတ်တမ်းများကို အခြေခံ၍ Group အလိုက် အဓိက ဆွေးနွေးချက်/သတင်း/လုပ်ဆောင်ချက်များကို မြန်မာဘာသာဖြင့် အနှစ်ချုပ် ရေးပေးပါ။
+
+စည်းမျဉ်းများ:
+1. မှတ်တမ်းထဲ ပါဝင်သော အချက်အလက်များကိုသာ အခြေခံပါ။
+2. Group ခေါင်းစဉ်အလိုက် သပ်သပ်ရပ်ရပ် ခွဲခြားဖော်ပြပါ။
+3. အချက်တစ်ခုစီ၏ ရှေ့တွင် [Verified]၊ [Deduced]၊ [Unverified] သင့်လျော်သော tag ထည့်ပါ။
+4. 'မောင်' ဟု လုံးဝ မသုံးပါနှင့်။
+
+Group Logs ({label_mm}):
+{logs_block}
+"""
+    return call_ai_with_3tier_fallback(prompt)
+
+
 # --- Trusted News Fetchers (Telegram Channels + RSS + Domain Web Search + Tavily) ---
 def _clean_html_text(raw_html: str) -> str:
     if not raw_html:
