@@ -177,7 +177,7 @@ def _to_spoken_chat_prose(raw_text: str) -> str:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     spoken_lines: list[str] = []
     for ln in lines:
-        ln = re.sub(r"\s*:\s*", " ဆိုတာကတော့ ", ln)
+        ln = re.sub(r"\s*:\s*", "၊ ", ln)
         ln = re.sub(r"\s+", " ", ln).strip()
         if not ln:
             continue
@@ -188,34 +188,30 @@ def _to_spoken_chat_prose(raw_text: str) -> str:
     combined = " ".join(spoken_lines)
     combined = re.sub(r"\s+", " ", combined).strip()
 
-    if len(combined) > 260:
-        try:
-            short_prompt = (
-                "အောက်ပါ စာသားရဲ့ အဓိက အချက်ကို မြန်မာမိန်းကလေးတစ်ယောက် စကားပြောသလို "
-                "ရင်းရင်းနှီးနှီးနဲ့ စာကြောင်း ၂–၃ ကြောင်းစာလောက်ပဲ တိုတိုရှင်းရှင်း ချုံ့ပြောပေးပါ။ "
-                "စာထဲမှာ အပြည့်အစုံ ရေးထားတယ် စသဖြင့် မညွှန်းပါနှင့်။\n\n"
-                f"{combined}"
-            )
-            ai_short = (call_ai_with_3tier_fallback(short_prompt) or "").strip()
-            if ai_short and "ခဏအလုပ်များနေပါတယ်" not in ai_short:
-                ai_short = re.sub(r"[*_`~#>\-]+", " ", ai_short)
-                ai_short = re.sub(r"\s+", " ", ai_short).strip()
-                if not ai_short.endswith(("။", "!", "?")):
-                    ai_short = f"{ai_short}။"
-                return ai_short[:300]
-        except Exception:
-            pass
-
+    if len(combined) > 320:
         sentences = [s.strip() for s in re.split(r"(?<=[။!?])\s*", combined) if s.strip()]
-        picked = " ".join(sentences[:2]).strip() if sentences else combined[:220]
-        if len(picked) > 240:
-            cut = picked[:240]
+        picked: list[str] = []
+        total_len = 0
+        for sent in sentences:
+            if not sent:
+                continue
+            s_norm = sent if sent.endswith(("။", "!", "?")) else f"{sent}။"
+            if total_len + len(s_norm) > 300 and picked:
+                break
+            picked.append(s_norm)
+            total_len += len(s_norm) + 1
+            if len(picked) >= 3:
+                break
+
+        result = " ".join(picked).strip() if picked else combined[:300]
+        if len(result) > 300:
+            cut = result[:300]
             last_p = max(cut.rfind("။"), cut.rfind("၊"), cut.rfind(" "))
-            if last_p > 60:
-                picked = cut[: last_p + 1]
-        if not picked.endswith(("။", "!", "?")):
-            picked = f"{picked}။"
-        return picked
+            if last_p > 80:
+                result = cut[: last_p + 1]
+        if not result.endswith(("။", "!", "?")):
+            result = f"{result}။"
+        return result
 
     return combined
 
