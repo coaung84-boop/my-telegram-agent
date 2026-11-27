@@ -55,6 +55,30 @@ def get_myanmar_calendar_context(target_dt: datetime | None = None) -> str:
     )
 
 
+def _compute_next_repeat_datetime(current_rem_dt: datetime, repeat_type: str, now_mm: datetime | None = None) -> datetime | None:
+    """Repeat task (daily / weekly / school_days) ပြီးသွားလျှင် နောက်တစ်ကြိမ် remind_at ကို တွက်ပေးသည်။"""
+    now_ref = now_mm or datetime.now(MM_TZ)
+    r_type = (repeat_type or "once").strip().lower()
+    if r_type not in {"daily", "weekly", "school_days"}:
+        return None
+
+    next_dt = current_rem_dt
+    if r_type == "daily":
+        next_dt = current_rem_dt + timedelta(days=1)
+        while next_dt <= now_ref:
+            next_dt += timedelta(days=1)
+    elif r_type == "weekly":
+        next_dt = current_rem_dt + timedelta(days=7)
+        while next_dt <= now_ref:
+            next_dt += timedelta(days=7)
+    elif r_type == "school_days":
+        next_dt = current_rem_dt + timedelta(days=1)
+        while not _get_mm_date_info(next_dt)["is_school_day"] or next_dt <= now_ref:
+            next_dt += timedelta(days=1)
+
+    return next_dt
+
+
 def _normalize_iso_mmt(due_at: str | None) -> str | None:
     if not due_at:
         return None
