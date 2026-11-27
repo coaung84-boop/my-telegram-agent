@@ -483,6 +483,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id != ADMIN_USER_ID:
         return
 
+    if update.message.document and await handle_py_file_upload(update, context):
+        return
+
     user_text = (update.message.text or update.message.caption or "").strip()
     image_bytes = None
     mime_type = None
