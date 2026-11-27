@@ -7,93 +7,7 @@ from telegram.ext import ContextTypes
 
 from config import ADMIN_USER_ID, MM_TZ
 from ai_engine import call_ai_with_3tier_fallback
-import database as _db
-
-
-def _resolve_db_fn(*names):
-    for name in names:
-        fn = getattr(_db, name, None)
-        if callable(fn):
-            return fn
-    return None
-
-
-def add_task(title: str, due_at: str | None = None, category: str = "အထွေထွေ", note: str | None = None):
-    fn = _resolve_db_fn("add_task", "create_task", "insert_task", "save_task")
-    if fn:
-        try:
-            return fn(title=title, due_at=due_at, category=category, note=note)
-        except TypeError:
-            try:
-                return fn(title, due_at, category)
-            except TypeError:
-                return fn(title)
-    return None
-
-
-def list_tasks(status: str = "pending"):
-    fn = _resolve_db_fn("list_tasks", "get_tasks", "fetch_tasks", "query_tasks")
-    if fn:
-        try:
-            rows = fn(status=status)
-            if rows is not None:
-                return rows
-        except TypeError:
-            pass
-        try:
-            rows = fn(status)
-            if rows is not None:
-                return rows
-        except TypeError:
-            pass
-        try:
-            rows = fn()
-            if isinstance(rows, list):
-                want_done = status.lower() in {"done", "completed", "finished"}
-                filtered = []
-                for r in rows:
-                    if not isinstance(r, dict):
-                        continue
-                    is_d = bool(r.get("done")) or str(r.get("status", "")).lower() in {"done", "completed", "finished"}
-                    if is_d == want_done:
-                        filtered.append(r)
-                return filtered
-        except Exception:
-            pass
-    return []
-
-
-def mark_task_done(task_id: int):
-    fn = _resolve_db_fn("mark_task_done", "complete_task", "done_task", "set_task_done")
-    if fn:
-        return fn(task_id)
-    upd = _resolve_db_fn("update_task_fields", "update_task")
-    if upd:
-        try:
-            return upd(task_id, status="done")
-        except TypeError:
-            return upd(task_id, {"status": "done"})
-    return None
-
-
-def delete_task(task_id: int):
-    fn = _resolve_db_fn("delete_task", "remove_task")
-    if fn:
-        return fn(task_id)
-    return None
-
-
-def update_task_fields(task_id: int, **kwargs):
-    fn = _resolve_db_fn("update_task_fields", "update_task", "edit_task")
-    if fn:
-        try:
-            return fn(task_id, **kwargs)
-        except TypeError:
-            try:
-                return fn(task_id, kwargs)
-            except TypeError:
-                pass
-    return None
+from database import supabase
 
 # Inline callback state caches
 _TASK_LIST_VIEW_STATE: dict[str, dict] = {}
@@ -141,6 +55,108 @@ def get_myanmar_calendar_context(target_dt: datetime | None = None) -> str:
     )
 
 
+def _normalize_iso_mmt(due_at: str | None) -> str | None:
+    if not due_at:
+        return None
+    s = str(due_at).strip()
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(s[:19], fmt).replace(tzinfo=MM_TZ)
+            return dt.isoformat()
+        except ValueError:
+            continue
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        dt = dt.replace(tzinfo=MM_TZ) if dt.tzinfo is None else dt.astimezone(MM_TZ)
+        return dt.isoformat()
+    except Exception:
+        return None
+
+
+def add_task(title: str, due_at: str | None = None, category: str = "general", note: str | None = None):
+    now_iso = datetime.now(MM_TZ).isoformat()
+    rem_iso = _normalize_iso_mmt(due_at)
+    cat_val = "family" if category in {"မိသားစု", "ကလေး", "family"} else "general"
+    payload = {
+        "title": title,
+        "status": "pending",
+        "priority": "normal",
+        "repeat_type": "once",
+        "category": cat_val,
+        "reminded": False,
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+    if rem_iso:
+        payload["due_at"] = rem_iso
+        payload["remind_at"] = rem_iso
+        payload["reminder_at"] = rem_iso
+    if note:
+        payload["notes"] = note
+        payload["reason"] = note
+    res = supabase.table("tasks").insert(payload).execute()
+    return res.data
+
+
+def list_tasks(status: str = "pending"):
+    res = (
+        supabase.table("tasks")
+        .select("*")
+        .eq("status", status)
+        .order("id", desc=False)
+        .execute()
+    )
+    rows = res.data or []
+    for r in rows:
+        if not r.get("due_at") and r.get("remind_at"):
+            r["due_at"] = r["remind_at"]
+    return rows
+
+
+def mark_task_done(task_id: int):
+    now_iso = datetime.now(MM_TZ).isoformat()
+    res = (
+        supabase.table("tasks")
+        .update({
+            "status": "done",
+            "reminded": True,
+            "completed_at": now_iso,
+            "updated_at": now_iso,
+        })
+        .eq("id", int(task_id))
+        .execute()
+    )
+    return res.data
+
+
+def delete_task(task_id: int):
+    res = supabase.table("tasks").delete().eq("id", int(task_id)).execute()
+    return res.data
+
+
+def update_task_fields(task_id: int, **kwargs):
+    now_iso = datetime.now(MM_TZ).isoformat()
+    upd: dict = {"updated_at": now_iso}
+    if "title" in kwargs and kwargs["title"]:
+        upd["title"] = kwargs["title"]
+    if "category" in kwargs and kwargs["category"]:
+        c = kwargs["category"]
+        upd["category"] = "family" if c in {"မိသားစု", "ကလေး", "family"} else "general"
+    if "note" in kwargs and kwargs["note"] is not None:
+        upd["notes"] = kwargs["note"]
+        upd["reason"] = kwargs["note"]
+    if "due_at" in kwargs:
+        rem_iso = _normalize_iso_mmt(kwargs["due_at"])
+        if rem_iso:
+            upd["due_at"] = rem_iso
+            upd["remind_at"] = rem_iso
+            upd["reminder_at"] = rem_iso
+            upd["reminded"] = False
+            upd["status"] = "pending"
+    res = supabase.table("tasks").update(upd).eq("id", int(task_id)).execute()
+    return res.data
+
+
 def _format_short_due(due_at: str | None) -> str:
     if not due_at:
         return ""
@@ -155,12 +171,12 @@ def _format_short_due(due_at: str | None) -> str:
 
 
 def _format_category_badge(category: str | None) -> str:
-    cat = (category or "အထွေထွေ").strip()
-    if cat in {"မိသားစု", "ကလေး", "Family"}:
+    cat = (category or "general").strip().lower()
+    if cat in {"မိသားစု", "ကလေး", "family"}:
         return "👨‍👩‍👧 မိသားစု"
-    if cat in {"အလုပ်", "ရုံး", "Work", "Beexprss", "T&N"}:
-        return f"💼 {cat}"
-    return f"📌 {cat}"
+    if cat in {"အလုပ်", "ရုံး", "work", "beexprss", "t&n"}:
+        return f"💼 {category}"
+    return "📌 အထွေထွေ"
 
 
 def _clean_task_title(raw_title: str) -> str:
@@ -198,7 +214,7 @@ Return ONLY valid JSON with keys:
 - "task_action": "ADD" | "LIST" | "DONE" | "DELETE" | "UPDATE" | "REMIND" | null
 - "title": string | null (concise clean Burmese/English title without filler words)
 - "due_at": string | null (format "YYYY-MM-DD HH:MM" in MMT, e.g. "{(now + timedelta(minutes=8)).strftime('%Y-%m-%d %H:%M')}" for "in 8 minutes")
-- "category": string (default "အထွေထွေ", or "မိသားစု" for family/kids)
+- "category": string (default "general", or "family" for family/kids)
 - "note": string | null
 - "task_id": int | null
 - "search_query": string | null
@@ -231,7 +247,7 @@ Rules:
             "task_action": "ADD",
             "title": _clean_task_title(user_text),
             "due_at": due_str,
-            "category": "အထွေထွေ",
+            "category": "general",
         }
     return {"intent": "GENERAL"}
 
@@ -338,7 +354,7 @@ def handle_task_intent(user_text: str, route: dict) -> str:
         elif m_hr:
             due_at = (now + timedelta(hours=int(m_hr.group(1)))).strftime("%Y-%m-%d %H:%M")
 
-    category = (route.get("category") or "အထွေထွေ").strip()
+    category = (route.get("category") or "general").strip()
     note = route.get("note")
 
     if action in {"UPDATE", "REMIND"} and route.get("task_id"):
@@ -513,7 +529,7 @@ async def consume_pending_task_input(update: Update, context: ContextTypes.DEFAU
 
     if mode == "ADD":
         title = _clean_task_title(parsed.get("title") or txt)
-        cat = (parsed.get("category") or "အထွေထွေ").strip()
+        cat = (parsed.get("category") or "general").strip()
         add_task(title=title, due_at=due_at, category=cat)
         await msg.reply_text(f"➕ **“{title}”** ကို Task စာရင်းထဲ ထည့်ပြီးပါပြီရှင်" + (f" · ⏰ `{_format_short_due(due_at)}`" if due_at else ""))
     elif mode == "EDIT" and tid > 0:
