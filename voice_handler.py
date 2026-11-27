@@ -463,11 +463,19 @@ async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
         else:
             mm_pitch, mm_rate, mm_pause = lift_cycle[idx % len(lift_cycle)]
 
-        # မြန်မာနဲ့ English ကြား stream ခွဲဆက်လို့ အသံပြတ်တာ လျော့စေရန် clause တစ်ခုလုံးကို တစ်ဆက်တည်း ထုတ်သည်
-        clean_clause = re.sub(r"\s+", " ", clause_txt).strip()
-        if clean_clause:
+        # မြန်မာအရှိန်ကို မနှေးဘဲ English စကားလုံးတွေကို ခဏရပ်ပြီး ပိုရှင်းရှင်း ဖတ်စေရန် ညှိထားသည်
+        paced_clause = re.sub(
+            r"(?<![A-Za-z])([A-Za-z][A-Za-z0-9\-\.]*)(?![A-Za-z])",
+            r"، \1 ،",
+            clause_txt,
+        )
+        paced_clause = re.sub(r"(?:،\s*){2,}", "၊ ", paced_clause)
+        paced_clause = re.sub(r"^\s*،\s*", "", paced_clause)
+        paced_clause = re.sub(r"\s*،\s*([။!?])", r"\1", paced_clause)
+        paced_clause = re.sub(r"\s+", " ", paced_clause).strip()
+        if paced_clause:
             communicate = edge_tts.Communicate(
-                text=clean_clause,
+                text=paced_clause,
                 voice="my-MM-NilarNeural",
                 rate=mm_rate,
                 pitch=mm_pitch,
