@@ -45,6 +45,70 @@ def _sanitize_core_rules(raw_rules: str) -> str:
     return cleaned or DEFAULT_CORE_RULES
 
 
+def get_core_rule_lines(user_id: int) -> list[str]:
+    """လက်ရှိ core_rules စာသားထဲမှ rule line များကို list အဖြစ် ခွဲထုတ်ပေးသည်။"""
+    rec = get_user_profile_record(user_id)
+    raw = (rec.get("core_rules") or DEFAULT_CORE_RULES).strip()
+    lines = []
+    for ln in raw.splitlines():
+        cleaned = re.sub(r"^\s*[-•*]+\s*", "", ln).strip()
+        if cleaned:
+            lines.append(cleaned)
+    return lines or [DEFAULT_CORE_RULES]
+
+
+def _save_core_rules_with_version(
+    user_id: int,
+    new_rules_lines: list[str],
+    note: str,
+    status_prefix: str,
+    detail_line: str,
+) -> str:
+    """Rule line list ကို စစ်ဆေးပြီး အရင် version ကို မှတ်တမ်းတင်ကာ version တိုးသိမ်းပေးသည်။"""
+    valid_lines = [re.sub(r"^\s*[-•*]+\s*", "", x).strip() for x in (new_rules_lines or []) if str(x or "").strip()]
+    if not valid_lines:
+        return "Core Rule စာရင်းကို အလွတ်ထား၍ မရပါဘူးရှင်"
+
+    try:
+        rec = get_user_profile_record(user_id)
+        old_version = int(rec.get("version") or 1)
+        old_rules = (rec.get("core_rules") or DEFAULT_CORE_RULES).strip()
+        old_summary = (rec.get("profile_summary") or "").strip()
+        old_prefs = (rec.get("style_preferences") or "").strip()
+
+        try:
+            supabase.table("skill_versions").insert({
+                "user_id": int(user_id),
+                "version": old_version,
+                "core_rules": old_rules,
+                "style_preferences": old_prefs,
+                "note": note,
+            }).execute()
+        except Exception as ver_err:
+            print(f"[Skill Version Archive Error]: {ver_err}")
+
+        new_version = old_version + 1
+        updated_rules = "\n".join(f"- {ln}" for ln in valid_lines)
+        updated_prefs = f"{old_prefs}\n[Core Rule v{new_version}]: {detail_line}".strip()
+
+        supabase.table("user_profile").upsert(
+            {
+                "user_id": int(user_id),
+                "core_rules": updated_rules,
+                "version": new_version,
+                "profile_summary": old_summary,
+                "style_preferences": updated_prefs,
+                "updated_at": datetime.now(MM_TZ).isoformat(),
+            },
+            on_conflict="user_id",
+        ).execute()
+
+        return f"{status_prefix} (Version v{new_version}) ဖြစ်သွားပါပြီရှင်\n• {detail_line}"
+    except Exception as e:
+        print(f"[Error saving core rule version]: {type(e).__name__}: {e}")
+        return f"Rule သိမ်းရာမှာ အခက်အခဲ ရှိနေပါတယ်ရှင် — {type(e).__name__}: {str(e)[:120]}"
+
+
 def get_user_profile_record(user_id: int) -> dict:
     """user_profile row တစ်ခုလုံး (core_rules, version, profile_summary, style_preferences) ကို ဖတ်သည်။"""
     try:
@@ -90,56 +154,67 @@ def get_user_profile(user_id: int) -> str:
 
 
 def update_core_rule_version(user_id: int, new_rule_line: str, note: str = "User rule update") -> str:
-    """Core rule အသစ် ထည့်/ပြင်တိုင်း အရင် version ကို မဖျက်ဘဲ version တိုးပြီး သိမ်းပေးသည်။"""
+    """Core rule အသစ် ထည့်တိုင်း အရင် version ကို မဖျက်ဘဲ version တိုးပြီး သိမ်းပေးသည်။"""
     clean_rule = (new_rule_line or "").strip().strip("<>").strip()
     if not clean_rule:
         return "ထည့်လိုသည့် Rule စာသားလေး ရေးပေးပါရှင်"
 
-    try:
-        rec = get_user_profile_record(user_id)
-        old_version = int(rec.get("version") or 1)
-        old_rules = (rec.get("core_rules") or DEFAULT_CORE_RULES).strip()
-        old_summary = (rec.get("profile_summary") or "").strip()
-        old_prefs = (rec.get("style_preferences") or "").strip()
+    lines = get_core_rule_lines(user_id)
+    lines.append(clean_rule)
+    return _save_core_rules_with_version(
+        user_id=user_id,
+        new_rules_lines=lines,
+        note=note,
+        status_prefix="Core Rule အသစ်ကို",
+        detail_line=clean_rule,
+    )
 
-        try:
-            supabase.table("skill_versions").insert({
-                "user_id": int(user_id),
-                "version": old_version,
-                "core_rules": old_rules,
-                "style_preferences": old_prefs,
-                "note": note,
-            }).execute()
-        except Exception as ver_err:
-            print(f"[Skill Version Archive Error]: {ver_err}")
 
-        new_version = old_version + 1
-        updated_rules = f"{old_rules}\n- {clean_rule}".strip()
-        updated_prefs = f"{old_prefs}\n[Core Rule v{new_version}]: {clean_rule}".strip()
+def edit_core_rule_line(user_id: int, rule_index: int, updated_rule_text: str) -> str:
+    """ရှိပြီးသား rule တစ်ခုကို ပြင်ဆင်ပြီး version တိုးသိမ်းပေးသည်။"""
+    clean_rule = (updated_rule_text or "").strip().strip("<>").strip()
+    if not clean_rule:
+        return "ပြင်ဆင်လိုသည့် Rule စာသားလေး ရေးပေးပါရှင်"
 
-        supabase.table("user_profile").upsert(
-            {
-                "user_id": int(user_id),
-                "core_rules": updated_rules,
-                "version": new_version,
-                "profile_summary": old_summary,
-                "style_preferences": updated_prefs,
-                "updated_at": datetime.now(MM_TZ).isoformat(),
-            },
-            on_conflict="user_id",
-        ).execute()
+    lines = get_core_rule_lines(user_id)
+    if rule_index < 0 or rule_index >= len(lines):
+        return "ပြင်ဆင်လိုသည့် Rule ကို ရှာမတွေ့ပါဘူးရှင်"
 
-        return f"Core Rule အသစ်ကို Version v{new_version} အဖြစ် မှတ်သားပေးလိုက်ပါပြီရှင်\n• {clean_rule}"
-    except Exception as e:
-        print(f"[Error updating core rule version]: {type(e).__name__}: {e}")
-        return f"Rule သိမ်းရာမှာ အခက်အခဲ ရှိနေပါတယ်ရှင် — {type(e).__name__}: {str(e)[:120]}"
+    old_line = lines[rule_index]
+    lines[rule_index] = clean_rule
+    return _save_core_rules_with_version(
+        user_id=user_id,
+        new_rules_lines=lines,
+        note=f"Edit rule #{rule_index + 1}: {clean_rule[:50]}",
+        status_prefix=f"Rule #{rule_index + 1} ပြင်ဆင်မှုကို",
+        detail_line=f"{old_line}  ->  {clean_rule}",
+    )
+
+
+def delete_core_rule_line(user_id: int, rule_index: int) -> str:
+    """ရှိပြီးသား rule တစ်ခုကို ဖျက်ပြီး version တိုးသိမ်းပေးသည်။"""
+    lines = get_core_rule_lines(user_id)
+    if len(lines) <= 1:
+        return "အနည်းဆုံး Rule တစ်ခု ကျန်ရှိနေရပါမည်ရှင်"
+    if rule_index < 0 or rule_index >= len(lines):
+        return "ဖျက်လိုသည့် Rule ကို ရှာမတွေ့ပါဘူးရှင်"
+
+    removed_line = lines.pop(rule_index)
+    return _save_core_rules_with_version(
+        user_id=user_id,
+        new_rules_lines=lines,
+        note=f"Delete rule #{rule_index + 1}: {removed_line[:50]}",
+        status_prefix=f"Rule #{rule_index + 1} ဖျက်ခြင်းကို",
+        detail_line=f"Removed: {removed_line}",
+    )
 
 
 def get_skill_versions_summary(user_id: int) -> str:
     rec = get_user_profile_record(user_id)
     cur_v = rec.get("version") or 1
-    cur_rules = (rec.get("core_rules") or DEFAULT_CORE_RULES).strip()
-    lines = [f"📌 လက်ရှိ Active Core Rules (v{cur_v}):\n{cur_rules}"]
+    rule_lines = get_core_rule_lines(user_id)
+    numbered_rules = "\n".join(f"{idx + 1}. {ln}" for idx, ln in enumerate(rule_lines))
+    lines = [f"📌 လက်ရှိ Active Core Rules (v{cur_v}):\n{numbered_rules}"]
 
     try:
         hist_res = (
@@ -160,7 +235,6 @@ def get_skill_versions_summary(user_id: int) -> str:
     except Exception:
         pass
 
-    lines.append("\n💡 Rule အသစ်ထည့်ချင်ရင် `/setrule <rule>` လို့ ရေးထည့်နိုင်ပါတယ်ရှင်")
     return "\n".join(lines)
 
 
@@ -393,3 +467,4 @@ def recall_relevant_history(user_id: int, query_text: str, recent_limit: int = 8
         print(f"Error recalling chat history: {e}")
 
     return "\n\n".join(sections)
+    
