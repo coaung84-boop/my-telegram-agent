@@ -423,28 +423,15 @@ async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
         else:
             mm_pitch, mm_rate = lift_cycle[idx % len(lift_cycle)]
 
-        sub_segs = _split_burmese_and_english_segments(clause_txt)
-        for kind, seg_txt in sub_segs:
-            if kind == "en":
-                communicate = edge_tts.Communicate(
-                    text=seg_txt,
-                    voice="my-MM-NilarNeural",
-                    rate="-4%",
-                    pitch="+11Hz",
-                )
-                async for ev in communicate.stream():
-                    if ev.get("type") == "audio" and ev.get("data"):
-                        out_buf.write(ev["data"])
-            else:
-                communicate = edge_tts.Communicate(
-                    text=seg_txt,
-                    voice="my-MM-NilarNeural",
-                    rate=mm_rate,
-                    pitch=mm_pitch,
-                )
-                async for ev in communicate.stream():
-                    if ev.get("type") == "audio" and ev.get("data"):
-                        out_buf.write(ev["data"])
+        communicate = edge_tts.Communicate(
+            text=clause_txt,
+            voice="my-MM-NilarNeural",
+            rate=mm_rate,
+            pitch=mm_pitch,
+        )
+        async for ev in communicate.stream():
+            if ev.get("type") == "audio" and ev.get("data"):
+                out_buf.write(ev["data"])
 
     audio_data = out_buf.getvalue()
     if not audio_data:
