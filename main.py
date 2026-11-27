@@ -1,9 +1,7 @@
 import os
-import re
 import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime, timedelta
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -19,7 +17,6 @@ from database import supabase
 from ai_engine import call_ai_with_3tier_fallback
 from memory_manager import (
     save_chat_message,
-    get_user_profile_record,
     update_core_rule_version,
     get_skill_versions_summary,
     evolve_user_profile,
@@ -33,6 +30,7 @@ from task_manager import (
     _is_health_or_family_task,
     cleanup_old_done_tasks,
     get_myanmar_calendar_context,
+    format_myanmar_date_short,
     smart_route_and_parse,
     get_formatted_tasks,
     handle_task_intent,
@@ -43,10 +41,11 @@ from group_news_search import (
     get_available_group_names,
     handle_group_query,
     generate_all_groups_summary,
+    get_group_report,
     handle_news_command,
     perform_hybrid_web_search,
 )
-from voice_handler import handle_voice_message, send_voice_reply
+from voice_handler import handle_voice_message
 from github_ops import handle_patch_command, getfile_command, handle_getfile_callback
 
 
@@ -66,6 +65,14 @@ def _start_port_server():
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
 
+def _build_groups_keyboard(groups: list[str]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(f"📁 {g}", callback_data=f"grpsel:{i}")]
+        for i, g in enumerate(groups)
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
 # --- Command Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
@@ -76,6 +83,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "သတင်းနဲ့ Web Search ရှာတာ၊ Voice message ပြောတာတွေကို သဘာဝကျကျ ပြောနိုင်ပါတယ်ရှင်\n\n"
         "Command များ:\n"
         "• /tasks — လက်ရှိ Task စာရင်း\n"
+        "• /groups — Group ရွေးပြီး Report ထုတ်ရန်\n"
+        "• /groupsummary — Group Summary (Today/Yesterday)\n"
         "• /news [local|intl] [topic] — ပြည်တွင်း/နိုင်ငံတကာ သတင်းအနှစ်ချုပ်\n"
         "• /skills — Locked Core Rules & Version မှတ်တမ်း\n"
         "• /setrule <rule> — Core Rule အသစ်ထည့်ပြီး version တိုးရန်\n"
@@ -127,8 +136,10 @@ async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not groups:
         await update.message.reply_text("လက်ရှိ မှတ်တမ်းရှိတဲ့ Group စာရင်း မတွေ့သေးပါဘူးရှင်။")
         return
-    lines = "\n".join(f"• {g}" for g in groups)
-    await update.message.reply_text(f"📌 မှတ်တမ်းရှိသော Group များ:\n{lines}")
+    await update.message.reply_text(
+        "📌 ကြည့်လိုသည့် Group ကို ရွေးပါရှင်:",
+        reply_markup=_build_groups_keyboard(groups),
+    )
 
 
 async def groupsummary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,13 +162,60 @@ async def handle_groupsummary_callback(update: Update, context: ContextTypes.DEF
         await query.answer()
         return
     data = query.data or ""
-    if not data.startswith("gsummary:"):
+    await query.answer()
+
+    if data.startswith("grpsel:"):
+        try:
+            idx = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        groups = get_available_group_names()
+        if 0 <= idx < len(groups):
+            kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📅 Today", callback_data=f"grpday:{idx}:today"),
+                    InlineKeyboardButton("📆 Yesterday", callback_data=f"grpday:{idx}:yesterday"),
+                ],
+                [InlineKeyboardButton("⬅️ Back to Groups", callback_data="grpback")],
+            ])
+            await query.message.edit_text(
+                f"📁 Group: {groups[idx]}\nကြည့်လိုသည့် ရက်ကို ရွေးပါရှင်:",
+                reply_markup=kb,
+            )
         return
-    period = data.split(":", 1)[1].strip().lower()
-    await query.answer("Summary ထုတ်နေပါတယ်...")
-    await context.bot.send_chat_action(chat_id=query.message.chat.id, action="typing")
-    summary_text = generate_all_groups_summary(period)
-    await query.message.reply_text(summary_text)
+
+    if data == "grpback":
+        groups = get_available_group_names()
+        if not groups:
+            await query.message.edit_text("လက်ရှိ မှတ်တမ်းရှိတဲ့ Group စာရင်း မတွေ့သေးပါဘူးရှင်။")
+            return
+        await query.message.edit_text(
+            "📌 ကြည့်လိုသည့် Group ကို ရွေးပါရှင်:",
+            reply_markup=_build_groups_keyboard(groups),
+        )
+        return
+
+    if data.startswith("grpday:"):
+        parts = data.split(":", 2)
+        if len(parts) != 3:
+            return
+        _, idx_s, period = parts
+        try:
+            idx = int(idx_s)
+        except ValueError:
+            return
+        groups = get_available_group_names()
+        if 0 <= idx < len(groups):
+            await context.bot.send_chat_action(chat_id=query.message.chat.id, action="typing")
+            rep = get_group_report(exact_group_name=groups[idx], day_mode=period)
+            await query.message.reply_text(rep)
+        return
+
+    if data.startswith("gsummary:"):
+        period = data.split(":", 1)[1].strip().lower()
+        await context.bot.send_chat_action(chat_id=query.message.chat.id, action="typing")
+        summary_text = generate_all_groups_summary(period)
+        await query.message.reply_text(summary_text)
 
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -166,7 +224,8 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📋 Command Menu:\n"
         "• /tasks — လက်ရှိ Task စာရင်း\n"
-        "• /groups — Group စာရင်း\n"
+        "• /groups — Group ရွေးပြီး Report ထုတ်ရန်\n"
+        "• /groupsummary — Group Summary (Today/Yesterday)\n"
         "• /news — သတင်းအနှစ်ချုပ်\n"
         "• /skills — Core Rules\n"
         "• /setrule — Rule ထည့်ရန်\n"
@@ -207,8 +266,9 @@ async def reminder_loop(app):
                     cat_lbl = _category_label_mm(cat)
                     prio_badge = _priority_badge_mm(prio)
                     badge_line = f"{cat_lbl}" + (f" · {prio_badge}" if prio_badge else "")
+                    mm_cal_short = format_myanmar_date_short(rem_mm)
 
-                    msg = f"⏰ {prefix}\"{title}\" လုပ်ရမယ့် အချိန်ရောက်ပါပြီ{ending}\n{badge_line}"
+                    msg = f"⏰ {prefix}\"{title}\" လုပ်ရမယ့် အချိန်ရောက်ပါပြီ{ending}\n{badge_line}\n🗓 {mm_cal_short}"
                     if clean_reason:
                         msg += f"\n📝 အကြောင်းရင်း — {clean_reason}"
 
@@ -216,12 +276,13 @@ async def reminder_loop(app):
                     next_rem_dt = _compute_next_repeat_datetime(rem_mm, rep_type, now_mm)
 
                     if next_rem_dt:
+                        next_mm_cal = format_myanmar_date_short(next_rem_dt)
                         if rep_type == "school_days":
-                            msg += f"\n🔁 ကျောင်းဖွင့်ရက်တိုင်း ဆက်လက်သတိပေးပါမည် (နောက်တစ်ကြိမ်: {next_rem_dt.strftime('%m-%d %H:%M')})"
+                            msg += f"\n🔁 ကျောင်းဖွင့်ရက်တိုင်း ဆက်လက်သတိပေးပါမည် (နောက်တစ်ကြိမ်: {next_rem_dt.strftime('%m-%d %H:%M')} · {next_mm_cal})"
                         elif rep_type == "weekly":
-                            msg += f"\n🔁 အပတ်စဉ် {MYANMAR_WEEKDAYS[next_rem_dt.weekday()]} ဆက်လက်သတိပေးပါမည် (နောက်တစ်ကြိမ်: {next_rem_dt.strftime('%m-%d %H:%M')})"
+                            msg += f"\n🔁 အပတ်စဉ် {MYANMAR_WEEKDAYS[next_rem_dt.weekday()]} ဆက်လက်သတိပေးပါမည် (နောက်တစ်ကြိမ်: {next_rem_dt.strftime('%m-%d %H:%M')} · {next_mm_cal})"
                         elif rep_type == "daily":
-                            msg += f"\n🔁 နေ့စဉ် ဆက်လက်သတိပေးပါမည် (နောက်တစ်ကြိမ်: {next_rem_dt.strftime('%m-%d %H:%M')})"
+                            msg += f"\n🔁 နေ့စဉ် ဆက်လက်သတိပေးပါမည် (နောက်တစ်ကြိမ်: {next_rem_dt.strftime('%m-%d %H:%M')} · {next_mm_cal})"
 
                         await app.bot.send_message(chat_id=ADMIN_USER_ID, text=msg)
                         try:
@@ -265,7 +326,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user else "Member"
     ) or (user.username if user and user.username else "Member")
 
-    # Group / Supergroup messages -> save to group_messages for later summary/search
+    # Group / Supergroup messages -> save to raw_logs for later summary/search
     if chat and chat.type in ("group", "supergroup"):
         chat_title = chat.title or f"Group {chat.id}"
         text_content = (update.message.text or update.message.caption or "").strip()
@@ -322,7 +383,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if image_bytes:
         history_ctx = recall_relevant_history(user_id, user_text, recent_limit=6, search_limit=6)
+        cal_ctx = get_myanmar_calendar_context()
         prompt = f"""
+Current Myanmar Calendar & Time:
+{cal_ctx}
+
 အသုံးပြုသူက ပုံတစ်ပုံ ပေးပို့ထားသည်။
 Memory & User Context:
 {history_ctx}
@@ -423,7 +488,10 @@ def main():
     app.add_handler(CommandHandler("patch", handle_patch_command))
     app.add_handler(CommandHandler("getfile", getfile_command))
     app.add_handler(CallbackQueryHandler(handle_getfile_callback, pattern=r"^getfile:"))
-    app.add_handler(CallbackQueryHandler(handle_groupsummary_callback, pattern=r"^gsummary:"))
+    app.add_handler(CallbackQueryHandler(
+        handle_groupsummary_callback,
+        pattern=r"^(gsummary:|grpsel:|grpday:|grpback)",
+    ))
 
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice_message))
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, handle_message))
