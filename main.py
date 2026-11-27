@@ -375,6 +375,7 @@ def main():
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("tasks", tasks_command))
     app.add_handler(CommandHandler("groups", groups_command))
+    app.add_handler(CommandHandler("group", groups_command))
     app.add_handler(CommandHandler("news", news_command))
     app.add_handler(CommandHandler("skills", skills_command))
     app.add_handler(CommandHandler("setrule", setrule_command))
