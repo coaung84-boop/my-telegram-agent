@@ -27,6 +27,48 @@ MM_TZ = timezone(timedelta(hours=6, minutes=30))
 _VOICE_PROFILES: dict[int, list[dict]] = {}
 _PENDING_VOICE_CLARIFICATION: dict[int, dict] = {}
 
+_LETTER_SPOKEN_MM: dict[str, str] = {
+    "A": "အေ",
+    "B": "ဘီ",
+    "C": "စီ",
+    "D": "ဒီ",
+    "E": "အီး",
+    "F": "အက်ဖ်",
+    "G": "ဂျီ",
+    "H": "အိတ်ချ်",
+    "I": "အိုင်",
+    "J": "ဂျေ",
+    "K": "ကေ",
+    "L": "အယ်လ်",
+    "M": "အမ်",
+    "N": "အန်",
+    "O": "အို",
+    "P": "ပီ",
+    "Q": "ကျူ",
+    "R": "အာ",
+    "S": "အက်စ်",
+    "T": "တီ",
+    "U": "ယူ",
+    "V": "ဗီ",
+    "W": "ဒဗလျူ",
+    "X": "အိတ်စ်",
+    "Y": "ဝိုင်",
+    "Z": "ဇက်",
+}
+
+
+def _expand_uppercase_acronyms_for_speech(text: str) -> str:
+    """PIC, MLM စသဖြင့် စာလုံးအကြီးတွေချည်း ဖြစ်နေတဲ့ acronym တွေကို ဆစ်လုံးချင်း ခွဲဖတ်နိုင်အောင် ပြောင်းသည်။"""
+    if not text:
+        return ""
+
+    def _repl(match: re.Match) -> str:
+        token = match.group(0)
+        parts = [_LETTER_SPOKEN_MM.get(ch, ch) for ch in token]
+        return " ".join(parts)
+
+    return re.sub(r"\b[A-Z]{2,6}\b", _repl, text)
+
 
 def _number_to_mm_words(n: int) -> str:
     units = {
@@ -188,10 +230,12 @@ def _build_conversational_speech(reply_text: str) -> str:
         m_title = re.search(r'"([^"]+)"\s*မှတ်ထားလိုက်ပါပြီ', raw)
         title_clean = (m_title.group(1) if m_title else "").strip()
         if not title_clean or title_clean.lower() in {"er ပေးရန်", "reminder ပေးရန်", "remind ပေးရန်"}:
-            return "အင်း၊ မှတ်ထားလိုက်ပြီနော်။ အချိန်ရောက်တာနဲ့ သင်ဇာ သတိပေးမယ်။"
-        return f"အင်း၊ {title_clean} ကို မှတ်ထားလိုက်ပြီနော်။ အချိန်ရောက်ရင် သင်ဇာ သတိပေးမယ်။"
+            spoken = "အင်း၊ မှတ်ထားလိုက်ပြီနော်။ အချိန်ရောက်တာနဲ့ သင်ဇာ သတိပေးမယ်။"
+        else:
+            spoken = f"အင်း၊ {title_clean} ကို မှတ်ထားလိုက်ပြီနော်။ အချိန်ရောက်ရင် သင်ဇာ သတိပေးမယ်။"
+        return _expand_uppercase_acronyms_for_speech(spoken)
 
-    return _to_spoken_chat_prose(raw)
+    return _expand_uppercase_acronyms_for_speech(_to_spoken_chat_prose(raw))
 
 
 def _resolve_audio_extension_and_mime(voice_obj, is_voice_note: bool) -> tuple[str, str]:
@@ -405,33 +449,52 @@ def _split_burmese_and_english_segments(text: str) -> list[tuple[str, str]]:
 
 
 async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
-    """မြန်မာအဆွဲအငင် သဘာဝကျကျနဲ့ စကားစုကြား/English ကြား လိုတာထက် ပိုမခြားဘဲ ချောချောမွေ့မွေ့ ထွက်စေသည်။"""
+    """မြန်မာအဆွဲအငင် မူလအတိုင်း ထားပြီး English စကားလုံးများကို အနည်းငယ်နှေးပြီး ပြေပြစ်စွာ ထွက်စေသည်။"""
     clauses = _split_into_expressive_clauses(spoken_text)
 
     lift_cycle = [
-        ("+12Hz", "+21%"),
-        ("+14Hz", "+23%"),
-        ("+11Hz", "+20%"),
+        ("+12Hz", "+21%", 0.03),
+        ("+14Hz", "+23%", 0.03),
+        ("+11Hz", "+20%", 0.04),
     ]
 
     out_buf = io.BytesIO()
     for idx, (clause_txt, role) in enumerate(clauses):
         if role == "settle":
-            mm_pitch, mm_rate = "+9Hz", "+17%"
+            mm_pitch, mm_rate, mm_pause = "+9Hz", "+17%", 0.08
         elif role == "lift":
-            mm_pitch, mm_rate = "+14Hz", "+22%"
+            mm_pitch, mm_rate, mm_pause = "+14Hz", "+22%", 0.04
         else:
-            mm_pitch, mm_rate = lift_cycle[idx % len(lift_cycle)]
+            mm_pitch, mm_rate, mm_pause = lift_cycle[idx % len(lift_cycle)]
 
-        communicate = edge_tts.Communicate(
-            text=clause_txt,
-            voice="my-MM-NilarNeural",
-            rate=mm_rate,
-            pitch=mm_pitch,
-        )
-        async for ev in communicate.stream():
-            if ev.get("type") == "audio" and ev.get("data"):
-                out_buf.write(ev["data"])
+        sub_segs = _split_burmese_and_english_segments(clause_txt)
+        for s_idx, (kind, seg_txt) in enumerate(sub_segs):
+            if kind == "en":
+                if s_idx > 0:
+                    await asyncio.sleep(0.03)
+                communicate = edge_tts.Communicate(
+                    text=seg_txt,
+                    voice="my-MM-NilarNeural",
+                    rate="-2%",
+                    pitch="+11Hz",
+                )
+                async for ev in communicate.stream():
+                    if ev.get("type") == "audio" and ev.get("data"):
+                        out_buf.write(ev["data"])
+                await asyncio.sleep(0.03)
+            else:
+                communicate = edge_tts.Communicate(
+                    text=seg_txt,
+                    voice="my-MM-NilarNeural",
+                    rate=mm_rate,
+                    pitch=mm_pitch,
+                )
+                async for ev in communicate.stream():
+                    if ev.get("type") == "audio" and ev.get("data"):
+                        out_buf.write(ev["data"])
+
+        if idx < len(clauses) - 1 and mm_pause > 0:
+            await asyncio.sleep(mm_pause)
 
     audio_data = out_buf.getvalue()
     if not audio_data:
