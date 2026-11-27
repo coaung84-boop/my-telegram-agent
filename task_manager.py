@@ -43,6 +43,23 @@ def _get_mm_date_info(dt_obj: datetime) -> dict:
     }
 
 
+def format_myanmar_date_short(dt_obj: datetime | None = None) -> str:
+    """ရက်စွဲ/အချိန်ကို စာရင်း/reminder မှာ ရှင်းလင်းစွာ ပြရန် format လုပ်ပေးသည်။"""
+    now = dt_obj or datetime.now(MM_TZ)
+    info = _get_mm_date_info(now)
+    return f"{now.strftime('%m-%d %H:%M')} · {info['day_type']}"
+
+
+def cleanup_old_done_tasks(days_old: int = 14) -> int:
+    """သတ်မှတ်ရက်ထက် ကျော်သွားသော done task ဟောင်းများကို ရှင်းလင်းသည်။"""
+    try:
+        cutoff = (datetime.now(MM_TZ) - timedelta(days=days_old)).isoformat()
+        res = supabase.table("tasks").delete().eq("status", "done").lt("completed_at", cutoff).execute()
+        return len(res.data or [])
+    except Exception:
+        return 0
+
+
 def get_myanmar_calendar_context(target_dt: datetime | None = None) -> str:
     """AI prompt များအတွက် လက်ရှိအချိန်နှင့် ကျောင်းဖွင့်ရက်/ရုံးပိတ်ရက် context ကို ပြန်ပေးသည်။"""
     now = target_dt or datetime.now(MM_TZ)
