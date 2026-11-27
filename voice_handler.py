@@ -463,18 +463,21 @@ async def _render_expressive_edge_tts(spoken_text: str, out_path: str) -> bool:
         else:
             mm_pitch, mm_rate, mm_pause = lift_cycle[idx % len(lift_cycle)]
 
-        # မြန်မာနဲ့ English ကြား အရှိန်နဲ့ pitch သိပ်မကွာဘဲ ပိုကပ်စေရန် ညှိထားသည်
+        # မြန်မာနဲ့ English ကြား အရှိန်သိပ်မကွာဘဲ ပိုကပ်စေရန် rate/pitch ညှိထားသည်
         en_pitch = mm_pitch
-        en_rate = "+4%"
+        en_rate = "+12%"
 
         sub_segs = _split_burmese_and_english_segments(clause_txt)
         merged_segs: list[tuple[str, str]] = []
         for kind, seg_txt in sub_segs:
+            clean_seg = re.sub(r"\s+", " ", seg_txt).strip()
+            if not clean_seg:
+                continue
             if merged_segs and merged_segs[-1][0] == kind:
                 prev_kind, prev_txt = merged_segs[-1]
-                merged_segs[-1] = (prev_kind, f"{prev_txt} {seg_txt}".strip())
+                merged_segs[-1] = (prev_kind, f"{prev_txt} {clean_seg}".strip())
             else:
-                merged_segs.append((kind, seg_txt))
+                merged_segs.append((kind, clean_seg))
 
         for kind, seg_txt in merged_segs:
             communicate = edge_tts.Communicate(
