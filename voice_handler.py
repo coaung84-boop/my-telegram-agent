@@ -727,15 +727,15 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         if intent == "TASK":
             t_act = (route.get("task_action") or "").upper()
-            t_title = (route.get("task_title") or route.get("title") or "").strip()
-            if t_act == "LIST" and not t_title:
+            t_title = (route.get("title") or route.get("task_title") or transcript_text).strip()
+            if t_act == "LIST" and not (route.get("title") or route.get("task_title")):
                 reply = "ဘယ် task ကို ဆိုလိုတာလဲရှင်၊ Task နာမည်လေး ပြောပြပေးပါလားနော်။"
             else:
+                if t_act in {"ADD", "REMIND", "UPDATE"} and not (route.get("title") or route.get("task_title")):
+                    route["title"] = transcript_text
                 raw_t_reply = handle_task_intent(transcript_text, route) or ""
                 if len(raw_t_reply) > 450 and ("Task စာရင်း" in raw_t_reply or "Pending" in raw_t_reply):
                     reply = "ဘယ် task ကို ဆိုလိုတာလဲရှင်၊ Task နာမည်လေး ပြောပြပေးပါလားနော်။"
-                elif t_title and t_title not in raw_t_reply and "မှတ်ထားလိုက်ပါပြီ" in raw_t_reply:
-                    reply = f'"{t_title}" ကို {raw_t_reply.replace("မှတ်ထားလိုက်ပါပြီ", "မှတ်ထားလိုက်ပါပြီနော်")}'
                 else:
                     reply = raw_t_reply
         elif intent == "GROUP":
@@ -784,6 +784,10 @@ User Voice Transcript: "{transcript_text}"
         print(f"Error handling voice message: {e}")
         err_msg = "အသံနဲ့ ပြန်ဖြေရာမှာ ခဏအခက်အခဲ ရှိနေပါတယ်ရှင်၊ နောက်မှ ထပ်စမ်းကြည့်ပါ"
         await update.message.reply_text(_deduplicate_reply_text(err_msg))
+
+
+
+
 
 
 
