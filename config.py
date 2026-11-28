@@ -30,34 +30,6 @@ ALLOWED_GITHUB_FILES = {
     "github_ops.py",
 }
 
-# Model Configuration (Configurable via Env, with safe defaults)
-GEMINI_FAST_MODELS = [
-    m.strip()
-    for m in os.getenv("GEMINI_FAST_MODELS", "gemini-3.5-flash-lite,gemini-3.8-flash").split(",")
-    if m.strip()
-]
-
-GEMINI_THINKING_MODELS = [
-    m.strip()
-    for m in os.getenv("GEMINI_THINKING_MODELS", "gemini-3.8-flash,gemini-3.5-flash-lite").split(",")
-    if m.strip()
-]
-
-OPENROUTER_FREE_MODELS = [
-    m.strip()
-    for m in os.getenv(
-        "OPENROUTER_FREE_MODELS",
-        "openrouter/free,google/gemma-4-26b-a4b-it:free,google/gemma-4-31b-it:free",
-    ).split(",")
-    if m.strip()
-]
-
-GROQ_FALLBACK_MODELS = [
-    m.strip()
-    for m in os.getenv("GROQ_FALLBACK_MODELS", "llama-3.3-70b-versatile").split(",")
-    if m.strip()
-]
-
 # Myanmar Standard Time (UTC+6:30), Retention & Quota Savers
 MM_TZ = timezone(timedelta(hours=6, minutes=30))
 RETENTION_DAYS = 30
@@ -129,3 +101,4 @@ STRICT_MYANMAR_SYSTEM = (
     "အသုံးပြုသူ၏ Locked Core Rules၊ Profile၊ Style Preferences၊ အတိတ်မှတ်တမ်းနှင့် မြန်မာပြက္ခဒိန်အချက်အလက်များကို "
     "သေချာမှတ်မိပြီး အလိုက်သိသိနှင့် ဖြေပါ။"
 )
+
