@@ -23,10 +23,11 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 
 
 def _clean_thinzar_voice(text: str) -> str:
-    """Fallback model များက ယောက်ျားလေးအသုံးအနှုန်း သို့မဟုတ် ထိုင်းစာလုံး ရောမိရင် သန့်ရှင်းပေးသည်။"""
+    """Fallback model များက ယောက်ျားလေးအသုံးအနှုန်း၊ ထိုင်းစာလုံး သို့မဟုတ် သတ်ပုံအမှား ရောမိရင် သန့်ရှင်းပေးသည်။"""
     if not text:
         return text
     text = text.replace("ကျွန်တော့်", "သင်ဇာ့").replace("ကျွန်တော်", "သင်ဇာ")
+    text = text.replace("မಧပိုင်း", "မွန်းလွဲပိုင်း")
     text = re.sub(r"[\u0E00-\u0E7F]+", "", text)
     text = re.sub(r"\[meta:[^\]]*\]", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -57,8 +58,10 @@ def call_ai_with_3tier_fallback(
         contents = prompt_text
 
     tools = [types.Tool(google_search=types.GoogleSearch())] if use_google_search else None
+    spelling_rule = "\nမြန်မာစာလုံးပေါင်းနှင့် သတ်ပုံများကို တိကျမှန်ကန်စွာ (ဥပမာ 'မွန်းလွဲပိုင်း') ရေးသားပါ။"
+    sys_inst = f"{STRICT_MYANMAR_SYSTEM or ''}{spelling_rule}".strip()
     config = types.GenerateContentConfig(
-        system_instruction=STRICT_MYANMAR_SYSTEM,
+        system_instruction=sys_inst,
         tools=tools,
     )
 
@@ -98,7 +101,7 @@ def call_ai_with_3tier_fallback(
             err_msg = f"T2(K{key_idx+1}): {type(e).__name__} - {str(e)[:90]}"
             print(err_msg)
             errors.append(err_msg)
-            
+
     if audio_bytes:
         debug_tail = "\n".join(errors[-3:])
         return f"လောလောဆယ် AI ဆာဗာ ခဏအလုပ်များနေပါတယ်ရှင်၊ ခဏနေပြီး ထပ်စမ်းကြည့်ပေးပါ:\n{debug_tail}"
@@ -165,3 +168,7 @@ def call_ai_with_3tier_fallback(
 
     debug_tail = "\n".join(errors[-3:])
     return f"လောလောဆယ် AI ဆာဗာ ခဏအလုပ်များနေပါတယ်ရှင်၊ ခဏနေပြီး ထပ်စမ်းကြည့်ပေးပါ:\n{debug_tail}"
+
+
+
+
