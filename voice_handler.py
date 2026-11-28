@@ -259,9 +259,7 @@ def _build_conversational_speech(reply_text: str) -> str:
         m_title = re.search(r'"([^"]+)"\s*မှတ်ထားလိုက်ပါပြီ', raw)
         title_clean = (m_title.group(1) if m_title else "").strip()
         if not title_clean or title_clean.lower() in {"er ပေးရန်", "reminder ပေးရန်", "remind ပေးရန်"}:
-            spoken = "အင်း၊ မှတ်ထားလိုက်ပြီနော်။ အချိန်ရောက်တာနဲ့ သင်ဇာ သတိပေးမယ်။"
-        else:
-            spoken = f"အင်း၊ {title_clean} ကို မှတ်ထားလိုက်ပြီနော်။ အချိန်ရောက်ရင် သင်ဇာ သတိပေးမယ်။"
+            spoken = f"ဟုတ် ၊ {title_clean} ကို မှတ်ထားလိုက်ပြီနော်။ အချိန်ရောက်ရင် သင်ဇာ သတိပေးပါမယ်ရှင့်။"
         return _expand_uppercase_acronyms_for_speech(spoken)
 
     return _expand_uppercase_acronyms_for_speech(_to_spoken_chat_prose(raw))
