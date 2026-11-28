@@ -246,53 +246,7 @@ def _to_spoken_chat_prose(raw_text: str) -> str:
     combined = " ".join(spoken_lines)
     combined = re.sub(r"\s+", " ", combined).strip()
 
-    if len(combined) <= 500:
-        return combined
-
-    try:
-        summary_prompt = (
-            "အောက်ပါ မူရင်း reply စာသားကို သင်ဇာ (Thinzar) အမည်ရှိ မြန်မာမိန်းကလေးတစ်ယောက်က "
-            "အသုံးပြုသူကို အစီရင်ခံစာ ဖတ်ပြနေတာမျိုး မဟုတ်ဘဲ ရင်းရင်းနှီးနှီး ပြန်ဖြေ/ပြန်ပြောပြနေသလို "
-            "သဘာဝကျကျ စကားပြောပုံစံနဲ့ အတိုချုပ် ပြောပြပေးပါ။\n"
-            "စည်းမျဉ်းများ:\n"
-            "- အဓိက အချက်အလက်ကိုသာ စကားပြောဟန်နဲ့ စာကြောင်း ၄–၆ ကြောင်းစာလောက် ပြောပါ။\n"
-            "- 'မေတ္တာရပ်ခံထားပါတယ်'၊ 'စစ်ဆေးစရာရှိရင် ပြောပြပေးဖို့' စတဲ့ အဆုံးသတ်/တောင်းဆိုချက် စာကြောင်းတွေ မထည့်ပါနှင့်။\n"
-            "- report ဖတ်ပြသလို တရားဝင်လေသံ၊ bullet, number, colon, emoji, markdown တွေ မသုံးပါနှင့်။\n"
-            "- အသေးစိတ်ကိုတော့ စာထဲမှာဆက်လက်ဖတ်ရှုပေးပါရှင် ဆိုပြီး အဆုံးသတ်မှာ ထည့်ပြောပေးရန်။\n"
-            "- မူရင်းစာထဲမှာ မပါတဲ့ အချက်အသစ် မထည့်ပါနှင့်။\n\n"
-            f"{source_for_summary}"
-        )
-        ai_summary = (call_ai_with_3tier_fallback(summary_prompt) or "").strip()
-        if ai_summary and "ခဏအလုပ်များနေပါတယ်" not in ai_summary:
-            ai_summary = re.sub(r"[*_`~#>\-]+", " ", ai_summary)
-            ai_summary = re.sub(r"(?m)^\s*(?:[-•*]|\d+[\.\)])\s*", "", ai_summary)
-            ai_summary = re.sub(r"\s+", " ", ai_summary).strip()
-            if not ai_summary.endswith(("။", "!", "?")):
-                ai_summary = f"{ai_summary}။"
-            if len(ai_summary) > 750:
-                cut = ai_summary[:750]
-                last_p = max(cut.rfind("။"), cut.rfind("!"), cut.rfind("?"))
-                if last_p > 120:
-                    return cut[: last_p + 1]
-            return ai_summary
-    except Exception:
-        pass
-
-    sentences = [s.strip() for s in re.split(r"(?<=[။!?])\s*", combined) if s.strip()]
-    picked: list[str] = []
-    total_len = 0
-    for sent in sentences:
-        if not sent:
-            continue
-        s_norm = sent if sent.endswith(("။", "!", "?")) else f"{sent}။"
-        if total_len + len(s_norm) > 340 and picked:
-            break
-        picked.append(s_norm)
-        total_len += len(s_norm) + 1
-        if len(picked) >= 3:
-            break
-
-    return " ".join(picked).strip() if picked else combined
+    return combined
 
 
 def _build_conversational_speech(reply_text: str) -> str:
@@ -820,6 +774,10 @@ User Voice Transcript: "{transcript_text}"
         print(f"Error handling voice message: {e}")
         err_msg = "အသံနဲ့ ပြန်ဖြေရာမှာ ခဏအခက်အခဲ ရှိနေပါတယ်ရှင်၊ နောက်မှ ထပ်စမ်းကြည့်ပါ"
         await update.message.reply_text(_deduplicate_reply_text(err_msg))
+
+
+
+
 
 
 
