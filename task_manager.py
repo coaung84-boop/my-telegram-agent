@@ -382,7 +382,7 @@ def _build_task_list_payload(show_done: bool = False) -> tuple[str, InlineKeyboa
                 cat_badge = _category_label_mm(cat)
                 lines.append(f"• ✓ **{title}** · {cat_badge}")
                 if len(done_rows) > 15:
-                lines.append(f"… နောက်ထပ် **{len(done_rows) - 15}** ခု ကျန်ပါသေးတယ်။")
+                lines.append(f"• … နောက်ထပ် **{len(done_rows) - 15}** ခု ကျန်ပါသေးတယ်။")
 
     view_id = uuid.uuid4().hex[:8]
     _TASK_LIST_VIEW_STATE[view_id] = {"show_done": show_done}
