@@ -663,29 +663,37 @@ def perform_hybrid_web_search(user_query: str, english_query: str | None = None,
         if q2:
             tavily_blocks.append(f"[Query 2: {english_query.strip()}]\n{q2}")
 
-    tavily_text = "\n\n".join(tavily_blocks)
+        tavily_text = "\n\n".join(tavily_blocks)
+        wiki_text = _collect_wikipedia_context(user_query, english_query=english_query)
 
-    prompt = f"""
-သင်သည် 'သင်ဇာ (Thinzar)' အမည်ရှိ မြန်မာမိန်းကလေးဟန် ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။
-လက်ရှိ အချိန်: {now_str}
+        prompt = f"""
+    သင်သည် 'သင်ဇာ (Thinzar)' အမည်ရှိ မြန်မာမိန်းကလေးဟန် ကိုယ်ပိုင် AI Assistant ဖြစ်သည်။
+    လက်ရှိ အချိန်: {now_str}
 
-Recent Context:
-{history_ctx[-1200:] if history_ctx else "None"}
+    Recent Context:
+    {history_ctx[-1200:] if history_ctx else "None"}
 
-User Question: {user_query}
-English Search Helper Query: {english_query or "N/A"}
+    User Question: {user_query}
+    English Search Helper Query: {english_query or "N/A"}
 
-Tavily Search Results:
-{tavily_text or "No Tavily results returned."}
+    Tavily Search Results:
+    {tavily_text or "No Tavily results returned."}
 
-ညွှန်ကြားချက်များ:
-1. Google Search grounding နှင့် အထက်ပါ Tavily search results များကို ပေါင်းစပ်၍ ယုတ္တိရှိရှိ ခွဲခြမ်းစိတ်ဖြာပြီး အမှန်ကန်ဆုံး၊ နောက်ဆုံးအခြေအနေနှင့် အကိုက်ညီဆုံး အဖြေကို မြန်မာဘာသာဖြင့် ပြန်ဖြေပါ။
+    Wikipedia Summary Reference:
+    {wiki_text or "No Wikipedia summary used."}
+
+    ညွှန်ကြားချက်များ:
+    1. Google Search grounding၊ အထက်ပါ Tavily search results နှင့် Wikipedia summary reference (ရှိလျှင်) တို့ကို ပေါင်းစပ်၍ ယုတ္တိရှိရှိ ခွဲခြမ်းစိတ်ဖြာပြီး အမှန်ကန်ဆုံး၊ နောက်ဆုံးအခြေအနေနှင့် အကိုက်ညီဆုံး အဖြေကို မြန်မာဘာသာဖြင့် ပြန်ဖြေပါ။
 2. [Verified], [Deduced], [Unverified] စသည့် tag များ လုံးဝ မထည့်ပါနှင့်။ ရလဒ်၊ ဂဏန်း၊ အနိုင်/အရှုံး/သရေ၊ ရက်စွဲ နှင့် နှိုင်းယှဉ်ချက်များ ရှေ့နောက် ကိုက်ညီမှု ရှိမရှိ ကိုယ်တိုင် သေချာစစ်ဆေးပြီး ဖြေပါ။
 3. အချက်အလက် မသေချာပါက မသေချာကြောင်း သဘာဝကျကျ ပွင့်ပွင့်လင်းလင်း ရှင်းပြပါ (မခန့်မှန်းလုပ်ကြံပါနှင့်)။
 4. 'မောင်' ဟု လုံးဝ မသုံးပါနှင့်။ သဘာဝကျသော သင်ဇာဟန်ဖြင့် ဖြေပါ။
 """
     raw_reply = call_ai_with_3tier_fallback(prompt, use_google_search=True)
     return smart_polish_reply(user_query, raw_reply)
+
+
+
+
 
 
 
