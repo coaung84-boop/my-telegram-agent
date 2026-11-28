@@ -1,6 +1,7 @@
 import re
 import time
 import html
+import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 import requests
@@ -574,6 +575,59 @@ def _is_live_or_time_sensitive_query(query: str) -> bool:
     return any(k in q for k in keywords)
 
 
+def _fetch_wikipedia_summary(query: str, lang: str = "en", timeout_sec: float = 4.0) -> str:
+    """Wikipedia REST summary API မှ အကျဉ်းချုပ် အချက်အလက်ကို ဆွဲယူသည်။"""
+    q = (query or "").strip()
+    if not q:
+        return ""
+    encoded = urllib.parse.quote(q)
+    url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{encoded}"
+    headers = {"User-Agent": "ThinzarAssistantBot/1.0"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=timeout_sec)
+        if resp.status_code != 200:
+            return ""
+        data = resp.json()
+        if data.get("type") == "disambiguation":
+            return ""
+        extract = re.sub(r"\s+", " ", (data.get("extract") or "").strip())
+        title = (data.get("title") or q).strip()
+        if extract:
+            return f"[Wikipedia ({lang}) - {title}]: {extract[:600]}"
+    except Exception as e:
+        print(f"Wikipedia summary fetch error ({lang}, {q}): {e}")
+    return ""
+
+
+def _collect_wikipedia_context(user_query: str, english_query: str | None = None) -> str:
+    """Live/time-sensitive မဟုတ်သော factual query များအတွက် Wikipedia summary ကို စုစည်းသည်။"""
+    if _is_live_or_time_sensitive_query(f"{user_query} {english_query or ''}"):
+        return ""
+
+    blocks: list[str] = []
+    seen_extracts: set[str] = set()
+
+    candidates: list[tuple[str, str]] = []
+    if english_query and english_query.strip():
+        candidates.append((english_query.strip(), "en"))
+    if re.search(r"[A-Za-z]{2,}", user_query or ""):
+        candidates.append((user_query.strip(), "en"))
+    if re.search(r"[\u1000-\u109F]{2,}", user_query or ""):
+        candidates.append((user_query.strip(), "my"))
+
+    for q_str, lang in candidates[:3]:
+        summary = _fetch_wikipedia_summary(q_str, lang=lang)
+        if summary:
+            key = summary.lower()
+            if key not in seen_extracts:
+                seen_extracts.add(key)
+                blocks.append(summary)
+        if len(blocks) >= 2:
+            break
+
+    return "\n".join(blocks)
+
+
 def _tavily_search_summary(query: str, max_results: int = 5) -> str:
     if not tavily_client or not query:
         return ""
@@ -632,6 +686,10 @@ Tavily Search Results:
 """
     raw_reply = call_ai_with_3tier_fallback(prompt, use_google_search=True)
     return smart_polish_reply(user_query, raw_reply)
+
+
+
+
 
 
 
