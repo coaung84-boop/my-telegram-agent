@@ -60,6 +60,58 @@ def _set_cached_news(cache_key: str, val: str):
     _NEWS_CACHE[cache_key] = (time.time(), val)
 
 
+def _strip_verification_tags(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = re.sub(
+        r"\s*\[(?:Verified|Deduced|Unverified)\]\s*",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"[ \t]+([။၊,.!?])", r"\1", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def smart_polish_reply(user_query: str, reply_text: str) -> str:
+    base_text = _strip_verification_tags(reply_text)
+    if not base_text:
+        return ""
+
+    has_numeric_or_outcome = bool(
+        re.search(r"[0-9၀-၉]+\s*[-–:]\s*[0-9၀-၉]+", base_text)
+        or any(k in base_text for k in ("အနိုင်", "ရှုံး", "သရေ", "ပိုများ", "ပိုနည်း", "တိုး", "လျော့", "win", "won", "lost", "draw"))
+    )
+    if not has_numeric_or_outcome:
+        return base_text
+
+    check_prompt = f"""
+အောက်ပါ User မေးခွန်းနှင့် Assistant အဖြေကို ယုတ္တိရှိမှု (logical consistency) နှင့် ဂဏန်း/ရလဒ် မှန်ကန်မှုအရ စစ်ဆေးပါ။
+
+စစ်ဆေးရမည့် အချက်များ:
+1. ဂိုးရလဒ် / ကိန်းဂဏန်း (ဥပမာ A 3 - 2 B) နှင့် အနိုင်/အရှုံး/သရေ သုံးနှုန်းချက် ကိုက်ညီမှု ရှိမရှိ (ဥပမာ A က 2 ဂိုး၊ B က 3 ဂိုးဆိုရင် B နိုင်ပြီး A ရှုံးသည်)။
+2. ရက်စွဲ၊ အချိန်၊ နှိုင်းယှဉ်ချက် နှင့် အကျိုးဆက် ယုတ္တိ ရှေ့နောက် ညီမညီ။
+3. [Verified], [Deduced], [Unverified] စသည့် tag များ လုံးဝ မပါစေဘဲ သဘာဝကျသော မြန်မာစကားပြေဖြင့် ပြန်ရေးပါ။
+4. မူရင်းအဖြေက ယုတ္တိရှိပြီး မှန်ကန်နေလျှင် tag ရှင်းထားသော အဖြေကိုသာ ပြန်ပေးပါ။ အပိုစကားလုံးများ မထည့်ပါနှင့်။
+
+User Query:
+{user_query}
+
+Draft Reply:
+{base_text}
+"""
+    try:
+        checked = (call_ai_with_3tier_fallback(check_prompt, use_google_search=False) or "").strip()
+        if checked and "ခဏအလုပ်များနေပါတယ်" not in checked:
+            return _strip_verification_tags(checked)
+    except Exception:
+        pass
+
+    return base_text
+
+
 def cleanup_old_group_messages():
     """raw_logs မှ ရက် ၃၀ ကျော်သော record များကို ဖျက်၍ storage ထိန်းညှိသည်။"""
     try:
@@ -578,3 +630,7 @@ Tavily Search Results:
 4. 'မောင်' ဟု လုံးဝ မသုံးပါနှင့်။ သဘာဝကျသော သင်ဇာဟန်ဖြင့် ဖြေပါ။
 """
     return call_ai_with_3tier_fallback(prompt, use_google_search=True)
+
+
+
+
