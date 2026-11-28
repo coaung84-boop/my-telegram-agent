@@ -672,9 +672,6 @@ def main():
 
     _start_port_server()
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_loop(loop)
-
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start_command))
@@ -702,7 +699,6 @@ def main():
 
     print("သင်ဇာ (Thinzar) Telegram Bot is starting...")
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
