@@ -2,6 +2,7 @@ import os
 import re
 import io
 import json
+import time
 import asyncio
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -22,11 +23,21 @@ from task_manager import (
 from group_news_search import get_available_group_names, handle_group_query, perform_hybrid_web_search
 
 MM_TZ = timezone(timedelta(hours=6, minutes=30))
+CLARIFICATION_TTL_SEC = 120.0
 
 # Per-user voice tone/intent profile, pending clarification & duplicate guard
 _VOICE_PROFILES: dict[int, list[dict]] = {}
 _PENDING_VOICE_CLARIFICATION: dict[int, dict] = {}
 _RECENT_VOICE_MSG_IDS: dict[int, list[int]] = {}
+
+CONFIRM_WORDS = {
+    "ဟုတ်", "ဟုတ်တယ်", "ဟုတ်ပါတယ်", "ဟုတ်ကဲ့", "မှန်တယ်", "မှန်ပါတယ်",
+    "အင်း", "အေး", "အဲဒါပဲ", "yes", "yeah", "yep", "ok", "okay", "sure",
+}
+DENY_WORDS = {
+    "မဟုတ်", "မဟုတ်ဘူး", "မဟုတ်ပါဘူး", "မဟုတ်သေးဘူး", "မှားတယ်", "မှားနေတယ်",
+    "no", "nope", "not that", "wrong",
+}
 
 _LETTER_SPOKEN_MM: dict[str, str] = {
     "A": "အေ", "B": "ဘီ", "C": "စီ", "D": "ဒီ", "E": "အီး",
@@ -36,6 +47,64 @@ _LETTER_SPOKEN_MM: dict[str, str] = {
     "U": "ယူ", "V": "ဗီ", "W": "ဒဗလျူ", "X": "အိတ်စ်", "Y": "ဝိုင်",
     "Z": "ဇက်",
 }
+
+
+def _classify_confirmation(text: str) -> str:
+    """Return 'confirm', 'deny', or 'other'."""
+    cleaned = (text or "").strip().lower().rstrip("။.!?")
+    if not cleaned:
+        return "other"
+    if cleaned in CONFIRM_WORDS or any(cleaned.startswith(w + " ") for w in CONFIRM_WORDS):
+        return "confirm"
+    if cleaned in DENY_WORDS or any(cleaned.startswith(w + " ") for w in DENY_WORDS):
+        return "deny"
+    return "other"
+
+
+def _is_followup_reference(text: str) -> bool:
+    s = (text or "").strip().lower()
+    markers = [
+        "အဲဒါ", "အဲဒီ", "ခုနက", "နောက်ထပ်", "ဆက်ပြော", "ဘယ်ချိန်",
+        "that", "it", "earlier", "more", "continue",
+    ]
+    return any(m in s for m in markers)
+
+
+def _is_new_command_or_task(text: str) -> bool:
+    s = (text or "").strip().lower()
+    markers = [
+        "remind", "reminder", "မှတ်ထား", "မှတ်ပေး", "task", "ဖုန်း", "call",
+        "မနက်ဖြန်", "ဒီနေ့", "နောက်", "မိနစ်", "နာရီ",
+    ]
+    return any(m in s for m in markers)
+
+
+def _limit_to_3_to_5_sentences(text: str, max_sentences: int = 5) -> str:
+    """စာကြောင်း/အပိုင်းများကို အများဆုံး ၃–၅ ကြောင်းခန့်အတွင်း တိုတိုရှင်းရှင်း သဘာဝကျကျ ကန့်သတ်သည်။"""
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    if not cleaned:
+        return ""
+
+    parts = [p.strip() for p in re.split(r"(?<=[။!?])\s*", cleaned) if p.strip()]
+    if len(parts) == 1 and len(parts[0]) > 180:
+        sub_parts = [p.strip() for p in re.split(r"(?<=[၊,])\s*", parts[0]) if p.strip()]
+        if len(sub_parts) > 1:
+            parts = sub_parts
+
+    selected = parts[:max_sentences]
+    out: list[str] = []
+    for item in selected:
+        item = item.rstrip("၊,").strip()
+        if not item:
+            continue
+        if not item.endswith(("။", "!", "?")):
+            item = f"{item}။"
+        out.append(item)
+
+    result = " ".join(out).strip()
+    if len(result) > 420:
+        result = result[:415].rsplit(" ", 1)[0].rstrip("၊,။") + "။"
+    return result
 
 
 def _is_duplicate_voice_update(user_id: int, message_id: int | None) -> bool:
@@ -221,10 +290,8 @@ def _to_spoken_chat_prose(raw_text: str) -> str:
         base_clean,
     )
     base_clean = re.sub(r"[*_`~#>\-]+", " ", base_clean)
-    source_for_summary = re.sub(r"\s+", " ", base_clean).strip()
 
     text = _humanize_dates_and_times_for_speech(base_clean)
-
     text = re.sub(r"(?im)^\s*[-•*]+\s*key\s*point\s*:\s*", "အဓိက ကတော့ ", text)
     text = re.sub(r"(?im)^\s*အကြံပြုချက်\s*:\s*", "သင်ဇာ့အနေနဲ့ ပြောရရင်တော့ ", text)
     text = re.sub(r"(?im)^\s*\d+[\.\)]\s*", "", text)
@@ -232,7 +299,7 @@ def _to_spoken_chat_prose(raw_text: str) -> str:
 
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     spoken_lines: list[str] = []
-    for idx, ln in enumerate(lines):
+    for idx, ln in enumerate(lines[:5]):
         ln = re.sub(r"\s*:\s*", "၊ ", ln)
         ln = re.sub(r"\s+", " ", ln).strip()
         if not ln:
@@ -245,8 +312,7 @@ def _to_spoken_chat_prose(raw_text: str) -> str:
 
     combined = " ".join(spoken_lines)
     combined = re.sub(r"\s+", " ", combined).strip()
-
-    return combined
+    return _limit_to_3_to_5_sentences(combined, max_sentences=5)
 
 
 def _build_conversational_speech(reply_text: str) -> str:
@@ -256,13 +322,16 @@ def _build_conversational_speech(reply_text: str) -> str:
     raw = reply_text.strip()
 
     if "မှတ်ထားလိုက်ပါပြီ" in raw:
-        m_title = re.search(r'"([^"]+)"\s*မှတ်ထားလိုက်ပါပြီ', raw)
+        m_title = re.search(r'[“"]([^”"]+)[”"]\s*မှတ်ထားလိုက်ပါပြီ', raw)
         title_clean = (m_title.group(1) if m_title else "").strip()
-        if not title_clean or title_clean.lower() in {"er ပေးရန်", "reminder ပေးရန်", "remind ပေးရန်"}:
-            spoken = f"ဟုတ်၊  {title_clean} ကို မှတ်ထားလိုက်ပြီနော်။ အချိန်ရောက်ရင် သင်ဇာ သတိပေးပါမယ်ရှင့်။"
-        return _expand_uppercase_acronyms_for_speech(spoken)
+        if title_clean and title_clean.lower() not in {"er ပေးရန်", "reminder ပေးရန်", "remind ပေးရန်"}:
+            spoken = f"ဟုတ်ကဲ့ရှင်၊ {title_clean} ကို မှတ်ထားလိုက်ပါပြီနော်။ အချိန်ရောက်ရင် သင်ဇာ သတိပေးပါမယ်ရှင်။"
+        else:
+            spoken = "ဟုတ်ကဲ့ရှင်၊ သတိပေးဖို့ မှတ်ထားလိုက်ပါပြီနော်။ အချိန်ရောက်ရင် သင်ဇာ သတိပေးပါမယ်ရှင်။"
+        return _expand_uppercase_acronyms_for_speech(_limit_to_3_to_5_sentences(spoken, max_sentences=5))
 
-    return _expand_uppercase_acronyms_for_speech(_to_spoken_chat_prose(raw))
+    prose = _to_spoken_chat_prose(raw)
+    return _expand_uppercase_acronyms_for_speech(_limit_to_3_to_5_sentences(prose, max_sentences=5))
 
 
 def _resolve_audio_extension_and_mime(voice_obj, is_voice_note: bool) -> tuple[str, str]:
@@ -299,21 +368,22 @@ def _refine_transcript_with_context(
     recent_context: str = "",
     available_groups: list[str] | None = None,
 ) -> tuple[str, str, str]:
-    """ကြားလိုက်တဲ့ စကားကို context/tone နဲ့ ပေါင်းပြီး ဆိုလိုရင်း ပိုတိကျအောင် ညှိပေးသည်။"""
+    """ကြားလိုက်တဲ့ စကားကို လိုအပ်မှသာ context နဲ့ ညှိပေးသည်။"""
     cleaned = _normalize_heard_transcript(raw_transcript)
     if not cleaned:
         return "", tone, ""
 
+    ctx_for_prompt = (recent_context or "")[-400:] if _is_followup_reference(cleaned) else ""
     groups_str = ", ".join((available_groups or [])[:15]) or "မရှိသေးပါ"
     prompt = (
-        "အောက်ပါ Voice Transcript ကို လက်ရှိ စကားပြော context၊ အသံလေသံ နဲ့ Group စာရင်းတို့နဲ့ ယှဉ်ပြီး "
-        "အသံထွက်ဆင်တူ မှားကြားနိုင်တာ/မပြည့်စုံတာရှိရင် ဆိုလိုရင်း ပိုရှင်းအောင် ညှိပေးပါ။\n"
+        "အောက်ပါ Voice Transcript ကို စစ်ဆေးပြီး အသံထွက်ဆင်တူ မှားကြားနိုင်တာရှိရင် ရှင်းအောင် ပြင်ပေးပါ။ "
+        "အသစ်ပြောတဲ့ command/topic ဖြစ်ရင် အရှေ့က အကြောင်းအရာဟောင်းတွေနဲ့ ရောမပစ်ပါနဲ့။\n"
         f"Voice Tone: {tone}\n"
         f"Available Groups: {groups_str}\n"
-        f"Recent Context:\n{(recent_context or '')[-900:]}\n"
+        f"Follow-up Context:\n{ctx_for_prompt or 'မသုံးပါ'}\n"
         f"Raw Transcript: \"{cleaned}\"\n\n"
         "Return ONLY valid JSON:\n"
-        "{\"resolved_text\": \"ပြင်ဆင်ညှိနှိုင်းထားတဲ့ စကားသား (မူရင်းအတိုင်း မှန်နေရင် မပြောင်းပါနှင့်)\", "
+        "{\"resolved_text\": \"စကားသား\", "
         "\"intent_hint\": \"TASK | GROUP | WEB_SEARCH | GENERAL\", "
         "\"meaning\": \"ဆိုလိုရင်း အနှစ်ချုပ်\"}"
     )
@@ -352,31 +422,30 @@ def transcribe_and_analyze_voice(
     if audio_bytes:
         audio_part = types.Part.from_bytes(data=bytes(audio_bytes), mime_type=mime_type or "audio/ogg")
         prompt = f"""
-နားထောင်ပြီး ဒီအသံဖိုင်ကို နားလည်မှုအပြည့်နဲ့ ခွဲခြမ်းစိတ်ဖြာပေးပါ။
+နားထောင်ပြီး ဒီအသံဖိုင်ကို ခွဲခြမ်းစိတ်ဖြာပေးပါ။
 လက်ရှိ မြန်မာစံတော်ချိန်: {datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M (%A)")}
 အသုံးပြုနိုင်သော Group များ: {groups_str}
 
 အရင် Voice Tone & Meaning Profile:
 {voice_profile_ctx or "မှတ်တမ်းမရှိသေးပါ"}
 
-လတ်တလော မှတ်တမ်း Context:
-{(recent_context_ctx or "")[-1000:] or "မရှိသေးပါ"}
+လတ်တလော မှတ်တမ်း Context (follow-up ဖြစ်မှသာ ချိတ်ဆက်ပါ):
+{(recent_context_ctx or "")[-500:] or "မရှိသေးပါ"}
 
 Return ONLY valid JSON:
 {{
   "transcript": "ပြောထားတဲ့စကားကို မြန်မာ (Unicode) / English မှန်ကန်အောင် စာပြန်ရေးထားချက်",
-  "tone": "အသံနေအသံထား (ဥပမာ — အလောတကြီး/စိတ်စောနေတာ၊ အေးအေးဆေးဆေး/စဉ်းစားနေတာ၊ သေချာမေးမြန်းတာ၊ ရင်းရင်းနှီးနှီးခေါ်တာ)",
+  "tone": "အသံနေအသံထား",
   "intent_hint": "TASK | GROUP | WEB_SEARCH | GENERAL",
-  "interpreted_meaning": "အသံလေသံနဲ့ လက်ရှိ context ကိုပါ ထည့်စဉ်းစားထားတဲ့ အဓိက ဆိုလိုရင်း",
+  "interpreted_meaning": "အဓိက ဆိုလိုရင်း",
   "ambiguous": false,
   "clarification_question": ""
 }}
 
 Rules:
-- transcript မှာ ကြားသည့်စကားကို context နဲ့ ကိုက်ညီအောင် မှန်ကန်စွာ ရေးပါ (ဥပမာ 'တင်ဇာ' လို့ ကြားလည်း 'သင်ဇာ' ဟု ရေးပါ၊ group/task နာမည်တွေ ပါရင် context နဲ့ ညှိပါ)။
-- အရင် စကားဆက်ထဲက 'အဲဒါ'၊ 'အဲဒီဟာ'၊ 'မနက်ဖြန်ကျရင်' စတဲ့ implicit reference တွေ ပါရင် interpreted_meaning ထဲမှာ ရှင်းအောင် ထည့်ဖော်ပြပါ။
-- တော်ရုံဆို ကိုယ့်ဘာသာ ဆိုလိုရင်းကို အလိုက်သိ နားလည်ပြီး ambiguous=false ထားပါ။
-- အသံလုံးဝ မကြားရတာ/လုံးဝ မပီတာ သို့မဟုတ် ဘာလုပ်ရမှန်း လုံးဝ မသေချာတဲ့ အခြေအနေလောက်မှသာ ambiguous=true ထားပါ။
+- အခု ပြောလိုက်တဲ့ အသံကို အဓိက ဦးစားပေးပါ။ Command အသစ် (ဥပမာ 'ဖုန်းဆက်ဖို့ remind ပေးပါ') ဖြစ်ရင် အရှေ့ကဟာနဲ့ ရောမပစ်ပါနဲ့။
+- အရှေ့က စကားဆက်နဲ့ ဆက်စပ်နေတဲ့ 'အဲဒါ'၊ 'ခုနကဟာ' စတာ ပါမှသာ context နဲ့ ချိတ်ပါ။
+- အသံ မရှင်းတာ၊ ဘာဆိုလိုမှန်း မသေချာတာ ဖြစ်ရင် ambiguous=true ထားပြီး clarification_question မှာ သဘာဝကျကျ မေးခွန်းထုတ်ပါ။
 """
         for model_name in ("gemini-3.5-flash-lite", "gemini-3.8-flash"):
             try:
@@ -448,8 +517,6 @@ Rules:
         "ambiguous": ambiguous,
         "clarification_question": clarification_q,
     }
-
-
 def _record_voice_profile(user_id: int, transcript: str, tone: str, meaning: str):
     now_str = datetime.now(MM_TZ).strftime("%m-%d %H:%M")
     entry = {
@@ -479,7 +546,7 @@ def _get_voice_profile_summary(user_id: int) -> str:
         return ""
     lines = [
         f"- [{item['time']}] လေသံ: {item['tone']} | ဆိုလိုရင်း: {item['meaning']} (စကား: \"{item['sample']}\")"
-        for item in hist[-6:]
+        for item in hist[-4:]
     ]
     return "\n".join(lines)
 
@@ -616,11 +683,14 @@ def _resolve_pending_clarification(user_id: int, transcript_text: str) -> str | 
     if not pending:
         return None
 
-    low = transcript_text.strip().lower()
-    yes_tokens = ["ဟုတ်", "ဟုတ်တယ်", "ဟုတ်ကဲ့", "အင်း", "အဲဒါပဲ", "မှန်တယ်", "yes", "yeah", "yep", "ok", "okay"]
-    no_tokens = ["မဟုတ်", "မဟုတ်ဘူး", "မှားတယ်", "no", "nope", "wrong"]
+    created_at = float(pending.get("created_at") or 0.0)
+    if (time.monotonic() - created_at) > CLARIFICATION_TTL_SEC:
+        _PENDING_VOICE_CLARIFICATION.pop(user_id, None)
+        return None
 
-    if any(tok in low for tok in yes_tokens):
+    verdict = _classify_confirmation(transcript_text)
+
+    if verdict == "confirm":
         _PENDING_VOICE_CLARIFICATION.pop(user_id, None)
         orig_text = pending.get("original_transcript") or pending.get("suggested_meaning") or ""
         orig_route = pending.get("suggested_route") or {}
@@ -628,9 +698,9 @@ def _resolve_pending_clarification(user_id: int, transcript_text: str) -> str | 
             return handle_task_intent(orig_text, orig_route)
         return orig_text or None
 
-    if any(tok in low for tok in no_tokens):
+    if verdict == "deny":
         _PENDING_VOICE_CLARIFICATION.pop(user_id, None)
-        return "ဟုတ်ကဲ့ရှင်၊ ဒါဆို ဘယ်လို ဆိုလိုတာလဲ ပြန်ပြောပြပေးပါဦးနော်။"
+        return "ဟုတ်ကဲ့ရှင်၊ ဆက်ပြောဖို့ ပြန်နားထောင်နေပါတယ် — ဘာလုပ်ချင်တာလဲ (သို့မဟုတ်) ဘာမေးချင်တာလဲ ပြောပြပေးပါရှင်။"
 
     _PENDING_VOICE_CLARIFICATION.pop(user_id, None)
     return None
@@ -658,7 +728,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         audio_bytes = bytes(await tg_file.download_as_bytearray())
 
         available_groups = get_available_group_names()
-        pre_history_ctx = recall_relevant_history(user_id, "voice context", recent_limit=8, search_limit=6)
+        pre_history_ctx = recall_relevant_history(user_id, "voice context", recent_limit=3, search_limit=3)
         voice_profile_ctx = _get_voice_profile_summary(user_id)
 
         analysis = await asyncio.to_thread(
@@ -676,7 +746,13 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         meaning_hint = _normalize_heard_transcript(analysis.get("interpreted_meaning") or transcript_text)
 
         if not transcript_text:
-            clarify_msg = "အသံကို နည်းနည်း မရှင်းလိုက်ဘူးရှင်၊ တစ်ခေါက်လောက် ထပ်ပြောပေးပါလားရှင်။"
+            clarify_msg = "အသံကို နည်းနည်း မရှင်းလိုက်ဘူးရှင်၊ ဟုတ်ရင် ဟုတ်တယ်လို့ ပြောပေးပါနော် — ဘာဆိုလိုတာလဲ တစ်ခေါက်လောက် ထပ်ပြောပေးပါလားရှင်။"
+            _PENDING_VOICE_CLARIFICATION[user_id] = {
+                "created_at": time.monotonic(),
+                "original_transcript": "",
+                "suggested_meaning": "",
+                "suggested_route": {"intent": "GENERAL"},
+            }
             await update.message.reply_text(_deduplicate_reply_text(clarify_msg))
             await send_voice_reply(update, context, clarify_msg)
             return
@@ -686,8 +762,8 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         resolved_from_pending = _resolve_pending_clarification(user_id, transcript_text)
         if resolved_from_pending is not None:
-            if resolved_from_pending.startswith("ဟုတ်ကဲ့ရှင်၊ ဒါဆို") or "မှတ်ထားလိုက်ပါပြီ" in resolved_from_pending:
-                clean_pending_reply = _deduplicate_reply_text(resolved_from_pending)
+            if resolved_from_pending.startswith("ဟုတ်ကဲ့ရှင်၊ ဆက်ပြောဖို့") or "မှတ်ထားလိုက်ပါပြီ" in resolved_from_pending:
+                clean_pending_reply = _limit_to_3_to_5_sentences(_deduplicate_reply_text(resolved_from_pending), max_sentences=5)
                 save_chat_message(user_id, "assistant", clean_pending_reply)
                 evolve_user_profile(user_id, transcript_text, clean_pending_reply)
                 await update.message.reply_text(_deduplicate_reply_text(f"🎙️ \"{transcript_text}\"\n\n{clean_pending_reply}"))
@@ -696,30 +772,46 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             if resolved_from_pending:
                 transcript_text = resolved_from_pending
 
-        history_ctx = recall_relevant_history(user_id, f"{transcript_text} {meaning_hint}", recent_limit=8, search_limit=10)
+        use_ctx = _is_followup_reference(transcript_text) and not _is_new_command_or_task(transcript_text)
+        if use_ctx:
+            history_ctx = recall_relevant_history(user_id, f"{transcript_text} {meaning_hint}", recent_limit=4, search_limit=4)
+            route_recent_ctx = (history_ctx or "")[-600:]
+        else:
+            history_ctx = recall_relevant_history(user_id, transcript_text, recent_limit=2, search_limit=2)
+            route_recent_ctx = ""
+
         route = smart_route_and_parse(
             transcript_text,
             available_groups,
-            recent_ctx=history_ctx[-1400:],
-            user_pref_ctx=history_ctx[:1000],
+            recent_ctx=route_recent_ctx,
+            user_pref_ctx="",
         )
         intent = route.get("intent", "GENERAL")
         if intent == "GENERAL" and analysis.get("intent_hint") in {"TASK", "GROUP", "WEB_SEARCH"}:
             intent = analysis["intent_hint"]
             route["intent"] = intent
 
-        is_very_uncertain = bool(analysis.get("ambiguous")) and len(transcript_text.strip()) <= 3
+        is_unclear_voice = bool(analysis.get("ambiguous")) and not _is_new_command_or_task(transcript_text)
+        is_vague_remind = (
+            intent == "TASK"
+            and (route.get("task_action") or "").upper() in {"ADD", "REMIND"}
+            and len(transcript_text.replace("remind", "").replace("reminder", "").replace("ပေးပါ", "").strip()) <= 2
+        )
 
-        if is_very_uncertain:
+        if is_unclear_voice or is_vague_remind:
             q_txt = (analysis.get("clarification_question") or "").strip()
             if not q_txt:
-                q_txt = f"“{meaning_hint}” ကို ဆိုလိုတာလားရှင်။"
+                if is_vague_remind:
+                    q_txt = "ဘာကို remind ပေးစေချင်တာလဲရှင်၊ ဟုတ်ရင် ဟုတ်တယ်လို့ ပြောပြီး ဘာလုပ်ရမယ်ဆိုတာ ပြောပြပေးပါနော်။"
+                else:
+                    q_txt = f"အသံနည်းနည်း မရှင်းလို့ “{meaning_hint}” လို့ ဆိုလိုတာလားရှင်၊ ဟုတ်ရင် ဟုတ်တယ်လို့ ပြောပေးပါနော်။"
             _PENDING_VOICE_CLARIFICATION[user_id] = {
+                "created_at": time.monotonic(),
                 "original_transcript": transcript_text,
                 "suggested_meaning": meaning_hint,
                 "suggested_route": route,
             }
-            clean_q = _deduplicate_reply_text(q_txt)
+            clean_q = _limit_to_3_to_5_sentences(_deduplicate_reply_text(q_txt), max_sentences=5)
             save_chat_message(user_id, "assistant", clean_q)
             await update.message.reply_text(_deduplicate_reply_text(f"🎙️ \"{transcript_text}\"\n\n{clean_q}"))
             await send_voice_reply(update, context, clean_q)
@@ -727,7 +819,6 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         if intent == "TASK":
             t_act = (route.get("task_action") or "").upper()
-            t_title = (route.get("title") or route.get("task_title") or transcript_text).strip()
             if t_act == "LIST" and not (route.get("title") or route.get("task_title")):
                 reply = "ဘယ် task ကို ဆိုလိုတာလဲရှင်၊ Task နာမည်လေး ပြောပြပေးပါလားနော်။"
             else:
@@ -743,7 +834,8 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         elif intent == "WEB_SEARCH":
             search_q = route.get("search_query") or meaning_hint or transcript_text
             eng_q = route.get("english_search_query")
-            reply = perform_hybrid_web_search(search_q, english_query=eng_q, history_ctx=history_ctx)
+            raw_web = perform_hybrid_web_search(search_q, english_query=eng_q, history_ctx=history_ctx)
+            reply = _limit_to_3_to_5_sentences(raw_web, max_sentences=5)
         else:
             cal_ctx = get_myanmar_calendar_context()
             prompt = f"""
@@ -756,24 +848,25 @@ Voice Tone & Meaning Profile:
 လက်ရှိ Voice လေသံ: {tone_label}
 နားလည်ထားသော ဆိုလိုရင်း: {meaning_hint}
 
-Memory & User Context:
-{history_ctx}
+Context (follow-up ဖြစ်မှသာ အသုံးပြုပါ):
+{route_recent_ctx or "မသုံးပါ"}
 
 User Voice Transcript: "{transcript_text}"
 
 ညွှန်ကြားချက်များ:
 - အခုနောက်ဆုံး ပြောလိုက်သော User Voice Transcript ("{transcript_text}") ကိုသာ တိုက်ရိုက် ဦးစားပေး ဖြေဆိုပါ။ သက်ဆိုင်မှုမရှိသော အကြောင်းအရာဟောင်းများကို ထပ်မပြောပါနှင့်။
-- အသံဖြင့် မေးမြန်းခြင်းဖြစ်၍ စာအရှည်ကြီးများ၊ bullet/number စာရင်းရှည်များ မရေးဘဲ လိုရင်းအနှစ်ချုပ်ကို စာကြောင်း ၃–၅ ကြောင်းခန့်ဖြင့် လူအချင်းချင်း စကားပြောနေသလို သဘာဝကျကျ ဖြေဆိုပါ (ဤစာအတိုင်းပင် အသံဖြင့် ပြန်ပြောပြမည်)။
-- Task နဲ့ ပတ်သက်၍ ဖြေလျှင် ထည့်လိုက်သော/သက်ဆိုင်သော task နာမည်ကို သဘာဝကျကျ ထည့်ပြောပါ။ Task စာရင်းအရှည်ကြီးများကို ချမပြဘဲ ဘယ် task ကို ဆိုလိုမှန်း မသေချာလျှင် "ဘယ် task ကို ဆိုလိုတာလဲရှင်" ဟု သဘာဝကျကျ ပြန်မေးပါ။
+- စာကြောင်း ၃ မှ ၅ ကြောင်းအတွင်းသာ တိုတိုရှင်းရှင်း၊ လိုရင်းအနှစ်ချုပ်ဖြင့် လူအချင်းချင်း စကားပြောနေသလို သဘာဝကျကျ ဖြေဆိုပါ (ဤစာအတိုင်းပင် အသံဖြင့် ပြန်ပြောပြမည်)။ စာရှည်ကြီးများ မရေးပါနှင့်။
+- ဘယ် task ကို ဆိုလိုမှန်း မသေချာလျှင် "ဘယ် task ကို ဆိုလိုတာလဲရှင်" ဟု သဘာဝကျကျ ပြန်မေးပါ။
 - သင်ဇာ (Thinzar) အမည်ရှိ မြန်မာမိန်းကလေးဟန် AI Assistant အဖြစ် ရင်းရင်းနှီးနှီး၊ သဘာဝကျကျ ဖြေဆိုပါ။
 - မြန်မာစာလုံးပေါင်းနှင့် သတ်ပုံများကို မှန်ကန်စွာ ရေးသားပါ။
-- စာကြောင်း သို့မဟုတ် အချက်အလက်တွေကို ထပ်ခါထပ်ခါ မရေးပါနှင့်။
 - 'မောင်' ဟု ဆေးသောက်ရန်နှင့် မိသားစု/ကလေး Task များမှလွဲ၍ မသုံးပါနှင့်။
 """
             reply = call_ai_with_3tier_fallback(prompt)
 
         normalized_reply = _normalize_mm_spelling_and_voice(reply or "")
-        clean_reply = _deduplicate_reply_text(normalized_reply)
+        dedup_reply = _deduplicate_reply_text(normalized_reply)
+        clean_reply = _limit_to_3_to_5_sentences(dedup_reply, max_sentences=5) if intent != "TASK" else dedup_reply
+
         save_chat_message(user_id, "assistant", clean_reply)
         evolve_user_profile(user_id, transcript_text, clean_reply)
 
@@ -782,33 +875,6 @@ User Voice Transcript: "{transcript_text}"
 
     except Exception as e:
         print(f"Error handling voice message: {e}")
-        err_msg = "အသံနဲ့ ပြန်ဖြေရာမှာ ခဏအခက်အခဲ ရှိနေပါတယ်ရှင်၊ နောက်မှ ထပ်စမ်းကြည့်ပါ"
+        err_msg = "အသံနဲ့ ပြန်ဖြေရာမှာ ခဏအခက်အခဲ ရှိနေပါတယ်ရှင်၊ နောက်မှ ထပ်စမ်းကြည့်ပါ။"
         await update.message.reply_text(_deduplicate_reply_text(err_msg))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
