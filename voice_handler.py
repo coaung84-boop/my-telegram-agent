@@ -181,6 +181,25 @@ def _humanize_dates_and_times_for_speech(text: str) -> str:
     return text
 
 
+def _normalize_mm_spelling_and_voice(text: str) -> str:
+    """မြန်မာစာလုံးပေါင်း/သတ်ပုံအမှားအချို့နဲ့ သင်ဇာ့အသုံးအနှုန်းကို ညှိပေးသည်။"""
+    if not text:
+        return ""
+    s = text.strip()
+    s = s.replace("ကျွန်တော့်", "သင်ဇာ့").replace("ကျွန်တော်", "သင်ဇာ")
+    s = re.sub(r"[\u0E00-\u0E7F]+", "", s)
+    s = re.sub(r"\[meta:[^\]]*\]", "", s)
+    replacements = {
+        "မಧပိုင်း": "မွန်းလွဲပိုင်း",
+        "မွန်းတည့်ပိုင်း": "နေ့လယ်ပိုင်း",
+        "ပြင်ဆင်ပေးပါ": "ပြင်ဆင်ပေးပါ",
+        "အဆင်ပြေပါတယ်": "အဆင်ပြေပါတယ်",
+    }
+    for wrong, right in replacements.items():
+        s = s.replace(wrong, right)
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def _normalize_heard_transcript(text: str) -> str:
     """STT မှာ အသံထွက်ဆင်တူ မှားကြားနိုင်တာတွေကို ဆိုလိုရင်းအတိုင်း ညှိပေးသည်။"""
     if not text:
@@ -780,15 +799,17 @@ Memory & User Context:
 User Voice Transcript: "{transcript_text}"
 
 ညွှန်ကြားချက်များ:
+- အရေးအကြီးဆုံးမှာ အခုနောက်ဆုံး ပြောလိုက်သော User Voice Transcript ("{transcript_text}") ကိုသာ တိုက်ရိုက် ဦးစားပေး ဖြေဆိုပါ။ အရင်ပြောခဲ့ဖူးသော အကြောင်းအရာဟောင်းများကို ယခုမေးခွန်းနှင့် မသက်ဆိုင်ဘဲ ထပ်မံပြန်ပြောခြင်း မပြုပါနှင့်။
 - သင်ဇာ (Thinzar) အမည်ရှိ မြန်မာမိန်းကလေးဟန် AI Assistant အဖြစ် ရင်းရင်းနှီးနှီး၊ ပွင့်ပွင့်လင်းလင်းနဲ့ သဘာဝကျကျ ဖြေဆိုပါ။
+- မြန်မာစာလုံးပေါင်းနှင့် သတ်ပုံများကို မှန်ကန်သန့်ရှင်းစွာ ရေးသားပါ။
 - အသံလေသံနဲ့ context ကို လိုက်ပြီး အလိုက်သိ ဖြေပါ (ဥပမာ — အလောတကြီး/တိုတိုပြောရင် လိုရင်းတိုရှင်း၊ မေးမြန်း/စဉ်းစားရင် အကျိုး/အပြစ် နဲ့ သုံးသပ်ချက်)။
-- အသံထွက်ဆင်တူ ကြားမှားနိုင်တာမျိုး (ဥပမာ 'တင်ဇာ' ကြားလည်း 'သင်ဇာ' ကို ခေါ်တာမျိုး) နဲ့ အရင်ပြောခဲ့ဖူးတဲ့ ဆိုလိုရင်း ဆက်စပ်မှုတွေကို ဆိုလိုရင်းအတိုင်း အလိုက်သိ နားလည်ပြီး ဖြေပါ။
 - စာကြောင်း သို့မဟုတ် အချက်အလက်တွေကို လုံးဝ ထပ်ခါထပ်ခါ မရေးပါနှင့်။
 - 'မောင်' ဟု ဆေးသောက်ရန်နှင့် မိသားစု/ကလေး Task များမှလွဲ၍ မသုံးပါနှင့်။
 """
             reply = call_ai_with_3tier_fallback(prompt)
 
-        clean_reply = _deduplicate_reply_text(reply or "")
+        normalized_reply = _normalize_mm_spelling_and_voice(reply or "")
+        clean_reply = _deduplicate_reply_text(normalized_reply)
         save_chat_message(user_id, "assistant", clean_reply)
         evolve_user_profile(user_id, transcript_text, clean_reply)
 
@@ -799,6 +820,10 @@ User Voice Transcript: "{transcript_text}"
         print(f"Error handling voice message: {e}")
         err_msg = "အသံနဲ့ ပြန်ဖြေရာမှာ ခဏအခက်အခဲ ရှိနေပါတယ်ရှင်၊ နောက်မှ ထပ်စမ်းကြည့်ပါ"
         await update.message.reply_text(_deduplicate_reply_text(err_msg))
+
+
+
+
 
 
 
