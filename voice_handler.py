@@ -217,7 +217,12 @@ def _to_spoken_chat_prose(raw_text: str) -> str:
             ai_summary = re.sub(r"\s+", " ", ai_summary).strip()
             if not ai_summary.endswith(("။", "!", "?")):
                 ai_summary = f"{ai_summary}။"
-            return ai_summary[:380]
+            if len(ai_summary) > 750:
+                cut = ai_summary[:750]
+                last_p = max(cut.rfind("။"), cut.rfind("!"), cut.rfind("?"))
+                if last_p > 120:
+                    return cut[: last_p + 1]
+            return ai_summary
     except Exception:
         pass
 
