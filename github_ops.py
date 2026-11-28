@@ -12,6 +12,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from config import ADMIN_USER_ID, MM_TZ
+from ai_engine import call_ai_with_3tier_fallback
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 GITHUB_REPO = os.getenv("GITHUB_REPO", "").strip()
@@ -52,6 +53,53 @@ def _normalize_target_filename(raw_name: str) -> str:
     return cleaned
 
 
+def _normalize_python_whitespace(code_text: str) -> str:
+    cleaned = code_text.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = re.sub(r"[\u00a0\u200b\u200c\u200d\ufeff]", " ", cleaned)
+    lines = []
+    for ln in cleaned.split("\n"):
+        stripped_leading = ln.lstrip("\t")
+        tab_cnt = len(ln) - len(stripped_leading)
+        fixed_ln = ("    " * tab_cnt) + stripped_leading
+        lines.append(fixed_ln.rstrip())
+    return "\n".join(lines) + ("\n" if cleaned.endswith("\n") else "")
+
+
+def _auto_fix_python_syntax(code_text: str, file_path: str, max_retries: int = 2) -> tuple[bool, str, str]:
+    cur_code = _normalize_python_whitespace(code_text)
+    for _ in range(max_retries + 1):
+        try:
+            ast.parse(cur_code)
+            return True, cur_code, ""
+        except SyntaxError as se:
+            err_line_no = se.lineno or 1
+            src_lines = cur_code.splitlines()
+            start_i = max(0, err_line_no - 18)
+            end_i = min(len(src_lines), err_line_no + 18)
+            numbered_snippet = "\n".join(
+                f"{idx + 1}: {src_lines[idx]}" for idx in range(start_i, end_i)
+            )
+            fix_prompt = (
+                f"Fix ONLY the Python SyntaxError/IndentationError in `{file_path}`.\n"
+                f"Error at line {se.lineno}: {se.msg}\n"
+                "Do NOT change business logic, variable names, or unrelated code.\n"
+                "Return ONLY the corrected full Python code without markdown fences.\n\n"
+                f"Context around line {se.lineno}:\n{numbered_snippet}\n\n"
+                f"Full code:\n{cur_code}"
+            )
+            ai_fixed = (call_ai_with_3tier_fallback(fix_prompt) or "").strip()
+            ai_fixed = re.sub(r"^```(?:python)?\s*\n?", "", ai_fixed)
+            ai_fixed = re.sub(r"\n?```\s*$", "", ai_fixed)
+            if not ai_fixed or "ခဏအလုပ်များနေပါတယ်" in ai_fixed:
+                return False, cur_code, f"Syntax error — line {se.lineno}: {se.msg}"
+            cur_code = _normalize_python_whitespace(ai_fixed)
+    try:
+        ast.parse(cur_code)
+        return True, cur_code, ""
+    except SyntaxError as se:
+        return False, cur_code, f"Syntax error — line {se.lineno}: {se.msg}"
+
+
 def get_github_file(file_path: str, branch: str | None = None) -> dict:
     clean_path = _normalize_target_filename(file_path)
     if not GITHUB_TOKEN or not GITHUB_REPO:
@@ -89,10 +137,10 @@ def upsert_github_file(
         return {"ok": False, "error": f"'{clean_path}' ကို ခွင့်ပြုထားသော ဖိုင်စာရင်းထဲ ထည့်မထားပါရှင်"}
 
     if clean_path.endswith(".py"):
-        try:
-            ast.parse(new_content)
-        except SyntaxError as se:
-            return {"ok": False, "error": f"Python syntax error ရှိနေပါတယ်ရှင် — line {se.lineno}: {se.msg}"}
+        ok_fix, fixed_code, fix_err = _auto_fix_python_syntax(new_content, clean_path)
+        if not ok_fix:
+            return {"ok": False, "error": f"Python {fix_err}"}
+        new_content = fixed_code
 
     ref = branch or GITHUB_BRANCH
     existing = get_github_file(clean_path, branch=ref)
@@ -114,6 +162,7 @@ def upsert_github_file(
             return {"ok": False, "error": f"GitHub commit failed ({resp.status_code}): {resp.text[:180]}"}
         res_json = resp.json()
         commit_sha = ((res_json.get("commit") or {}).get("sha") or "")[:7]
+        _save_pending_deploy_info(clean_path, commit_sha)
         return {"ok": True, "path": clean_path, "commit": commit_sha, "branch": ref}
     except Exception as e:
         return {"ok": False, "error": f"GitHub commit error: {type(e).__name__}: {str(e)[:150]}"}
@@ -214,14 +263,16 @@ def _find_matching_block_in_text(source_text: str, old_block: str) -> tuple[str 
 
 
 def apply_hunks_to_source(source_text: str, hunks: list[tuple[str, str]]) -> tuple[bool, str, str]:
-    cur_text = source_text.replace("\r\n", "\n")
+    cur_text = _normalize_python_whitespace(source_text)
     for idx, (old_b, new_b) in enumerate(hunks, start=1):
-        matched_old, err = _find_matching_block_in_text(cur_text, old_b)
+        old_clean = _normalize_python_whitespace(old_b).strip("\n")
+        new_clean = _normalize_python_whitespace(new_b).strip("\n")
+        matched_old, err = _find_matching_block_in_text(cur_text, old_clean)
         if not matched_old:
             return False, cur_text, f"Hunk #{idx}: {err}"
-        aligned_new = _align_new_block_indent(matched_old, new_b)
+        aligned_new = _align_new_block_indent(matched_old, new_clean)
         cur_text = cur_text.replace(matched_old, aligned_new, 1)
-    return True, cur_text, ""
+    return True, _normalize_python_whitespace(cur_text), ""
 
 
 def _read_pending_deploy_info() -> dict | None:
@@ -301,13 +352,21 @@ async def notify_render_deploy_if_pending(application):
         return
 
     info = _read_pending_deploy_info()
+    now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
+
     if not info:
+        try:
+            await application.bot.send_message(
+                chat_id=ADMIN_USER_ID,
+                text=f"🚀 သင်ဇာ (Thinzar) Render ပေါ်မှာ Auto-Deploy ပြီးစီးပြီး Online ဖြစ်သွားပါပြီရှင် ({now_str})",
+            )
+        except Exception as e:
+            print(f"Startup deploy notify error: {e}")
         return
 
     _clear_pending_deploy_info()
     f_path = info.get("file_path") or "code"
     c_sha = info.get("commit") or ""
-    now_str = datetime.now(MM_TZ).strftime("%Y-%m-%d %H:%M MMT")
     commit_part = f" (`{c_sha}`)" if c_sha else ""
 
     try:
@@ -332,11 +391,13 @@ async def notify_render_deploy_if_pending(application):
             )
     except Exception as e:
         print(f"Deploy notify error: {e}")
+
+
 async def handle_patch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.effective_user.id != ADMIN_USER_ID:
         return
 
-    raw_msg = update.message.text or ""
+    raw_msg = _normalize_python_whitespace(update.message.text or "")
     body = raw_msg.split(None, 1)[1] if len(raw_msg.split(None, 1)) > 1 else ""
     if not body.strip():
         await update.message.reply_text(
@@ -368,11 +429,11 @@ async def handle_patch_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if target_file.endswith(".py"):
-        try:
-            ast.parse(preview_full)
-        except SyntaxError as se:
-            await update.message.reply_text(f"❌ Syntax error ဖြစ်နိုင်ပါတယ်ရှင် — line {se.lineno}: {se.msg}")
+        ok_fix, fixed_full, fix_err = _auto_fix_python_syntax(preview_full, target_file)
+        if not ok_fix:
+            await update.message.reply_text(f"❌ {fix_err}")
             return
+        preview_full = fixed_full
 
     req_id = uuid.uuid4().hex[:10]
     _PENDING_PATCHES[req_id] = {
@@ -441,7 +502,6 @@ async def handle_patch_callback(update: Update, context: ContextTypes.DEFAULT_TY
         pending["branch"],
     )
     if res.get("ok"):
-        _save_pending_deploy_info(res["path"], res.get("commit") or "")
         await query.message.reply_text(
             f"✅ `{res['path']}` ကို `{res['branch']}` ပေါ် push တင်ပြီးပါပြီရှင် (`{res['commit']}`)\n"
             "Render deploy ပြီးရင် Success / Fail အသိပေးချက် ပြန်ပို့ပေးပါမယ်ရှင်"
@@ -531,7 +591,6 @@ async def handle_py_file_upload(update: Update, context: ContextTypes.DEFAULT_TY
     commit_msg = (msg.caption or "").strip()[:120] or f"Upload {file_name} via Thinzar"
     res = await asyncio.to_thread(upsert_github_file, file_name, code_text, commit_msg, GITHUB_BRANCH)
     if res.get("ok"):
-        _save_pending_deploy_info(res["path"], res.get("commit") or "")
         await msg.reply_text(
             f"✅ `{res['path']}` ကို `{res['branch']}` ပေါ် တင်ပြီးပါပြီရှင် (`{res['commit']}`)\n"
             "Render deploy ပြီးရင် Success / Fail အသိပေးချက် ပြန်ပို့ပေးပါမယ်ရှင်"
