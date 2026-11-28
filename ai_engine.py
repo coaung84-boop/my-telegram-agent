@@ -12,7 +12,13 @@ from config import (
     STRICT_MYANMAR_SYSTEM,
 )
 
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+try:
+    from config import GEMINI_API_KEYS
+except ImportError:
+    GEMINI_API_KEYS = [k for k in [GEMINI_API_KEY] if k]
+
+gemini_clients = [genai.Client(api_key=k) for k in GEMINI_API_KEYS if k]
+gemini_client = gemini_clients[0] if gemini_clients else genai.Client(api_key=GEMINI_API_KEY)
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 
@@ -56,39 +62,43 @@ def call_ai_with_3tier_fallback(
         tools=tools,
     )
 
-    # Tier 1: Gemini 3.5 Flash-Lite
-    for attempt in range(2):
+    # Tier 1: Gemini 3.5 Flash-Lite (with secondary key failover)
+    clients_to_try = gemini_clients or ([gemini_client] if gemini_client else [])
+    for key_idx, g_client in enumerate(clients_to_try):
+        for attempt in range(2):
+            try:
+                response = g_client.models.generate_content(
+                    model="gemini-3.5-flash-lite",
+                    contents=contents,
+                    config=config,
+                )
+                if response and response.text and response.text.strip():
+                    return _clean_thinzar_voice(response.text.strip())
+            except Exception as e:
+                err_msg = f"T1(K{key_idx+1},{attempt+1}): {type(e).__name__} - {str(e)[:90]}"
+                print(err_msg)
+                errors.append(err_msg)
+                err_str = str(e)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    break
+                if attempt == 0:
+                    time.sleep(1.0)
+
+    # Tier 2: Gemini 3.8 Flash (with secondary key failover)
+    for key_idx, g_client in enumerate(clients_to_try):
         try:
-            response = gemini_client.models.generate_content(
-                model="gemini-3.5-flash-lite",
+            response = g_client.models.generate_content(
+                model="gemini-3.8-flash",
                 contents=contents,
                 config=config,
             )
             if response and response.text and response.text.strip():
                 return _clean_thinzar_voice(response.text.strip())
         except Exception as e:
-            err_msg = f"T1({attempt+1}): {type(e).__name__} - {str(e)[:90]}"
+            err_msg = f"T2(K{key_idx+1}): {type(e).__name__} - {str(e)[:90]}"
             print(err_msg)
             errors.append(err_msg)
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                break
-            if attempt == 0:
-                time.sleep(1.0)
-
-    # Tier 2: Gemini 3.8 Flash
-    try:
-        response = gemini_client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=contents,
-            config=config,
-        )
-        if response and response.text and response.text.strip():
-            return _clean_thinzar_voice(response.text.strip())
-    except Exception as e:
-        err_msg = f"T2: {type(e).__name__} - {str(e)[:90]}"
-        print(err_msg)
-        errors.append(err_msg)
-
+            
     if audio_bytes:
         debug_tail = "\n".join(errors[-3:])
         return f"လောလောဆယ် AI ဆာဗာ ခဏအလုပ်များနေပါတယ်ရှင်၊ ခဏနေပြီး ထပ်စမ်းကြည့်ပေးပါ:\n{debug_tail}"
