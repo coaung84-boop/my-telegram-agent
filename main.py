@@ -642,9 +642,12 @@ Latest User Message: "{user_text}"
 """
         reply = call_ai_with_3tier_fallback(prompt)
 
-    save_chat_message(user_id, "assistant", reply)
-    evolve_user_profile(user_id, user_text, reply)
-    await update.message.reply_text(reply)
+    cleaned_reply = re.sub(r"\s*\[(?:Verified|Deduced|Unverified)\]\s*", " ", reply or "", flags=re.IGNORECASE)
+    cleaned_reply = re.sub(r"[ \t]+([။၊,.!?])", r"\1", cleaned_reply)
+    cleaned_reply = re.sub(r"[ \t]{2,}", " ", cleaned_reply).strip()
+    save_chat_message(user_id, "assistant", cleaned_reply)
+    evolve_user_profile(user_id, user_text, cleaned_reply)
+    await update.message.reply_text(cleaned_reply)
 
 
 async def post_init(application):
@@ -730,3 +733,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
