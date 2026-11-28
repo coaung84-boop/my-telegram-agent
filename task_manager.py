@@ -381,7 +381,7 @@ def _build_task_list_payload(show_done: bool = False) -> tuple[str, InlineKeyboa
                 _, cat, _ = _unpack_task_meta(t)
                 cat_badge = _category_label_mm(cat)
                 lines.append(f"• ✓ **{title}** · {cat_badge}")
-                if len(done_rows) > 15:
+            if len(done_rows) > 15:
                 lines.append(f"• … နောက်ထပ် **{len(done_rows) - 15}** ခု ကျန်ပါသေးတယ်။")
 
     view_id = uuid.uuid4().hex[:8]
@@ -646,7 +646,3 @@ async def consume_pending_task_input(update: Update, context: ContextTypes.DEFAU
     list_txt, markup = _build_task_list_payload(show_done=cur_show_done)
     await msg.reply_text(list_txt, reply_markup=markup)
     return True
-
-
-
-
