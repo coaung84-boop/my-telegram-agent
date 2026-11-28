@@ -673,19 +673,9 @@ async def post_init(application):
 
 async def _on_error(update, context):
     print(f"Telegram Bot Error: {context.error}")
-    try:
-        if update and update.effective_message and update.effective_user and update.effective_user.id == ADMIN_USER_ID:
-            await update.effective_message.reply_text("ခဏလေးနော်ရှင်၊ ဖြေကြားရာမှာ အဆင်မပြေမှုလေး ဖြစ်သွားလို့ ထပ်စမ်းကြည့်ပေးပါဦး။")
-    except Exception:
-        pass
 
 
-def main():
-    if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing.")
-
-    _start_port_server()
-
+def _build_application():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start_command))
@@ -710,9 +700,32 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice_message))
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, handle_message))
     app.add_error_handler(_on_error)
+    return app
 
+
+async def _run_bot_async():
+    app = _build_application()
+    await app.initialize()
+    await post_init(app)
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+    print("သင်ဇာ (Thinzar) Telegram Bot is running...")
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    finally:
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+
+
+def main():
+    if not TELEGRAM_BOT_TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing.")
+
+    _start_port_server()
     print("သင်ဇာ (Thinzar) Telegram Bot is starting...")
-    app.run_polling(drop_pending_updates=True)
+    asyncio.run(_run_bot_async())
 
 
 if __name__ == "__main__":
