@@ -193,7 +193,7 @@ def _to_spoken_chat_prose(raw_text: str) -> str:
     combined = re.sub(r"\s+", " ", combined).strip()
 
     # စာတိုရင် မဖြတ်တောက်ဘဲ သဘာဝကျတဲ့ စကားပြောအတိုင်း အကုန်ပြောမယ်
-    if len(combined) <= 360:
+    if len(combined) <= 500:
         return combined
 
     # စာရှည်ရင် မူရင်း reply စာသားကို အခြေခံပြီး စာနဲ့ အဆက်အစပ်မိအောင် summary လုပ်ပြောမယ်
@@ -535,7 +535,7 @@ async def send_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, r
             try:
                 saved_ok = await asyncio.wait_for(
                     _render_expressive_edge_tts(spoken, tmp_path),
-                    timeout=20.0,
+                    timeout=35.0,
                 )
                 if saved_ok:
                     break
