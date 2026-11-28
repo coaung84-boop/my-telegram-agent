@@ -54,6 +54,9 @@ def _deduplicate_reply_text(text: str) -> str:
     """စာ reply ထဲမှာ မတော်တဆ ထပ်နေတဲ့ စာပိုဒ်/စာကြောင်းတူတွေ ပါလာရင် ရှင်းထုတ်ပေးသည်။"""
     if not text:
         return ""
+    text = re.sub(r"\s*\[(?:Verified|Deduced|Unverified)\]\s*", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"[ \t]+([။၊,.!?])", r"\1", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
     cleaned = re.sub(r"\n{3,}", "\n\n", text.strip())
     paragraphs = cleaned.split("\n\n")
     unique_paras: list[str] = []
@@ -796,3 +799,7 @@ User Voice Transcript: "{transcript_text}"
         print(f"Error handling voice message: {e}")
         err_msg = "အသံနဲ့ ပြန်ဖြေရာမှာ ခဏအခက်အခဲ ရှိနေပါတယ်ရှင်၊ နောက်မှ ထပ်စမ်းကြည့်ပါ"
         await update.message.reply_text(_deduplicate_reply_text(err_msg))
+
+
+
+
