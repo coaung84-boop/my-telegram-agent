@@ -351,36 +351,37 @@ def _build_task_list_payload(show_done: bool = False) -> tuple[str, InlineKeyboa
     if not show_done:
         lines = [f"📋 **Task စာရင်း** · Pending **{len(pending_rows)}** ခု", ""]
         if not pending_rows:
-            lines.append("လက်ရှိ လုပ်စရာ Pending task မရှိသေးပါဘူးရှင်။")
+            lines.append("• လက်ရှိ လုပ်စရာ Pending task မရှိသေးပါဘူးရှင်။")
         else:
-            for idx, t in enumerate(pending_rows[:12], start=1):
+            for idx, t in enumerate(pending_rows[:10], start=1):
                 tid = t.get("id")
                 title = _clean_task_title(t.get("title") or "")
                 due_txt = _format_short_due(t.get("due_at"))
                 clean_reason, cat, prio = _unpack_task_meta(t)
                 cat_badge = _category_label_mm(cat)
                 prio_badge = _priority_badge_mm(prio)
-                due_part = f" · ⏰ `{due_txt}`" if due_txt else ""
-                prio_part = f" · {prio_badge}" if prio_badge else ""
-                lines.append(f"**{idx}.** {title}{due_part}{prio_part} — [{cat_badge}] *(ID #{tid})*")
+                time_str = f"⏰ `{due_txt}`" if due_txt else "⏰ အချိန်မသတ်မှတ်ရသေး"
+                prio_str = f" · {prio_badge}" if prio_badge else ""
+                lines.append(f"• **{idx}. {title}** (#{tid}){prio_str}")
+                lines.append(f"  {time_str} · {cat_badge}")
                 if clean_reason:
-                    lines.append(f"   📝 {clean_reason}")
-            if len(pending_rows) > 12:
-                lines.append(f"… နောက်ထပ် **{len(pending_rows) - 12}** ခု ကျန်ပါသေးတယ်။")
+                    lines.append(f"  📝 {clean_reason}")
+            if len(pending_rows) > 10:
+                lines.append(f"• … နောက်ထပ် **{len(pending_rows) - 10}** ခု ကျန်ပါသေးတယ်။")
 
         lines.append("")
         lines.append("💡 ပြီးစီးစာရင်း ကြည့်ရန် အောက်က **✅ ပြီးစီးပြီး** ကို နှိပ်ပါ။")
     else:
         lines = [f"✅ **ပြီးစီးပြီး Task စာရင်း** ({len(done_rows)} ခု)", ""]
         if not done_rows:
-            lines.append("ပြီးစီးထားတဲ့ task မရှိသေးပါဘူးရှင်။")
+            lines.append("• ပြီးစီးထားတဲ့ task မရှိသေးပါဘူးရှင်။")
         else:
-            for t in done_rows[:15]:
+            for t in done_rows[:12]:
                 title = _clean_task_title(t.get("title") or "")
                 _, cat, _ = _unpack_task_meta(t)
                 cat_badge = _category_label_mm(cat)
-                lines.append(f"• ✓ {title} — [{cat_badge}]")
-            if len(done_rows) > 15:
+                lines.append(f"• ✓ **{title}** · {cat_badge}")
+                if len(done_rows) > 15:
                 lines.append(f"… နောက်ထပ် **{len(done_rows) - 15}** ခု ကျန်ပါသေးတယ်။")
 
     view_id = uuid.uuid4().hex[:8]
