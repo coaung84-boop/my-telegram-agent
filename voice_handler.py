@@ -80,7 +80,7 @@ def _is_new_command_or_task(text: str) -> bool:
 
 
 def _format_3_to_5_sentences_with_ending(text: str, max_sentences: int = 5) -> str:
-    """စာကြောင်း ၃–၅ ကြောင်းအတွင်း ဖြတ်တောက်ခြင်းမရှိဘဲ နိဂုံးလေးနဲ့ သဘာဝကျကျ အဆုံးသတ်သည်။"""
+    """စာကြောင်း ၃–၅ ကြောင်းအတွင်း ဆိုလိုရင်းကို ခြုံငုံပြီး သဘာဝကျကျ အဆုံးသတ်သည်။"""
     cleaned = re.sub(r"\s+", " ", (text or "").strip())
     if not cleaned:
         return ""
@@ -89,9 +89,8 @@ def _format_3_to_5_sentences_with_ending(text: str, max_sentences: int = 5) -> s
     if not raw_sentences:
         raw_sentences = [cleaned]
 
-    # Cap at 4 body sentences so adding a natural closing sentence stays within 3-5 sentences
-    body_limit = max(3, min(max_sentences - 1, 4))
-    selected = raw_sentences[:body_limit]
+    limit = max(3, min(max_sentences, 5))
+    selected = raw_sentences[:limit]
 
     sentences: list[str] = []
     for s in selected:
@@ -101,17 +100,6 @@ def _format_3_to_5_sentences_with_ending(text: str, max_sentences: int = 5) -> s
         if not s.endswith(("။", "!", "?")):
             s = f"{s}။"
         sentences.append(s)
-
-    if not sentences:
-        return ""
-
-    last_s = sentences[-1]
-    closing_markers = ("နော်", "ရှင်", "ပါမယ်", "ပါတယ်", "ပြောပြပေးပါ", "မေးပါနော်")
-    if not any(m in last_s for m in closing_markers) and len(sentences) < max_sentences:
-        if last_s.endswith("?"):
-            sentences.append("သိချင်တာရှိရင် ထပ်ပြောပြပေးပါနော်။")
-        else:
-            sentences.append("ဒါလေးပါရှင်၊ ထပ်သိချင်တာရှိရင် ပြောပြပေးပါနော်။")
 
     return " ".join(sentences).strip()
 
@@ -870,7 +858,7 @@ User Voice Transcript: "{transcript_text}"
 
 ညွှန်ကြားချက်များ:
 - အခုနောက်ဆုံး ပြောလိုက်သော User Voice Transcript ("{transcript_text}") ကိုသာ တိုက်ရိုက် ဦးစားပေး ဖြေဆိုပါ။ သက်ဆိုင်မှုမရှိသော အကြောင်းအရာဟောင်းများကို ထပ်မပြောပါနှင့်။
-- စာကြောင်း ၃ မှ ၅ ကြောင်းအတွင်း ဆိုလိုရင်း အနှစ်ချုပ်ကို ခြုံငုံမိအောင် ဖြေဆိုပြီး သဘာဝကျသော နိဂုံးစာကြောင်းလေးဖြင့် အဆုံးသတ်ပါ (ဤစာအတိုင်းပင် အသံဖြင့် ပြန်ပြောပြမည်)။
+- စာကြောင်း ၃ မှ ၅ ကြောင်းအတွင်း ဆိုလိုရင်းကို ခြုံငုံမိအောင် ဖြေဆိုပြီး အဆုံးသတ်စကားလေး တစ်ခုတည်းဖြင့် သဘာဝကျကျ ပိတ်သိမ်းပါ (ဤစာအတိုင်းပင် အသံဖြင့် ပြန်ပြောပြမည်)။
 - သင်ဇာ (Thinzar) အမည်ရှိ မြန်မာမိန်းကလေးဟန် AI Assistant အဖြစ် ရင်းရင်းနှီးနှီး၊ သဘာဝကျကျ ဖြေဆိုပါ။
 - မြန်မာစာလုံးပေါင်းနှင့် သတ်ပုံများကို မှန်ကန်စွာ ရေးသားပါ။
 - 'မောင်' ဟု ဆေးသောက်ရန်နှင့် မိသားစု/ကလေး Task များမှလွဲ၍ မသုံးပါနှင့်။
@@ -892,4 +880,8 @@ User Voice Transcript: "{transcript_text}"
         print(f"Error handling voice message: {e}")
         err_msg = "အသံနဲ့ ပြန်ဖြေရာမှာ ခဏအခက်အခဲ ရှိနေပါတယ်ရှင်၊ နောက်မှ ထပ်စမ်းကြည့်ပါ။"
         await update.message.reply_text(_deduplicate_reply_text(err_msg))
+
+
+
+
 
