@@ -507,7 +507,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user else "Member"
     ) or (user.username if user and user.username else "Member")
 
-    # Group / Supergroup messages -> save to raw_logs for later summary/search
     if chat and chat.type in ("group", "supergroup"):
         chat_title = chat.title or f"Group {chat.id}"
         text_content = (update.message.text or update.message.caption or "").strip()
@@ -540,7 +539,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_group_message(chat.id, chat_title, sender_name, text_content)
         return
 
-    # Private chat with admin user only
     if user_id != ADMIN_USER_ID:
         return
 
@@ -675,7 +673,7 @@ def main():
     _start_port_server()
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    asyncio.set_loop(loop)
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
