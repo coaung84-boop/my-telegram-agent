@@ -21,6 +21,28 @@ gemini_clients = [genai.Client(api_key=k) for k in GEMINI_API_KEYS if k]
 gemini_client = gemini_clients[0] if gemini_clients else genai.Client(api_key=GEMINI_API_KEY)
 groq_client = Groq(api_key=GROQ_API_KEY)
 
+_GEMINI_RR_INDEX = 0
+
+
+def _ordered_gemini_clients() -> list:
+    """Gemini client များကို request အလိုက် တလှည့်စီ (round-robin) ပြန်ပေးသည်။"""
+    global _GEMINI_RR_INDEX
+    base = gemini_clients or ([gemini_client] if gemini_client else [])
+    if not base:
+        return []
+    n = len(base)
+    idx = _GEMINI_RR_INDEX % n
+    _GEMINI_RR_INDEX = (_GEMINI_RR_INDEX + 1) % n
+    return base[idx:] + base[:idx]
+
+
+def _trim_fallback_prompt(prompt_text, max_chars: int = 4000) -> str:
+    """Tier 3 fallback တွင် request too large မဖြစ်စေရန် prompt ကို ချုံ့ပေးသည်။"""
+    txt = str(prompt_text or "")
+    if len(txt) <= max_chars:
+        return txt
+    return txt[-max_chars:]
+
 
 def _clean_thinzar_voice(text: str) -> str:
     """Fallback model များက ယောက်ျားလေးအသုံးအနှုန်း၊ ထိုင်းစာလုံး သို့မဟုတ် သတ်ပုံအမှား ရောမိရင် သန့်ရှင်းပေးသည်။"""
@@ -65,8 +87,8 @@ def call_ai_with_3tier_fallback(
         tools=tools,
     )
 
-    # Tier 1: Gemini 3.5 Flash-Lite (with secondary key failover)
-    clients_to_try = gemini_clients or ([gemini_client] if gemini_client else [])
+    # Tier 1: Gemini 3.5 Flash-Lite (round-robin across keys)
+    clients_to_try = _ordered_gemini_clients()
     for key_idx, g_client in enumerate(clients_to_try):
         for attempt in range(2):
             try:
@@ -87,7 +109,7 @@ def call_ai_with_3tier_fallback(
                 if attempt == 0:
                     time.sleep(1.0)
 
-    # Tier 2: Gemini 3.8 Flash (with secondary key failover)
+    # Tier 2: Gemini 3.8 Flash (round-robin across keys)
     for key_idx, g_client in enumerate(clients_to_try):
         try:
             response = g_client.models.generate_content(
@@ -168,6 +190,10 @@ def call_ai_with_3tier_fallback(
 
     debug_tail = "\n".join(errors[-3:])
     return f"လောလောဆယ် AI ဆာဗာ ခဏအလုပ်များနေပါတယ်ရှင်၊ ခဏနေပြီး ထပ်စမ်းကြည့်ပေးပါ:\n{debug_tail}"
+
+
+
+
 
 
 
