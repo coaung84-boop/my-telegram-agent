@@ -2,7 +2,7 @@ import os
 import asyncio
 import threading
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -125,6 +125,7 @@ async def consume_pending_task_input(update: Update, context: ContextTypes.DEFAU
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
         self.wfile.write(b"OK")
 
@@ -134,7 +135,7 @@ class _HealthHandler(BaseHTTPRequestHandler):
 
 def _start_port_server():
     port = int(os.environ.get("PORT", "10000"))
-    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), _HealthHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
 
@@ -158,7 +159,7 @@ def _build_skills_menu_keyboard() -> InlineKeyboardMarkup:
 
 # --- Command Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_user or update.effective_user.id != ADMIN_USER_ID:
+    if not update.message or not update.effective_user or update.effective_user.id != ADMIN_USER_ID:
         return
     await update.message.reply_text(
         "မင်္ဂလာပါရှင်! သင်ဇာ (Thinzar) ရောက်ပါပြီ\n"
@@ -176,13 +177,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_user or update.effective_user.id != ADMIN_USER_ID:
+    if not update.message or not update.effective_user or update.effective_user.id != ADMIN_USER_ID:
         return
     await send_smart_task_list(update, context, show_done=False)
 
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_user or update.effective_user.id != ADMIN_USER_ID:
+    if not update.message or not update.effective_user or update.effective_user.id != ADMIN_USER_ID:
         return
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     summary_text = handle_news_command(update.message.text or "/news")
@@ -190,7 +191,7 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def skills_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_user or update.effective_user.id != ADMIN_USER_ID:
+    if not update.message or not update.effective_user or update.effective_user.id != ADMIN_USER_ID:
         return
     await update.message.reply_text(
         "⚙️ Core Rules စီမံရန် ရွေးချယ်ပါရှင်:",
@@ -199,7 +200,7 @@ async def skills_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def setrule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_user or update.effective_user.id != ADMIN_USER_ID:
+    if not update.message or not update.effective_user or update.effective_user.id != ADMIN_USER_ID:
         return
     raw = (update.message.text or "").strip()
     parts = raw.split(maxsplit=1)
@@ -311,7 +312,7 @@ async def handle_rule_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_user or update.effective_user.id != ADMIN_USER_ID:
+    if not update.message or not update.effective_user or update.effective_user.id != ADMIN_USER_ID:
         return
     groups = get_available_group_names()
     if not groups:
@@ -324,7 +325,7 @@ async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def groupsummary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_user or update.effective_user.id != ADMIN_USER_ID:
+    if not update.message or not update.effective_user or update.effective_user.id != ADMIN_USER_ID:
         return
     kb = InlineKeyboardMarkup([
         [
@@ -400,7 +401,7 @@ async def handle_groupsummary_callback(update: Update, context: ContextTypes.DEF
 
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_user or update.effective_user.id != ADMIN_USER_ID:
+    if not update.message or not update.effective_user or update.effective_user.id != ADMIN_USER_ID:
         return
     await update.message.reply_text(
         "📋 Command Menu:\n"
@@ -647,23 +648,36 @@ Latest User Message: "{user_text}"
 
 
 async def post_init(application):
-    await application.bot.set_my_commands([
-        BotCommand("start", "စတင်ရန်"),
-        BotCommand("menu", "Menu စာရင်းကြည့်ရန်"),
-        BotCommand("tasks", "လက်ရှိ Task စာရင်း"),
-        BotCommand("groups", "Group ရွေးပြီး Report ထုတ်ရန်"),
-        BotCommand("groupsummary", "Group Summary (Today/Yesterday)"),
-        BotCommand("news", "သတင်းအနှစ်ချုပ်"),
-        BotCommand("skills", "Core Rules (ကြည့်/ပြင်/ထည့်)"),
-        BotCommand("patch", "GitHub ဖိုင် patch လုပ်ရန်"),
-        BotCommand("getfile", "GitHub ဖိုင်ဆွဲချရန်"),
-    ])
-    await notify_render_deploy_if_pending(application)
+    try:
+        await application.bot.set_my_commands([
+            BotCommand("start", "စတင်ရန်"),
+            BotCommand("menu", "Menu စာရင်းကြည့်ရန်"),
+            BotCommand("tasks", "လက်ရှိ Task စာရင်း"),
+            BotCommand("groups", "Group ရွေးပြီး Report ထုတ်ရန်"),
+            BotCommand("groupsummary", "Group Summary (Today/Yesterday)"),
+            BotCommand("news", "သတင်းအနှစ်ချုပ်"),
+            BotCommand("skills", "Core Rules (ကြည့်/ပြင်/ထည့်)"),
+            BotCommand("patch", "GitHub ဖိုင် patch လုပ်ရန်"),
+            BotCommand("getfile", "GitHub ဖိုင်ဆွဲချရန်"),
+        ])
+    except Exception as e:
+        print(f"set_my_commands error: {e}")
+
+    try:
+        await notify_render_deploy_if_pending(application)
+    except Exception as e:
+        print(f"notify_render_deploy_if_pending error: {e}")
+
     application.create_task(reminder_loop(application))
 
 
 async def _on_error(update, context):
     print(f"Telegram Bot Error: {context.error}")
+    try:
+        if update and update.effective_message and update.effective_user and update.effective_user.id == ADMIN_USER_ID:
+            await update.effective_message.reply_text("ခဏလေးနော်ရှင်၊ ဖြေကြားရာမှာ အဆင်မပြေမှုလေး ဖြစ်သွားလို့ ထပ်စမ်းကြည့်ပေးပါဦး။")
+    except Exception:
+        pass
 
 
 def main():
@@ -699,6 +713,7 @@ def main():
 
     print("သင်ဇာ (Thinzar) Telegram Bot is starting...")
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
