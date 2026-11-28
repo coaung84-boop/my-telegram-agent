@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 import threading
 from datetime import datetime
@@ -709,7 +710,6 @@ def _build_application():
 async def _run_bot_async():
     app = _build_application()
     await app.initialize()
-    await post_init(app)
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
     print("သင်ဇာ (Thinzar) Telegram Bot is running...")
@@ -733,6 +733,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
 
 
 
