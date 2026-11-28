@@ -128,12 +128,13 @@ def call_ai_with_3tier_fallback(
         debug_tail = "\n".join(errors[-3:])
         return f"လောလောဆယ် AI ဆာဗာ ခဏအလုပ်များနေပါတယ်ရှင်၊ ခဏနေပြီး ထပ်စမ်းကြည့်ပေးပါ:\n{debug_tail}"
 
-    # Tier 3A: OpenRouter (Qwen 3.8 27B + Free Fallbacks)
+    safe_fallback_prompt = _trim_fallback_prompt(prompt_text, max_chars=4000)
+
+    # Tier 3A: OpenRouter Fallback
     if OPENROUTER_API_KEY:
         openrouter_models = [
-            "qwen/qwen3.8-27b",
+            "openrouter/free",
             "google/gemma-4-31b-it:free",
-            "meta-llama/llama-3.3-70b-instruct:free",
         ]
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -145,7 +146,7 @@ def call_ai_with_3tier_fallback(
                     "model": or_model,
                     "messages": [
                         {"role": "system", "content": STRICT_MYANMAR_SYSTEM},
-                        {"role": "user", "content": prompt_text},
+                        {"role": "user", "content": safe_fallback_prompt},
                     ],
                     "temperature": 0.4,
                 }
@@ -167,15 +168,15 @@ def call_ai_with_3tier_fallback(
                 print(err_msg)
                 errors.append(err_msg)
 
-    # Tier 3B: Groq (Qwen 3.8 27B + Active Fallback)
-    groq_models = ["qwen/qwen3.8-27b", "llama-3.1-8b-instant"]
+    # Tier 3B: Groq Fallback
+    groq_models = ["llama-3.3-70b-versatile"]
     for g_model in groq_models:
         try:
             completion = groq_client.with_options(timeout=12.0).chat.completions.create(
                 model=g_model,
                 messages=[
                     {"role": "system", "content": STRICT_MYANMAR_SYSTEM},
-                    {"role": "user", "content": prompt_text},
+                    {"role": "user", "content": safe_fallback_prompt},
                 ],
                 temperature=0.4,
             )
@@ -190,6 +191,10 @@ def call_ai_with_3tier_fallback(
 
     debug_tail = "\n".join(errors[-3:])
     return f"လောလောဆယ် AI ဆာဗာ ခဏအလုပ်များနေပါတယ်ရှင်၊ ခဏနေပြီး ထပ်စမ်းကြည့်ပေးပါ:\n{debug_tail}"
+
+
+
+
 
 
 
