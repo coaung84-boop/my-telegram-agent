@@ -76,9 +76,9 @@ def _category_label_mm(category: str | None) -> str:
     cat = (category or "general").strip().lower()
     mapping = {
         "health": "🩺 ကျန်းမာရေး",
-        "family": "👨‍👩‍👧 မိသားစု",
-        "မိသားစု": "👨‍👩‍👧 မိသားစု",
-        "ကလေး": "👨‍👩‍👧 မိသားစု",
+        "family": "👨 👩 👧 မိသားစု",
+        "မိသားစု": "👨 👩 👧 မိသားစု",
+        "ကလေး": "👨 👩 👧 မိသားစု",
         "work": "💼 လုပ်ငန်း",
         "အလုပ်": "💼 လုပ်ငန်း",
         "ရုံး": "💼 လုပ်ငန်း",
@@ -424,8 +424,7 @@ def handle_task_intent(user_text: str, route: dict) -> str:
     now = datetime.now(MM_TZ)
 
     if action == "LIST":
-        txt, _ = _build_task_list_payload(show_done=False)
-        return txt
+        return "ဘယ် task ကို ဆိုလိုတာလဲရှင်၊ Task နာမည်လေး ဒါမှမဟုတ် ဘာလုပ်ချင်လဲ ပြောပြပေးပါလားနော်။"
 
     if action == "DONE":
         tid = route.get("task_id")
@@ -646,3 +645,7 @@ async def consume_pending_task_input(update: Update, context: ContextTypes.DEFAU
     list_txt, markup = _build_task_list_payload(show_done=cur_show_done)
     await msg.reply_text(list_txt, reply_markup=markup)
     return True
+
+
+
+
