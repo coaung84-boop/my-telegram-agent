@@ -6,6 +6,8 @@ load_dotenv()
 
 # AI & Search Clients Initialization
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2")
+GEMINI_API_KEYS = [k.strip() for k in [GEMINI_API_KEY, GEMINI_API_KEY_2] if k and k.strip()]
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
